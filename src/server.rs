@@ -30,6 +30,7 @@ impl LanguageServer for Backend {
         }
 
         Ok(InitializeResult {
+            offset_encoding: None,
             capabilities: ServerCapabilities {
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
@@ -48,6 +49,7 @@ impl LanguageServer for Backend {
                     work_done_progress_options: WorkDoneProgressOptions {
                         work_done_progress: None,
                     },
+                    completion_item: None,
                 }),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,

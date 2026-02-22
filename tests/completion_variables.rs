@@ -15122,3 +15122,572 @@ async fn test_completion_param_same_name_cursor_in_first_method() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+/// Test that union completion sorts intersection members (shared by all
+/// types) above branch-only members (present on a subset of types).
+#[tokio::test]
+async fn test_completion_union_sort_intersection_above_branch_only() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///union_sort.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Dog {\n",
+        "    public function bark(): void {}\n",
+        "    public function eat(): void {}\n",
+        "    public function sleep(): void {}\n",
+        "}\n",
+        "class Cat {\n",
+        "    public function meow(): void {}\n",
+        "    public function eat(): void {}\n",
+        "    public function sleep(): void {}\n",
+        "}\n",
+        "class Zoo {\n",
+        "    public function getAnimal(): Dog|Cat { return new Dog(); }\n",
+        "    public function run(): void {\n",
+        "        $pet = $this->getAnimal();\n",
+        "        $pet->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 15,
+                character: 14,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(result.is_some(), "Should return union completion results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            // Intersection members: eat, sleep (on both Dog and Cat)
+            let eat = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("eat"))
+                .unwrap();
+            let sleep = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("sleep"))
+                .unwrap();
+            // Branch-only members: bark (Dog only), meow (Cat only)
+            let bark = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("bark"))
+                .unwrap();
+            let meow = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("meow"))
+                .unwrap();
+
+            // Intersection sort_text should start with "0_"
+            assert!(
+                eat.sort_text.as_deref().unwrap().starts_with("0_"),
+                "Intersection member 'eat' should have sort prefix '0_', got: {:?}",
+                eat.sort_text
+            );
+            assert!(
+                sleep.sort_text.as_deref().unwrap().starts_with("0_"),
+                "Intersection member 'sleep' should have sort prefix '0_', got: {:?}",
+                sleep.sort_text
+            );
+
+            // Branch-only sort_text should start with "1_"
+            assert!(
+                bark.sort_text.as_deref().unwrap().starts_with("1_"),
+                "Branch-only member 'bark' should have sort prefix '1_', got: {:?}",
+                bark.sort_text
+            );
+            assert!(
+                meow.sort_text.as_deref().unwrap().starts_with("1_"),
+                "Branch-only member 'meow' should have sort prefix '1_', got: {:?}",
+                meow.sort_text
+            );
+
+            // All intersection members should sort before all branch-only
+            let eat_sort = eat.sort_text.as_deref().unwrap();
+            let sleep_sort = sleep.sort_text.as_deref().unwrap();
+            let bark_sort = bark.sort_text.as_deref().unwrap();
+            let meow_sort = meow.sort_text.as_deref().unwrap();
+            assert!(
+                eat_sort < bark_sort && eat_sort < meow_sort,
+                "Intersection 'eat' ({}) should sort before branch-only 'bark' ({}) and 'meow' ({})",
+                eat_sort,
+                bark_sort,
+                meow_sort
+            );
+            assert!(
+                sleep_sort < bark_sort && sleep_sort < meow_sort,
+                "Intersection 'sleep' ({}) should sort before branch-only 'bark' ({}) and 'meow' ({})",
+                sleep_sort,
+                bark_sort,
+                meow_sort
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Test that branch-only members in a union get `label_details.description`
+/// showing the originating class, while intersection members do not.
+#[tokio::test]
+async fn test_completion_union_branch_only_has_label_details() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///union_label_details.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Truck {\n",
+        "    public function haul(): void {}\n",
+        "    public function drive(): void {}\n",
+        "}\n",
+        "class Sedan {\n",
+        "    public function park(): void {}\n",
+        "    public function drive(): void {}\n",
+        "}\n",
+        "class Garage {\n",
+        "    public function getVehicle(): Truck|Sedan { return new Truck(); }\n",
+        "    public function demo(): void {\n",
+        "        $v = $this->getVehicle();\n",
+        "        $v->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 13,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(result.is_some(), "Should return union completion results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            // Intersection member: drive (on both)
+            let drive = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("drive"))
+                .unwrap();
+            // Branch-only members
+            let haul = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("haul"))
+                .unwrap();
+            let park = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("park"))
+                .unwrap();
+
+            // Intersection members should NOT have label_details
+            assert!(
+                drive.label_details.is_none(),
+                "Intersection member 'drive' should not have label_details, got: {:?}",
+                drive.label_details
+            );
+
+            // Branch-only members SHOULD have label_details with class name
+            let haul_desc = haul
+                .label_details
+                .as_ref()
+                .and_then(|ld| ld.description.as_deref());
+            assert_eq!(
+                haul_desc,
+                Some("Truck"),
+                "Branch-only 'haul' should show 'Truck' in label_details, got: {:?}",
+                haul.label_details
+            );
+
+            let park_desc = park
+                .label_details
+                .as_ref()
+                .and_then(|ld| ld.description.as_deref());
+            assert_eq!(
+                park_desc,
+                Some("Sedan"),
+                "Branch-only 'park' should show 'Sedan' in label_details, got: {:?}",
+                park.label_details
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When only a single class is resolved (no union), sort_text should
+/// remain as-is (no "0_"/"1_" prefixing) and no label_details are added.
+#[tokio::test]
+async fn test_completion_single_class_no_union_sort_adjustment() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///no_union.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Widget {\n",
+        "    public function render(): void {}\n",
+        "    public function update(): void {}\n",
+        "}\n",
+        "class App {\n",
+        "    public function test(): void {\n",
+        "        $w = new Widget();\n",
+        "        $w->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 8,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(result.is_some(), "Should return completion results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let render = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("render"))
+                .unwrap();
+            let update = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("update"))
+                .unwrap();
+
+            // sort_text should NOT have "0_" or "1_" prefix
+            assert!(
+                !render.sort_text.as_deref().unwrap().starts_with("0_"),
+                "Single-class completion should not use union sort prefix, got: {:?}",
+                render.sort_text
+            );
+            assert!(
+                !update.sort_text.as_deref().unwrap().starts_with("1_"),
+                "Single-class completion should not use union sort prefix, got: {:?}",
+                update.sort_text
+            );
+
+            // No label_details should be set
+            assert!(
+                render.label_details.is_none(),
+                "Single-class completion should not have label_details"
+            );
+            assert!(
+                update.label_details.is_none(),
+                "Single-class completion should not have label_details"
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Test union sorting with three types: members shared by all three sort
+/// first, members shared by two sort after, and members unique to one
+/// sort last. All branch-only items share the same "1_" prefix tier.
+#[tokio::test]
+async fn test_completion_union_three_types_sort() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///union_three.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class A {\n",
+        "    public function shared(): void {}\n",
+        "    public function onlyA(): void {}\n",
+        "}\n",
+        "class B {\n",
+        "    public function shared(): void {}\n",
+        "    public function onlyB(): void {}\n",
+        "}\n",
+        "class C {\n",
+        "    public function shared(): void {}\n",
+        "    public function onlyC(): void {}\n",
+        "}\n",
+        "class Demo {\n",
+        "    /** @return A|B|C */\n",
+        "    public function get() {}\n",
+        "    public function test(): void {\n",
+        "        $x = $this->get();\n",
+        "        $x->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 18,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(result.is_some(), "Should return union completion results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let shared = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("shared"))
+                .unwrap();
+            let only_a = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("onlyA"))
+                .unwrap();
+            let only_b = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("onlyB"))
+                .unwrap();
+            let only_c = items
+                .iter()
+                .find(|i| i.filter_text.as_deref() == Some("onlyC"))
+                .unwrap();
+
+            // shared is on all 3 — intersection
+            assert!(
+                shared.sort_text.as_deref().unwrap().starts_with("0_"),
+                "'shared' (on all 3) should be intersection, got: {:?}",
+                shared.sort_text
+            );
+
+            // onlyA, onlyB, onlyC are branch-only
+            assert!(
+                only_a.sort_text.as_deref().unwrap().starts_with("1_"),
+                "'onlyA' should be branch-only, got: {:?}",
+                only_a.sort_text
+            );
+            assert!(
+                only_b.sort_text.as_deref().unwrap().starts_with("1_"),
+                "'onlyB' should be branch-only, got: {:?}",
+                only_b.sort_text
+            );
+            assert!(
+                only_c.sort_text.as_deref().unwrap().starts_with("1_"),
+                "'onlyC' should be branch-only, got: {:?}",
+                only_c.sort_text
+            );
+
+            // Intersection sorts before branch-only
+            assert!(
+                shared.sort_text.as_deref().unwrap() < only_a.sort_text.as_deref().unwrap(),
+                "'shared' should sort before 'onlyA'"
+            );
+
+            // No label_details on intersection member
+            assert!(
+                shared.label_details.is_none(),
+                "'shared' should not have label_details"
+            );
+
+            // label_details on branch-only members
+            assert!(
+                only_a
+                    .label_details
+                    .as_ref()
+                    .and_then(|ld| ld.description.as_deref())
+                    == Some("A"),
+                "'onlyA' label_details should be 'A', got: {:?}",
+                only_a.label_details
+            );
+            assert!(
+                only_b
+                    .label_details
+                    .as_ref()
+                    .and_then(|ld| ld.description.as_deref())
+                    == Some("B"),
+                "'onlyB' label_details should be 'B', got: {:?}",
+                only_b.label_details
+            );
+            assert!(
+                only_c
+                    .label_details
+                    .as_ref()
+                    .and_then(|ld| ld.description.as_deref())
+                    == Some("C"),
+                "'onlyC' label_details should be 'C', got: {:?}",
+                only_c.label_details
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Test that union sorting also applies to properties, not just methods.
+#[tokio::test]
+async fn test_completion_union_sort_properties() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///union_props.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Circle {\n",
+        "    public string $color;\n",
+        "    public float $radius;\n",
+        "}\n",
+        "class Square {\n",
+        "    public string $color;\n",
+        "    public float $side;\n",
+        "}\n",
+        "class Canvas {\n",
+        "    /** @return Circle|Square */\n",
+        "    public function getShape() {}\n",
+        "    public function draw(): void {\n",
+        "        $s = $this->getShape();\n",
+        "        $s->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(result.is_some(), "Should return union completion results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            // Shared property: color
+            let color = items.iter().find(|i| i.label == "color").unwrap();
+            // Branch-only properties: radius (Circle), side (Square)
+            let radius = items.iter().find(|i| i.label == "radius").unwrap();
+            let side = items.iter().find(|i| i.label == "side").unwrap();
+
+            assert!(
+                color.sort_text.as_deref().unwrap().starts_with("0_"),
+                "Shared property 'color' should be intersection, got: {:?}",
+                color.sort_text
+            );
+            assert!(
+                radius.sort_text.as_deref().unwrap().starts_with("1_"),
+                "Branch-only 'radius' should have '1_' prefix, got: {:?}",
+                radius.sort_text
+            );
+            assert!(
+                side.sort_text.as_deref().unwrap().starts_with("1_"),
+                "Branch-only 'side' should have '1_' prefix, got: {:?}",
+                side.sort_text
+            );
+
+            // Intersection sorts before branch-only
+            assert!(
+                color.sort_text.as_deref().unwrap() < radius.sort_text.as_deref().unwrap(),
+                "'color' should sort before 'radius'"
+            );
+            assert!(
+                color.sort_text.as_deref().unwrap() < side.sort_text.as_deref().unwrap(),
+                "'color' should sort before 'side'"
+            );
+
+            // label_details on branch-only properties
+            assert!(
+                color.label_details.is_none(),
+                "'color' should not have label_details"
+            );
+            assert!(
+                radius
+                    .label_details
+                    .as_ref()
+                    .and_then(|ld| ld.description.as_deref())
+                    == Some("Circle"),
+                "'radius' label_details should be 'Circle', got: {:?}",
+                radius.label_details
+            );
+            assert!(
+                side.label_details
+                    .as_ref()
+                    .and_then(|ld| ld.description.as_deref())
+                    == Some("Square"),
+                "'side' label_details should be 'Square', got: {:?}",
+                side.label_details
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

@@ -727,9 +727,10 @@ class ExpressionTypeDemo
             'brands'  => new ElasticBrandIndexService(),
             default   => null,
         };
-        $service->index();                // on both classes
-        $service->reindex();              // ElasticProductReviewIndexService only
-        $service->bulkDelete([]);         // ElasticBrandIndexService only
+        // Shared members (intersection) sort above branch-only members:
+        $service->index();                // on both — sorted first
+        $service->reindex();              // ElasticProductReviewIndexService only — sorted after
+        $service->bulkDelete([]);         // ElasticBrandIndexService only — sorted after
     }
 
     public function ternaryExpr(bool $flag): void
@@ -737,8 +738,8 @@ class ExpressionTypeDemo
         $svc = $flag
             ? new ElasticProductReviewIndexService()
             : new ElasticBrandIndexService();
-        $svc->index();                    // on both
-        $svc->reindex();                  // only one branch
+        $svc->index();                    // on both — sorted first
+        $svc->reindex();                  // only one branch — sorted after
     }
 
     public function nullCoalescing(): void

@@ -8,6 +8,122 @@ long-tail polish.
 
 ---
 
+## Completion & Go-to-Definition Gaps
+
+### Competitive parity (close the gap with PHPStorm / Intelephense)
+
+#### 32. No namespace-segment completion in `use` import statements
+
+When typing `use App\Models\`, the class name completion path offers
+full class FQNs that match the prefix. It does not offer intermediate
+namespace segments as standalone suggestions (e.g. offering `Models\`
+as a navigable segment when typing `use App\`).
+
+Most PHP LSPs show namespace segments as folder-like completions so the
+user can incrementally drill into the namespace tree. PHPantom jumps
+straight to full class names, which works but can be overwhelming in
+large projects with deep namespace hierarchies.
+
+---
+
+#### 21. No reverse jump: implementation → interface method declaration
+
+Go-to-implementation lets you jump from an interface method to its concrete
+implementations, but there is no way to jump from a concrete implementation
+*back* to the interface or abstract method it satisfies.  For example,
+clicking `handle()` in a class that `implements Handler` cannot jump to
+`Handler::handle()`.
+
+This would be a natural extension of `find_declaring_class` in
+`definition/member.rs`: when the cursor is on a method *definition* (not
+a call), check whether any implemented interface or parent abstract class
+declares a method with the same name, and offer that as a definition
+target.
+
+---
+
+### Remaining by user need
+
+#### 27. No completion inside string interpolation
+
+Inside double-quoted strings with variable interpolation, member access
+completion does not work. PHP supports `"Hello $user->name"` and
+`"Hello {$user->getName()}"`, but the completion handler has no
+string-interpolation awareness. The subject extraction may accidentally
+work in trivial cases but is not reliable because the surrounding quote
+characters can confuse offset calculation and the patched content.
+
+```php
+$greeting = "Hello {$user->}";
+//                         ^ no completion
+```
+
+---
+
+#### 34 / 36. No go-to-definition for built-in (stub) functions and constants
+
+Clicking on a built-in function name like `array_map`, `strlen`, or
+`json_decode` does not navigate anywhere. `resolve_function_definition`
+finds the function in `stub_function_index` and caches it under a
+synthetic `phpantom-stub-fn://` URI, but then explicitly skips navigation
+because the URI is not a real file path. The same applies to built-in
+constants like `PHP_EOL`, `SORT_ASC`, `PHP_INT_MAX` — they exist in
+`stub_constant_index` for completion but `resolve_constant_definition`
+only checks `global_defines`.
+
+User-defined functions and `define()` constants work correctly. Only
+built-in PHP symbols from stubs are affected.
+
+**Fix:** either embed the stub source files as navigable resources (e.g.
+write them to a temporary directory and use real file URIs), or accept
+that stub go-to-definition is out of scope and document it as a known
+limitation.
+
+---
+
+#### 33. Generator yield type not inferred inside generator bodies
+
+When a method is annotated `@return Generator<int, User>`, the yield
+value type (`User`) is correctly extracted when iterating the generator
+with `foreach`. However, *inside* the generator body itself, there is
+no inference from the declared return type back to the yielded values.
+
+```php
+class UserRepository {
+    /** @return \Generator<int, User> */
+    public function findAll(): \Generator {
+        // Inside this body, `$user` should be typed as User
+        // based on the Generator return annotation, but it isn't.
+        yield $user;
+        $user->  // ← no completion
+    }
+}
+```
+
+This is a niche scenario (the developer writing the generator usually
+knows the types), but it would help when the generator body grows large
+and variables are passed around before being yielded.
+
+---
+
+## Go-to-Implementation Gaps
+
+### 5b. Short-name collisions in `find_implementors`
+**Priority: Low**
+
+`class_implements_or_extends` matches interfaces by both short name and
+FQN (`iface_short == target_short || iface == target_fqn`).  Two
+interfaces in different namespaces with the same short name (e.g.
+`App\Logger` and `Vendor\Logger`) could produce false positives.
+Similarly, `seen_names` in `find_implementors` deduplicates by short
+name, so two classes with the same short name in different namespaces
+could shadow each other.
+
+**Fix:** always compare fully-qualified names by resolving both sides
+before comparison.
+
+---
+
 ## Composer Environment Detection & Warnings
 
 ### 37. Warn when composer.json is missing or classmap is not optimized
@@ -132,143 +248,6 @@ supports glob patterns like `**/vendor/composer/autoload_*.php`.
 - Log the reload to the output panel so the user knows it happened.
 - Debounce rapid changes (Composer writes multiple files in sequence)
   with a short delay (e.g. 500ms) to avoid redundant reloads.
-
----
-
-## Completion & Go-to-Definition Gaps
-
-### Competitive parity (close the gap with PHPStorm / Intelephense)
-
-#### 32. No namespace-segment completion in `use` import statements
-
-When typing `use App\Models\`, the class name completion path offers
-full class FQNs that match the prefix. It does not offer intermediate
-namespace segments as standalone suggestions (e.g. offering `Models\`
-as a navigable segment when typing `use App\`).
-
-Most PHP LSPs show namespace segments as folder-like completions so the
-user can incrementally drill into the namespace tree. PHPantom jumps
-straight to full class names, which works but can be overwhelming in
-large projects with deep namespace hierarchies.
-
----
-
-#### 21. No reverse jump: implementation → interface method declaration
-
-Go-to-implementation lets you jump from an interface method to its concrete
-implementations, but there is no way to jump from a concrete implementation
-*back* to the interface or abstract method it satisfies.  For example,
-clicking `handle()` in a class that `implements Handler` cannot jump to
-`Handler::handle()`.
-
-This would be a natural extension of `find_declaring_class` in
-`definition/member.rs`: when the cursor is on a method *definition* (not
-a call), check whether any implemented interface or parent abstract class
-declares a method with the same name, and offer that as a definition
-target.
-
----
-
-### Remaining by user need
-
-#### 27. No completion inside string interpolation
-
-Inside double-quoted strings with variable interpolation, member access
-completion does not work. PHP supports `"Hello $user->name"` and
-`"Hello {$user->getName()}"`, but the completion handler has no
-string-interpolation awareness. The subject extraction may accidentally
-work in trivial cases but is not reliable because the surrounding quote
-characters can confuse offset calculation and the patched content.
-
-```php
-$greeting = "Hello {$user->}";
-//                         ^ no completion
-```
-
----
-
-#### 34 / 36. No go-to-definition for built-in (stub) functions and constants
-
-Clicking on a built-in function name like `array_map`, `strlen`, or
-`json_decode` does not navigate anywhere. `resolve_function_definition`
-finds the function in `stub_function_index` and caches it under a
-synthetic `phpantom-stub-fn://` URI, but then explicitly skips navigation
-because the URI is not a real file path. The same applies to built-in
-constants like `PHP_EOL`, `SORT_ASC`, `PHP_INT_MAX` — they exist in
-`stub_constant_index` for completion but `resolve_constant_definition`
-only checks `global_defines`.
-
-User-defined functions and `define()` constants work correctly. Only
-built-in PHP symbols from stubs are affected.
-
-**Fix:** either embed the stub source files as navigable resources (e.g.
-write them to a temporary directory and use real file URIs), or accept
-that stub go-to-definition is out of scope and document it as a known
-limitation.
-
----
-
-#### 33. Generator yield type not inferred inside generator bodies
-
-When a method is annotated `@return Generator<int, User>`, the yield
-value type (`User`) is correctly extracted when iterating the generator
-with `foreach`. However, *inside* the generator body itself, there is
-no inference from the declared return type back to the yielded values.
-
-```php
-class UserRepository {
-    /** @return \Generator<int, User> */
-    public function findAll(): \Generator {
-        // Inside this body, `$user` should be typed as User
-        // based on the Generator return annotation, but it isn't.
-        yield $user;
-        $user->  // ← no completion
-    }
-}
-```
-
-This is a niche scenario (the developer writing the generator usually
-knows the types), but it would help when the generator body grows large
-and variables are passed around before being yielded.
-
----
-
-#### 35. Union completion: sort intersection members above branch-only members
-
-When a variable has a union type (e.g. `User|AdminUser` from a match or
-ternary), the completion list shows all members from all types (see
-"Union Type Completion" in ARCHITECTURE.md for the design rationale).
-Members that only exist on a subset of the union already display the
-originating class in the `detail` field, but nothing else distinguishes
-them from members shared by all types.
-
-A small UX improvement: after collecting all completion items, do a
-post-processing pass that counts how many of the resolved classes each
-member appeared on. Members present on all types (the intersection)
-would keep their current sort position. Members present on only some
-types would be sorted lower via `sort_text` and could get a marker in
-`label_details` (e.g. the originating class name as a suffix).
-
-This keeps everything visible (no completions are removed) but nudges
-the developer toward type-safe choices first.
-
----
-
-## Go-to-Implementation Gaps
-
-### 5b. Short-name collisions in `find_implementors`
-**Priority: Low**
-
-`class_implements_or_extends` matches interfaces by both short name and
-FQN (`iface_short == target_short || iface == target_fqn`).  Two
-interfaces in different namespaces with the same short name (e.g.
-`App\Logger` and `Vendor\Logger`) could produce false positives.
-Similarly, `seen_names` in `find_implementors` deduplicates by short
-name, so two classes with the same short name in different namespaces
-could shadow each other.
-
-**Fix:** always compare fully-qualified names by resolving both sides
-before comparison.
 
 ---
 

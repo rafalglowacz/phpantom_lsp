@@ -621,6 +621,10 @@ impl Backend {
             // deduplicating by label so ambiguous variables show
             // the union of all possible members.
             let mut all_items: Vec<CompletionItem> = Vec::new();
+            let num_candidates = candidates.len();
+            // Track how many candidate classes contributed each label
+            // so we can distinguish intersection vs branch-only members.
+            let mut occurrence_count: HashMap<String, usize> = HashMap::new();
             let current_class_name = current_class.map(|cc| cc.name.as_str());
             for target_class in &candidates {
                 let merged = Self::resolve_class_with_inheritance(target_class, &class_loader);
@@ -668,6 +672,7 @@ impl Backend {
                         .iter_mut()
                         .find(|existing| existing.label == item.label)
                     {
+                        *occurrence_count.entry(existing.label.clone()).or_insert(1) += 1;
                         // Merge class names into the detail so the user
                         // sees which types provide this member (e.g.
                         // "User | AdminUser" for shared members vs
@@ -695,10 +700,71 @@ impl Backend {
                             }
                         }
                     } else {
+                        occurrence_count.insert(item.label.clone(), 1);
                         all_items.push(item);
                     }
                 }
             }
+
+            // ── Union sort: intersection members above branch-only ──
+            //
+            // When the variable has a union type (multiple candidates),
+            // members present on ALL types are more likely to be
+            // type-safe. Sort them above members that exist on only a
+            // subset of the union. Branch-only members also get a
+            // `label_details` description showing which class(es) they
+            // come from, giving an at-a-glance visual hint in the popup.
+            if num_candidates > 1 {
+                // Partition into intersection and branch-only, each
+                // sorted alphabetically by filter_text / label.
+                let sort_key = |item: &CompletionItem| -> String {
+                    item.filter_text
+                        .as_deref()
+                        .unwrap_or(&item.label)
+                        .to_lowercase()
+                };
+                let mut intersection: Vec<CompletionItem> = Vec::new();
+                let mut branch_only: Vec<CompletionItem> = Vec::new();
+                for item in all_items {
+                    let count = occurrence_count.get(&item.label).copied().unwrap_or(1);
+                    if count >= num_candidates {
+                        intersection.push(item);
+                    } else {
+                        branch_only.push(item);
+                    }
+                }
+                intersection.sort_by_key(|item| sort_key(item));
+                branch_only.sort_by_key(|item| sort_key(item));
+
+                // Assign sort_text: "0_NNNNN" for intersection,
+                // "1_NNNNN" for branch-only.
+                all_items = Vec::with_capacity(intersection.len() + branch_only.len());
+                for (i, mut item) in intersection.into_iter().enumerate() {
+                    item.sort_text = Some(format!("0_{:05}", i));
+                    all_items.push(item);
+                }
+                for (i, mut item) in branch_only.into_iter().enumerate() {
+                    item.sort_text = Some(format!("1_{:05}", i));
+                    // Add label_details showing the originating class(es)
+                    // so the user can tell at a glance which branch
+                    // provides this member.
+                    if let Some(ref detail) = item.detail {
+                        let em_dash = " \u{2014} ";
+                        let class_names = detail
+                            .strip_prefix("Class: ")
+                            .map(|r| r.split(em_dash).next().unwrap_or(r))
+                            .unwrap_or("");
+                        if !class_names.is_empty() {
+                            item.label_details = Some(CompletionItemLabelDetails {
+                                detail: None,
+                                description: Some(class_names.to_string()),
+                            });
+                        }
+                    }
+                    all_items.push(item);
+                }
+            }
+
             all_items
         }));
 
