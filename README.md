@@ -21,6 +21,7 @@ PHPantom focuses on completion and go-to-definition and aims to do them really w
 | Array shape inference | ✅ | ❌ | ✅ | ❌ | 🚧 |
 | Object shape completion | ✅ | ❌ | ✅ | ❌ | 🚧 |
 | `@phpstan-type` aliases | ✅ | ❌ | 🚧 | ❌ | ❌ |
+| Generator body types | 🚧 | ❌ | 🚧 | ❌ | ❌ |
 | Hover | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Signature help | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Find references | ❌ | ✅ | ✅ | ✅ | ✅ |

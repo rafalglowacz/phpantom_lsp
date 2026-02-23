@@ -51,6 +51,65 @@ limitation.
 
 ---
 
+#### 33a. Generator yield inference gaps inside generator bodies
+
+The basic generator yield inference (item 33) is implemented, but
+several edge cases do not resolve yet:
+
+**Yield inside control flow.** When `yield $var` appears inside an `if`,
+`foreach`, or other block within the generator body, the variable is not
+inferred outside that block. The text-based body scan finds the yield,
+but the variable resolution pipeline does not connect it back to the
+outer scope.
+
+```php
+/** @return \Generator<int, User> */
+public function filteredUsers(): \Generator {
+    if (true) {
+        yield $user;
+    }
+    $user->  // ← no completion
+}
+```
+
+**Multiple yields with different variable names.** When two separate
+variables are yielded in the same generator, neither resolves. The
+scan finds both yield statements but the inference does not fire for
+either variable.
+
+```php
+/** @return \Generator<int, User> */
+public function allUsers(): \Generator {
+    yield $first;
+    $first->   // ← no completion
+
+    yield $second;
+    $second->  // ← no completion
+}
+```
+
+**Chaining through a yield-inferred variable.** When a variable gets
+its type from reverse yield inference, chaining a method call on it
+does not resolve the next link. The yield fallback returns the type
+directly from `resolve_variable_in_members` instead of feeding it
+back into the normal subject resolution chain.
+
+```php
+/** @return \Generator<int, User> */
+public function withProfiles(): \Generator {
+    yield $user;
+    $user->getProfile()->  // ← no completion after getProfile()
+}
+```
+
+**TSend inference not consistent across classes.** The `$var = yield`
+pattern resolves in some classes but not others with identical
+structure. Likely a position-dependent issue in
+`find_enclosing_return_type` where the backward scan crosses the
+wrong opening brace.
+
+---
+
 ## Go-to-Implementation Gaps
 
 ### 5b. Short-name collisions in `find_implementors`
