@@ -625,6 +625,70 @@ async fn test_goto_definition_inline_var_docblock_simple() {
     }
 }
 
+/// When the `@var` annotation omits the variable name (`/** @var Type */`),
+/// goto definition should apply the type to the immediately following
+/// assignment and resolve the member correctly.
+#[tokio::test]
+async fn test_goto_definition_inline_var_docblock_no_variable_name() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///varoverride_noname.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                  // 0
+        "class Session {\n",                        // 1
+        "    public function getId(): string {}\n", // 2
+        "    public function flash(): void {}\n",   // 3
+        "}\n",                                      // 4
+        "class Controller {\n",                     // 5
+        "    public function handle() {\n",         // 6
+        "        /** @var Session */\n",            // 7
+        "        $sess = mystery();\n",             // 8
+        "        $sess->flash();\n",                // 9
+        "    }\n",                                  // 10
+        "}\n",                                      // 11
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Click on "flash" on line 9: $sess->flash()
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 9,
+                character: 16,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should resolve $sess->flash() via @var Session annotation (no variable name)"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 3,
+                "flash() is declared on line 3 in Session"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}
+
 /// When the `@var` annotation includes a variable name (`@var Type $var`),
 /// goto definition should still resolve correctly.
 #[tokio::test]

@@ -59,13 +59,25 @@ $user->output;               // @property-read (Renderable interface)
 $user->render();             // @method (Renderable interface)
 
 
+// ── @var Docblock Override ──────────────────────────────────────────────────
+// The variable name in @var is optional. Both forms work for completion and go-to-definition.
+
+/** @var AdminUser $inlineHinted */
+$inlineHinted = getUnknownValue();
+$inlineHinted->grantPermission('write');  // with explicit variable name
+
+/** @var User */
+$hinted = getUnknownValue();
+$hinted->getEmail();                      // type from @var, no variable name needed
+
+
 // ── String Interpolation ────────────────────────────────────────────────────
 // Completion is suppressed inside plain string content but still works in
 // PHP interpolation contexts. Try: delete the property name after -> and
 // trigger completion to see members offered.
 
-$greeting = "Hello {$user->getProfile()->bio}";   // brace interpolation — completion works
-$info = "Name: $user->displayName";               // simple interpolation — completion works
+$greeting = "Hello {$user->getProfile()->bio}";   // brace interpolation — full completion
+$info = "Name: $user->displayName";               // simple interpolation — completion only for valid items
 $nope = 'no $user-> here';                        // single-quoted — completion suppressed
 $plain = "just plain text";                       // no $ — completion suppressed
 
@@ -206,17 +218,6 @@ function handleIntersection(User&Loggable $entity): void {
 
 $p = new Profile(new User('Eve', 'eve@example.com'));
 $p->getDisplayName();                     // Profile → UserProfile via `use ... as`
-
-
-// ── @var Docblock Override ──────────────────────────────────────────────────
-
-/** @var User $hinted */
-$hinted = getUnknownValue();
-$hinted->getEmail();                      // type from @var, not mixed
-
-/** @var AdminUser $inlineHinted */
-$inlineHinted = getUnknownValue();
-$inlineHinted->grantPermission('write');
 
 
 // ── Ambiguous Variables ─────────────────────────────────────────────────────

@@ -2494,6 +2494,151 @@ async fn test_completion_inline_var_docblock_override_allowed_for_object() {
     }
 }
 
+/// Inline `@var` without variable name at top level resolves the type
+/// for the immediately following assignment.
+#[tokio::test]
+async fn test_completion_inline_var_docblock_no_varname_top_level() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///inlinevar_toplevel.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class User {\n",
+        "    public string $name;\n",
+        "    public function getEmail(): string {}\n",
+        "}\n",
+        "/** @var User */\n",
+        "$red = a();\n",
+        "$red->\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 7,
+                character: 6,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for @var User without variable name at top level"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                names.contains(&"name"),
+                "Should include 'name' from User, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"getEmail"),
+                "Should include 'getEmail' from User, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Inline `@var` without variable name for a cross-file class at top level.
+#[tokio::test]
+async fn test_completion_inline_var_docblock_no_varname_cross_file() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/" } } }"#,
+        &[(
+            "src/Models/User.php",
+            concat!(
+                "<?php\n",
+                "namespace App\\Models;\n",
+                "class User {\n",
+                "    public string $name;\n",
+                "    public function getEmail(): string {}\n",
+                "}\n",
+            ),
+        )],
+    );
+
+    let uri = Url::parse("file:///crossfile_inlinevar.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Models\\User;\n",
+        "/** @var User */\n",
+        "$red = a();\n",
+        "$red->\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 4,
+                character: 6,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for cross-file @var User without variable name"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                names.contains(&"name"),
+                "Should include 'name' from User, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"getEmail"),
+                "Should include 'getEmail' from User, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
 #[tokio::test]
 async fn test_completion_inline_var_docblock_unconditional_reassignment() {
     let backend = create_test_backend();

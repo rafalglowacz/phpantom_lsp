@@ -30,29 +30,6 @@ target.
 
 ### Remaining by user need
 
-#### 39. `@var` type annotation without variable name not resolved
-
-When a `@var` docblock includes the variable name, the type is picked up
-correctly. When the variable name is omitted (a common shorthand), the
-type is not applied to the next assignment.
-
-```php
-// Works:
-/** @var User $red */
-$red = a();
-$red->  // ← completes User members
-
-// Does not work:
-/** @var User */
-$red = a();
-$red->  // ← no completion
-```
-
-**Fix:** when `@var` has a type but no variable name, apply the type to
-the immediately following assignment statement.
-
----
-
 #### 40. No nested key completion for literal array assignments
 
 When a variable is assigned a literal array with nested associative
