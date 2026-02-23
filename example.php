@@ -813,10 +813,14 @@ class SwitchDemo
 }
 
 
-// ── Laravel Eloquent Relationship Properties ────────────────────────────────
+// ── Laravel Eloquent Virtual Members ────────────────────────────────────────
 // Methods returning Eloquent relationship types (HasMany, HasOne, BelongsTo, etc.)
 // automatically produce virtual properties. Accessing $author->posts resolves to a
 // Collection<BlogPost>, while $author->profile resolves directly to AuthorProfile.
+//
+// Methods starting with "scope" (e.g. scopeActive) produce virtual methods with
+// the prefix stripped and first letter lowercased (e.g. active). The $query
+// parameter is removed. Scopes are available as both static and instance methods.
 
 class BlogAuthor extends \Illuminate\Database\Eloquent\Model
 {
@@ -838,13 +842,33 @@ class BlogAuthor extends \Illuminate\Database\Eloquent\Model
         return $this->belongsToMany(BlogTag::class);
     }
 
+    public function scopeActive(\Illuminate\Database\Eloquent\Builder $query): void
+    {
+        $query->where('active', true);
+    }
+
+    public function scopeOfGenre(\Illuminate\Database\Eloquent\Builder $query, string $genre): void
+    {
+        $query->where('genre', $genre);
+    }
+
     public function demo(): void
     {
         $author = new BlogAuthor();
+
+        // Relationship virtual properties
         $author->posts;                   // virtual property → Collection<BlogPost>
         $author->profile;                 // virtual property → AuthorProfile
         $author->profile->getBio();       // chains to AuthorProfile methods
         $author->tags;                    // virtual property → Collection<BlogTag>
+
+        // Scope methods — instance access
+        $author->active();                // virtual method from scopeActive
+        $author->ofGenre('fiction');       // virtual method from scopeOfGenre ($query stripped)
+
+        // Scope methods — static access
+        BlogAuthor::active();             // also available as static
+        BlogAuthor::ofGenre('fiction');    // $genre parameter preserved, $query stripped
     }
 }
 

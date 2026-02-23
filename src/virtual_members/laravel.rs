@@ -14,9 +14,16 @@
 //!   inferred from the relationship's generic parameters (Larastan-style
 //!   `@return HasMany<Post, $this>` annotations) or, as a fallback,
 //!   from the first `::class` argument in the method body text.
+//!
+//! - **Scope methods.** Methods whose name starts with `scope` (e.g.
+//!   `scopeActive`, `scopeVerified`) produce a virtual method with the
+//!   `scope` prefix stripped and the first letter lowercased (e.g.
+//!   `active`, `verified`).  The first `$query` parameter is removed.
+//!   Scope methods are available as both static and instance methods
+//!   so they resolve for `User::active()` and `$user->active()`.
 
 use crate::docblock::types::parse_generic_args;
-use crate::types::{ClassInfo, MAX_INHERITANCE_DEPTH, PropertyInfo, Visibility};
+use crate::types::{ClassInfo, MAX_INHERITANCE_DEPTH, MethodInfo, PropertyInfo, Visibility};
 
 use super::{VirtualMemberProvider, VirtualMembers};
 
@@ -40,6 +47,10 @@ const COLLECTION_RELATIONSHIPS: &[&str] = &[
 /// The `MorphTo` relationship resolves to the generic `Model` base class
 /// because the concrete related type is determined at runtime.
 const MORPH_TO: &str = "MorphTo";
+
+/// The default return type for scope methods that don't declare a return
+/// type or return `void`.
+const DEFAULT_SCOPE_RETURN_TYPE: &str = "\\Illuminate\\Database\\Eloquent\\Builder<static>";
 
 /// Virtual member provider for Laravel Eloquent models.
 ///
@@ -177,6 +188,89 @@ fn build_property_type(kind: RelationshipKind, related_type: Option<&str>) -> Op
     }
 }
 
+/// Determine whether a method is an Eloquent scope.
+///
+/// Scopes are methods whose name starts with `scope` (case-sensitive)
+/// and have at least five characters (the prefix plus at least one
+/// character for the scope name).  For example, `scopeActive` is a
+/// scope, but `scope` alone is not.
+fn is_scope_method(method: &MethodInfo) -> bool {
+    method.name.starts_with("scope") && method.name.len() > 5
+}
+
+/// Transform a scope method name into the public-facing scope name.
+///
+/// Strips the `scope` prefix and lowercases the first character:
+/// `scopeActive` → `active`, `scopeVerified` → `verified`.
+fn scope_name(method_name: &str) -> String {
+    let after_prefix = &method_name[5..]; // skip "scope"
+    let mut chars = after_prefix.chars();
+    match chars.next() {
+        Some(c) => {
+            let lower: String = c.to_lowercase().collect();
+            format!("{lower}{}", chars.as_str())
+        }
+        None => String::new(),
+    }
+}
+
+/// Determine the return type for a synthesized scope method.
+///
+/// Uses the scope method's declared return type.  If the return type is
+/// `void` or absent, defaults to
+/// `\Illuminate\Database\Eloquent\Builder<static>`.
+fn scope_return_type(method: &MethodInfo) -> String {
+    match method.return_type.as_deref() {
+        Some("void") | None => DEFAULT_SCOPE_RETURN_TYPE.to_string(),
+        Some(rt) => rt.to_string(),
+    }
+}
+
+/// Build virtual methods for a scope method.
+///
+/// Returns two `MethodInfo` values: one static and one instance.  Both
+/// have the `scope` prefix stripped, the first letter lowercased, and
+/// the first `$query` parameter removed.  This makes scope methods
+/// accessible via both `User::active()` (static) and `$user->active()`
+/// (instance).
+fn build_scope_methods(method: &MethodInfo) -> [MethodInfo; 2] {
+    let name = scope_name(&method.name);
+    let return_type = Some(scope_return_type(method));
+
+    // Strip the first parameter ($query / $builder) that Laravel injects.
+    let parameters: Vec<_> = if method.parameters.is_empty() {
+        Vec::new()
+    } else {
+        method.parameters[1..].to_vec()
+    };
+
+    let instance_method = MethodInfo {
+        name: name.clone(),
+        parameters: parameters.clone(),
+        return_type: return_type.clone(),
+        is_static: false,
+        visibility: Visibility::Public,
+        conditional_return: None,
+        is_deprecated: method.is_deprecated,
+        template_params: Vec::new(),
+        template_bindings: Vec::new(),
+    };
+
+    let static_method = MethodInfo {
+        name,
+        parameters,
+        return_type,
+        is_static: true,
+        visibility: Visibility::Public,
+        conditional_return: None,
+        is_deprecated: method.is_deprecated,
+        template_params: Vec::new(),
+        template_bindings: Vec::new(),
+    };
+
+    [instance_method, static_method]
+}
+
 impl VirtualMemberProvider for LaravelModelProvider {
     /// Returns `true` if the class extends `Illuminate\Database\Eloquent\Model`.
     fn applies_to(
@@ -188,15 +282,25 @@ impl VirtualMemberProvider for LaravelModelProvider {
     }
 
     /// Scan the class's methods for Eloquent relationship return types
-    /// and synthesize a virtual property for each one.
+    /// and scope methods, synthesizing virtual properties and methods.
     fn provide(
         &self,
         class: &ClassInfo,
         _class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
     ) -> VirtualMembers {
         let mut properties = Vec::new();
+        let mut methods = Vec::new();
 
         for method in &class.methods {
+            // ── Scope methods ───────────────────────────────────────
+            if is_scope_method(method) {
+                let [instance_method, static_method] = build_scope_methods(method);
+                methods.push(instance_method);
+                methods.push(static_method);
+                continue;
+            }
+
+            // ── Relationship properties ─────────────────────────────
             let return_type = match method.return_type.as_deref() {
                 Some(rt) => rt,
                 None => continue,
@@ -222,7 +326,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
         }
 
         VirtualMembers {
-            methods: Vec::new(),
+            methods,
             properties,
             constants: Vec::new(),
         }
@@ -234,7 +338,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ClassLikeKind, MethodInfo};
+    use crate::types::{ClassLikeKind, MethodInfo, ParameterInfo};
     use std::collections::HashMap;
 
     /// Helper: create a minimal `ClassInfo` with the given name.
@@ -278,6 +382,36 @@ mod tests {
             is_deprecated: false,
             template_params: Vec::new(),
             template_bindings: Vec::new(),
+        }
+    }
+
+    /// Helper: create a `MethodInfo` with parameters.
+    fn make_method_with_params(
+        name: &str,
+        return_type: Option<&str>,
+        params: Vec<ParameterInfo>,
+    ) -> MethodInfo {
+        MethodInfo {
+            name: name.to_string(),
+            parameters: params,
+            return_type: return_type.map(|s| s.to_string()),
+            is_static: false,
+            visibility: Visibility::Public,
+            conditional_return: None,
+            is_deprecated: false,
+            template_params: Vec::new(),
+            template_bindings: Vec::new(),
+        }
+    }
+
+    /// Helper: create a `ParameterInfo`.
+    fn make_param(name: &str, type_hint: Option<&str>, is_required: bool) -> ParameterInfo {
+        ParameterInfo {
+            name: name.to_string(),
+            is_required,
+            type_hint: type_hint.map(|s| s.to_string()),
+            is_variadic: false,
+            is_reference: false,
         }
     }
 
@@ -723,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn no_virtual_methods_or_constants() {
+    fn relationships_produce_no_virtual_methods_or_constants() {
         let provider = LaravelModelProvider;
         let mut user = make_class("App\\Models\\User");
         user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
@@ -731,7 +865,10 @@ mod tests {
             .push(make_method("posts", Some("HasMany<Post, $this>")));
 
         let result = provider.provide(&user, &no_loader);
-        assert!(result.methods.is_empty());
+        assert!(
+            result.methods.is_empty(),
+            "Relationship methods should not produce virtual methods"
+        );
         assert!(result.constants.is_empty());
     }
 
@@ -791,6 +928,367 @@ mod tests {
         assert_eq!(
             extract_short_name("Illuminate\\Database\\Eloquent\\Relations\\HasOne"),
             "HasOne"
+        );
+    }
+
+    // ── is_scope_method ─────────────────────────────────────────────────
+
+    #[test]
+    fn scope_method_detected() {
+        let method = make_method("scopeActive", Some("void"));
+        assert!(is_scope_method(&method));
+    }
+
+    #[test]
+    fn scope_method_multi_word() {
+        let method = make_method("scopeRecentlyVerified", Some("void"));
+        assert!(is_scope_method(&method));
+    }
+
+    #[test]
+    fn not_a_scope_bare_scope_name() {
+        // "scope" alone with no suffix is not a scope
+        let method = make_method("scope", Some("void"));
+        assert!(!is_scope_method(&method));
+    }
+
+    #[test]
+    fn not_a_scope_different_prefix() {
+        let method = make_method("getActive", Some("void"));
+        assert!(!is_scope_method(&method));
+    }
+
+    #[test]
+    fn not_a_scope_lowercase_prefix() {
+        // Must be exactly "scope" not "Scope"
+        let method = make_method("ScopeActive", Some("void"));
+        assert!(!is_scope_method(&method));
+    }
+
+    // ── scope_name ──────────────────────────────────────────────────────
+
+    #[test]
+    fn scope_name_simple() {
+        assert_eq!(scope_name("scopeActive"), "active");
+    }
+
+    #[test]
+    fn scope_name_multi_word() {
+        assert_eq!(scope_name("scopeRecentlyVerified"), "recentlyVerified");
+    }
+
+    #[test]
+    fn scope_name_single_char() {
+        assert_eq!(scope_name("scopeA"), "a");
+    }
+
+    #[test]
+    fn scope_name_already_lowercase() {
+        assert_eq!(scope_name("scopeactive"), "active");
+    }
+
+    // ── scope_return_type ───────────────────────────────────────────────
+
+    #[test]
+    fn scope_return_type_void_defaults() {
+        let method = make_method("scopeActive", Some("void"));
+        assert_eq!(
+            scope_return_type(&method),
+            "\\Illuminate\\Database\\Eloquent\\Builder<static>"
+        );
+    }
+
+    #[test]
+    fn scope_return_type_none_defaults() {
+        let method = make_method("scopeActive", None);
+        assert_eq!(
+            scope_return_type(&method),
+            "\\Illuminate\\Database\\Eloquent\\Builder<static>"
+        );
+    }
+
+    #[test]
+    fn scope_return_type_explicit() {
+        let method = make_method(
+            "scopeActive",
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>"),
+        );
+        assert_eq!(
+            scope_return_type(&method),
+            "\\Illuminate\\Database\\Eloquent\\Builder<static>"
+        );
+    }
+
+    #[test]
+    fn scope_return_type_custom() {
+        let method = make_method("scopeActive", Some("\\App\\Builders\\UserBuilder"));
+        assert_eq!(scope_return_type(&method), "\\App\\Builders\\UserBuilder");
+    }
+
+    // ── build_scope_methods ─────────────────────────────────────────────
+
+    #[test]
+    fn build_scope_methods_strips_query_param() {
+        let method = make_method_with_params(
+            "scopeActive",
+            Some("void"),
+            vec![make_param(
+                "$query",
+                Some("\\Illuminate\\Database\\Eloquent\\Builder"),
+                true,
+            )],
+        );
+
+        let [instance, static_m] = build_scope_methods(&method);
+        assert!(instance.parameters.is_empty());
+        assert!(static_m.parameters.is_empty());
+    }
+
+    #[test]
+    fn build_scope_methods_preserves_extra_params() {
+        let method = make_method_with_params(
+            "scopeOfType",
+            Some("void"),
+            vec![
+                make_param(
+                    "$query",
+                    Some("\\Illuminate\\Database\\Eloquent\\Builder"),
+                    true,
+                ),
+                make_param("$type", Some("string"), true),
+                make_param("$strict", Some("bool"), false),
+            ],
+        );
+
+        let [instance, static_m] = build_scope_methods(&method);
+        assert_eq!(instance.parameters.len(), 2);
+        assert_eq!(instance.parameters[0].name, "$type");
+        assert!(instance.parameters[0].is_required);
+        assert_eq!(instance.parameters[1].name, "$strict");
+        assert!(!instance.parameters[1].is_required);
+
+        assert_eq!(static_m.parameters.len(), 2);
+        assert_eq!(static_m.parameters[0].name, "$type");
+        assert_eq!(static_m.parameters[1].name, "$strict");
+    }
+
+    #[test]
+    fn build_scope_methods_creates_instance_and_static() {
+        let method = make_method("scopeActive", Some("void"));
+        let [instance, static_m] = build_scope_methods(&method);
+
+        assert_eq!(instance.name, "active");
+        assert!(!instance.is_static);
+        assert_eq!(instance.visibility, Visibility::Public);
+
+        assert_eq!(static_m.name, "active");
+        assert!(static_m.is_static);
+        assert_eq!(static_m.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn build_scope_methods_default_return_type() {
+        let method = make_method("scopeActive", None);
+        let [instance, static_m] = build_scope_methods(&method);
+
+        assert_eq!(
+            instance.return_type.as_deref(),
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>")
+        );
+        assert_eq!(
+            static_m.return_type.as_deref(),
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>")
+        );
+    }
+
+    #[test]
+    fn build_scope_methods_void_return_type() {
+        let method = make_method("scopeActive", Some("void"));
+        let [instance, _] = build_scope_methods(&method);
+
+        assert_eq!(
+            instance.return_type.as_deref(),
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>")
+        );
+    }
+
+    #[test]
+    fn build_scope_methods_with_no_params() {
+        // Scope method without any parameters (unusual but valid)
+        let method = make_method("scopeActive", Some("void"));
+        let [instance, static_m] = build_scope_methods(&method);
+
+        assert!(instance.parameters.is_empty());
+        assert!(static_m.parameters.is_empty());
+    }
+
+    #[test]
+    fn build_scope_methods_preserves_deprecated() {
+        let mut method = make_method("scopeOld", Some("void"));
+        method.is_deprecated = true;
+
+        let [instance, static_m] = build_scope_methods(&method);
+        assert!(instance.is_deprecated);
+        assert!(static_m.is_deprecated);
+    }
+
+    // ── provide: scope methods (integration) ────────────────────────────
+
+    #[test]
+    fn synthesizes_scope_as_both_static_and_instance() {
+        let provider = LaravelModelProvider;
+        let mut user = make_class("App\\Models\\User");
+        user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        user.methods.push(make_method_with_params(
+            "scopeActive",
+            Some("void"),
+            vec![make_param(
+                "$query",
+                Some("\\Illuminate\\Database\\Eloquent\\Builder"),
+                true,
+            )],
+        ));
+
+        let result = provider.provide(&user, &no_loader);
+        assert_eq!(result.methods.len(), 2, "Expected both static and instance");
+
+        let instance = result.methods.iter().find(|m| !m.is_static).unwrap();
+        assert_eq!(instance.name, "active");
+        assert!(instance.parameters.is_empty());
+        assert_eq!(
+            instance.return_type.as_deref(),
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>")
+        );
+
+        let static_m = result.methods.iter().find(|m| m.is_static).unwrap();
+        assert_eq!(static_m.name, "active");
+        assert!(static_m.parameters.is_empty());
+        assert_eq!(
+            static_m.return_type.as_deref(),
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>")
+        );
+    }
+
+    #[test]
+    fn synthesizes_scope_with_extra_params() {
+        let provider = LaravelModelProvider;
+        let mut user = make_class("App\\Models\\User");
+        user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        user.methods.push(make_method_with_params(
+            "scopeOfType",
+            Some("void"),
+            vec![
+                make_param(
+                    "$query",
+                    Some("\\Illuminate\\Database\\Eloquent\\Builder"),
+                    true,
+                ),
+                make_param("$type", Some("string"), true),
+            ],
+        ));
+
+        let result = provider.provide(&user, &no_loader);
+        assert_eq!(result.methods.len(), 2);
+
+        let instance = result.methods.iter().find(|m| !m.is_static).unwrap();
+        assert_eq!(instance.name, "ofType");
+        assert_eq!(instance.parameters.len(), 1);
+        assert_eq!(instance.parameters[0].name, "$type");
+        assert_eq!(instance.parameters[0].type_hint.as_deref(), Some("string"));
+    }
+
+    #[test]
+    fn synthesizes_multiple_scopes() {
+        let provider = LaravelModelProvider;
+        let mut user = make_class("App\\Models\\User");
+        user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        user.methods.push(make_method_with_params(
+            "scopeActive",
+            Some("void"),
+            vec![make_param("$query", Some("Builder"), true)],
+        ));
+        user.methods.push(make_method_with_params(
+            "scopeVerified",
+            Some("void"),
+            vec![make_param("$query", Some("Builder"), true)],
+        ));
+
+        let result = provider.provide(&user, &no_loader);
+        // 2 scopes × 2 variants (static + instance) = 4
+        assert_eq!(result.methods.len(), 4);
+
+        let names: Vec<&str> = result
+            .methods
+            .iter()
+            .filter(|m| !m.is_static)
+            .map(|m| m.name.as_str())
+            .collect();
+        assert!(names.contains(&"active"));
+        assert!(names.contains(&"verified"));
+    }
+
+    #[test]
+    fn scope_and_relationship_coexist() {
+        let provider = LaravelModelProvider;
+        let mut user = make_class("App\\Models\\User");
+        user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        user.methods
+            .push(make_method("posts", Some("HasMany<Post, $this>")));
+        user.methods.push(make_method_with_params(
+            "scopeActive",
+            Some("void"),
+            vec![make_param("$query", Some("Builder"), true)],
+        ));
+
+        let result = provider.provide(&user, &no_loader);
+        assert_eq!(result.properties.len(), 1, "One relationship property");
+        assert_eq!(result.properties[0].name, "posts");
+        assert_eq!(
+            result.methods.len(),
+            2,
+            "Two scope methods (static + instance)"
+        );
+        let instance = result.methods.iter().find(|m| !m.is_static).unwrap();
+        assert_eq!(instance.name, "active");
+    }
+
+    #[test]
+    fn scope_method_not_treated_as_relationship() {
+        // scopeActive's return type is "void", not a relationship type.
+        // It should be treated as a scope, not produce a property.
+        let provider = LaravelModelProvider;
+        let mut user = make_class("App\\Models\\User");
+        user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        user.methods.push(make_method_with_params(
+            "scopeActive",
+            Some("void"),
+            vec![make_param("$query", Some("Builder"), true)],
+        ));
+
+        let result = provider.provide(&user, &no_loader);
+        assert!(
+            result.properties.is_empty(),
+            "Scope methods should not produce relationship properties"
+        );
+        assert_eq!(result.methods.len(), 2);
+    }
+
+    #[test]
+    fn scope_with_custom_return_type() {
+        let provider = LaravelModelProvider;
+        let mut user = make_class("App\\Models\\User");
+        user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        user.methods.push(make_method_with_params(
+            "scopeActive",
+            Some("\\App\\Builders\\UserBuilder"),
+            vec![make_param("$query", Some("Builder"), true)],
+        ));
+
+        let result = provider.provide(&user, &no_loader);
+        let instance = result.methods.iter().find(|m| !m.is_static).unwrap();
+        assert_eq!(
+            instance.return_type.as_deref(),
+            Some("\\App\\Builders\\UserBuilder")
         );
     }
 }

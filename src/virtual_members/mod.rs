@@ -98,13 +98,23 @@ pub trait VirtualMemberProvider {
 /// Merge virtual members into a resolved `ClassInfo`.
 ///
 /// For each method in `virtual.methods`, adds it to `class.methods` only
-/// if no method with the same name already exists.  Same for properties.
+/// if no method with the same name and same staticness already exists.
+/// This allows a provider to contribute both a static and an instance
+/// variant of the same method (e.g. Laravel scope methods that are
+/// accessible via both `User::active()` and `$user->active()`).
+///
+/// Properties and constants are deduplicated by name only.
+///
 /// This ensures that real declared members (and contributions from
 /// higher-priority providers that were merged earlier) are never
 /// overwritten.
 pub fn merge_virtual_members(class: &mut ClassInfo, virtual_members: VirtualMembers) {
     for method in virtual_members.methods {
-        if !class.methods.iter().any(|m| m.name == method.name) {
+        if !class
+            .methods
+            .iter()
+            .any(|m| m.name == method.name && m.is_static == method.is_static)
+        {
             class.methods.push(method);
         }
     }
@@ -366,6 +376,73 @@ mod tests {
             class.methods[0].return_type.as_deref(),
             Some("string"),
             "existing method should not be overwritten"
+        );
+    }
+
+    #[test]
+    fn merge_allows_same_name_methods_with_different_staticness() {
+        let mut class = make_class("Foo");
+        // Existing instance method
+        class.methods.push(make_method("active", Some("string")));
+
+        // Virtual: one instance (should be blocked) and one static (should be added)
+        let mut static_method = make_method("active", Some("Builder"));
+        static_method.is_static = true;
+
+        let virtual_members = VirtualMembers {
+            methods: vec![make_method("active", Some("int")), static_method],
+            properties: Vec::new(),
+            constants: Vec::new(),
+        };
+
+        merge_virtual_members(&mut class, virtual_members);
+
+        assert_eq!(class.methods.len(), 2, "instance + static should coexist");
+        let instance = class
+            .methods
+            .iter()
+            .find(|m| m.name == "active" && !m.is_static)
+            .unwrap();
+        assert_eq!(
+            instance.return_type.as_deref(),
+            Some("string"),
+            "existing instance method should not be overwritten"
+        );
+        let static_m = class
+            .methods
+            .iter()
+            .find(|m| m.name == "active" && m.is_static)
+            .unwrap();
+        assert_eq!(
+            static_m.return_type.as_deref(),
+            Some("Builder"),
+            "static variant should be added alongside instance"
+        );
+    }
+
+    #[test]
+    fn merge_blocks_same_name_same_staticness() {
+        let mut class = make_class("Foo");
+        let mut existing = make_method("active", Some("string"));
+        existing.is_static = true;
+        class.methods.push(existing);
+
+        let mut virtual_static = make_method("active", Some("int"));
+        virtual_static.is_static = true;
+
+        let virtual_members = VirtualMembers {
+            methods: vec![virtual_static],
+            properties: Vec::new(),
+            constants: Vec::new(),
+        };
+
+        merge_virtual_members(&mut class, virtual_members);
+
+        assert_eq!(class.methods.len(), 1);
+        assert_eq!(
+            class.methods[0].return_type.as_deref(),
+            Some("string"),
+            "existing static method should not be overwritten by virtual static"
         );
     }
 

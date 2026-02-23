@@ -329,14 +329,6 @@ end-to-end.
 
 ## Implementation sequence
 
-### Step 4: LaravelModelProvider — scopes
-
-- Scan methods for `scope*` prefix.
-- Synthesize virtual methods (name transformation, param stripping).
-- Mark as both static and instance.
-- Tests: verify `User::active()` and `User::query()->active()` resolve,
-  verify parameter list excludes `$query`.
-
 ### Step 5: LaravelModelProvider — Builder-as-static
 
 - Load Eloquent Builder, extract public instance methods.

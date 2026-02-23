@@ -16,12 +16,11 @@ PHPantom focuses on completion and go-to-definition and aims to do them really w
 | Go-to-definition | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Go-to-implementation | 🚧 | ✅ | ❌ | ✅ | ✅ |
 | `@mixin` completion | ✅ | 💰 | ✅ | ✅ | 🚧 |
-| `@phpstan-assert` narrowing | ✅ | ❌ | 🚧 | ❌ | 🚧 |
+| `@phpstan` annotations | ✅ | ❌ | 🚧 | ❌ | 🚧 |
 | Conditional return types | ✅ | ❌ | ✅ | ❌ | 🚧 |
+| Laravel Eloquent | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Array shape inference | ✅ | ❌ | ✅ | ❌ | 🚧 |
 | Object shape completion | ✅ | ❌ | ✅ | ❌ | 🚧 |
-| `@phpstan-type` aliases | ✅ | ❌ | 🚧 | ❌ | ❌ |
-| Laravel relationships | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Generator body types | 🚧 | ❌ | 🚧 | ❌ | ❌ |
 | Hover | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Signature help | ❌ | ✅ | ✅ | ✅ | ✅ |
@@ -44,6 +43,7 @@ PHPantom focuses on completion and go-to-definition and aims to do them really w
 - **Generic collection foreach.** Iterating `Collection<User>`, `Generator<int, Item>`, or a class with `@implements IteratorAggregate<int, User>` resolves the loop variable to the element type. Keys too.
 - **Generics.** `@template` with type substitution through inheritance chains and at call sites.
 - **Conditional return types.** PHPStan-style `@return ($param is class-string<T> ? T : mixed)` resolves to the concrete branch at each call site.
+- **Laravel Eloquent.** Relationship methods produce virtual properties with the correct generic type (`$user->posts` resolves to `Collection<Post>`). Scope methods are synthesized from `scope*` prefixed methods and available as both static and instance calls. No application booting, no database access, no ide-helper dependency required.
 - **Everything else you'd expect.** Named arguments completion, destructuring with named keys, chained method calls in assignments, `@deprecated` detection.
 
 ## Project Awareness
