@@ -258,7 +258,7 @@ impl Backend {
         // Detect before the call expression branch because `fn(...)`
         // ends with `)` and would otherwise be resolved as a call.
         if rhs_text.ends_with("(...)") && rhs_text.len() > 4 {
-            return Some("Closure".to_string());
+            return Some("\\Closure".to_string());
         }
 
         // RHS is a call expression — extract the return type.
@@ -282,7 +282,18 @@ impl Backend {
                 {
                     rest.contains("->") || rest.contains("::")
                 } else {
-                    true
+                    // Single-level `$var->method` (bare variable followed
+                    // by exactly one `->`) should NOT be treated as a
+                    // chain — it needs variable resolution first, which
+                    // `resolve_raw_type_from_call_chain` cannot do (it
+                    // lacks `content`/`cursor_offset`).  All other
+                    // single-arrow patterns (e.g.
+                    // `(new Foo())->method`) are genuine chains.
+                    let lhs = callee.split("->").next().unwrap_or("");
+                    let lhs = lhs.trim();
+                    let is_bare_var = lhs.starts_with('$')
+                        && lhs[1..].chars().all(|c| c.is_alphanumeric() || c == '_');
+                    !is_bare_var
                 }
             };
             let is_static_chain = !callee.contains("->") && callee.contains("::") && {
@@ -309,6 +320,38 @@ impl Backend {
             if let Some(method_name) = callee.strip_prefix("$this->") {
                 let owner = current_class?;
                 return Self::resolve_method_return_type(owner, method_name, class_loader);
+            }
+
+            // Method call on a non-`$this` variable: `$var->methodName(…)`
+            // Resolve the variable's type via assignment scanning, then
+            // look up the method on the resulting class.
+            if let Some(arrow_pos) = callee.find("->") {
+                let var_part = callee[..arrow_pos].trim();
+                let method_name = callee[arrow_pos + 2..].trim();
+                if var_part.starts_with('$')
+                    && var_part != "$this"
+                    && !method_name.is_empty()
+                    && method_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && let Some(var_type) = Self::extract_raw_type_from_assignment_text(
+                        var_part,
+                        content,
+                        cursor_offset,
+                        current_class,
+                        all_classes,
+                        class_loader,
+                    )
+                {
+                    let clean = crate::docblock::types::clean_type(&var_type);
+                    let lookup = short_name(&clean);
+                    let owner_class = all_classes
+                        .iter()
+                        .find(|c| c.name == lookup)
+                        .cloned()
+                        .or_else(|| class_loader(&clean));
+                    if let Some(owner) = owner_class {
+                        return Self::resolve_method_return_type(&owner, method_name, class_loader);
+                    }
+                }
             }
 
             // Static call: `ClassName::methodName(…)`

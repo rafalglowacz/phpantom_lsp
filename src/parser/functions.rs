@@ -240,6 +240,36 @@ impl Backend {
                 Statement::If(if_stmt) => {
                     Self::extract_defines_from_if_body(&if_stmt.body, defines);
                 }
+                Statement::Class(class) => {
+                    for member in class.members.iter() {
+                        if let ClassLikeMember::Method(method) = member
+                            && let MethodBody::Concrete(body) = &method.body
+                        {
+                            Self::extract_defines_from_statements(body.statements.iter(), defines);
+                        }
+                    }
+                }
+                Statement::Trait(trait_def) => {
+                    for member in trait_def.members.iter() {
+                        if let ClassLikeMember::Method(method) = member
+                            && let MethodBody::Concrete(body) = &method.body
+                        {
+                            Self::extract_defines_from_statements(body.statements.iter(), defines);
+                        }
+                    }
+                }
+                Statement::Enum(enum_def) => {
+                    for member in enum_def.members.iter() {
+                        if let ClassLikeMember::Method(method) = member
+                            && let MethodBody::Concrete(body) = &method.body
+                        {
+                            Self::extract_defines_from_statements(body.statements.iter(), defines);
+                        }
+                    }
+                }
+                Statement::Function(func) => {
+                    Self::extract_defines_from_statements(func.body.statements.iter(), defines);
+                }
                 _ => {}
             }
         }

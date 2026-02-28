@@ -499,6 +499,7 @@ impl Backend {
         position: Position,
     ) -> Option<CompletionResponse> {
         let partial_lower = th_ctx.partial.to_lowercase();
+        let space_prefix = if th_ctx.needs_space_prefix { " " } else { "" };
         let mut items: Vec<CompletionItem> =
             crate::completion::type_hint_completion::PHP_NATIVE_TYPES
                 .iter()
@@ -508,7 +509,7 @@ impl Backend {
                     label: t.to_string(),
                     kind: Some(CompletionItemKind::KEYWORD),
                     detail: Some("PHP built-in type".to_string()),
-                    insert_text: Some(t.to_string()),
+                    insert_text: Some(format!("{}{}", space_prefix, t)),
                     filter_text: Some(t.to_string()),
                     sort_text: Some(format!("0_{:03}", idx)),
                     ..CompletionItem::default()
@@ -523,7 +524,26 @@ impl Backend {
             ClassNameContext::Any,
             position,
         );
-        items.extend(class_items);
+
+        // When a leading space is needed (return type after `:` with no
+        // space), prefix the insert text of each class-name item so that
+        // the result is `: ClassName` rather than `:ClassName`.
+        if th_ctx.needs_space_prefix {
+            for mut item in class_items {
+                if let Some(ref txt) = item.insert_text {
+                    item.insert_text = Some(format!(" {}", txt));
+                }
+                if let Some(CompletionTextEdit::Edit(ref te)) = item.text_edit {
+                    item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
+                        range: te.range,
+                        new_text: format!(" {}", te.new_text),
+                    }));
+                }
+                items.push(item);
+            }
+        } else {
+            items.extend(class_items);
+        }
 
         if items.is_empty() {
             // Even when empty, the caller returns early so we don't fall

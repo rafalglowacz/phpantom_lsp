@@ -724,6 +724,53 @@ class Foo {
 // ─── Sort order: scalars before classes ─────────────────────────────────────
 
 #[tokio::test]
+async fn return_type_no_space_after_colon_inserts_space() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/return_space.php").unwrap();
+
+    // The colon is present but there is NO space between `:` and the
+    // partial type the user has started typing.
+    let src_no_space = "<?php\nfunction foo():s {}";
+    // )=13 :=14 s=15
+    // cursor after "s" = col 15
+    let items = complete_at(&backend, &uri, src_no_space, 1, 15).await;
+    let string_item = items.iter().find(|i| i.label == "string");
+    assert!(string_item.is_some(), "expected 'string' in results");
+    let insert = string_item.unwrap().insert_text.as_deref().unwrap();
+    assert!(
+        insert.starts_with(' '),
+        "insert_text should start with a space when colon has no trailing space, got: {:?}",
+        insert
+    );
+    assert_eq!(
+        insert.trim(),
+        "string",
+        "insert_text should contain 'string' after the space"
+    );
+}
+
+/// When the colon already has a trailing space (`): s`), the inserted
+/// text should NOT have an extra leading space.
+#[tokio::test]
+async fn return_type_with_space_after_colon_no_extra_space() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/return_no_extra_space.php").unwrap();
+
+    let src = "<?php\nfunction foo(): s {}";
+    // )=13 :=14 ' '=15 s=16
+    // cursor after "s" = col 16
+    let items = complete_at(&backend, &uri, src, 1, 16).await;
+    let string_item = items.iter().find(|i| i.label == "string");
+    assert!(string_item.is_some(), "expected 'string' in results");
+    let insert = string_item.unwrap().insert_text.as_deref().unwrap();
+    assert!(
+        !insert.starts_with(' '),
+        "insert_text should NOT start with a space when colon already has trailing space, got: {:?}",
+        insert
+    );
+}
+
+#[tokio::test]
 async fn scalars_sort_before_classes() {
     let backend = create_test_backend();
     let uri = Url::parse("file:///test/sort_order.php").unwrap();

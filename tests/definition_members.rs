@@ -2429,3 +2429,163 @@ async fn test_goto_definition_own_method_same_short_name_as_parent() {
         other => panic!("Expected Scalar location, got: {:?}", other),
     }
 }
+
+// ─── GTD self-reference suppression ─────────────────────────────────────────
+
+/// Ctrl+Click on a method name at its own declaration site should return
+/// `None` rather than jumping to itself.
+#[tokio::test]
+async fn test_goto_definition_method_declaration_returns_none() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///self_ref_method.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class GtdSelfRef {\n",
+        "    public function paramTypes(string $item): void {\n",
+        "        echo $item;\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Click on "paramTypes" in the declaration `public function paramTypes(`
+    // on line 2, starting at character 20.
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 2,
+                character: 25,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_none(),
+        "GTD on a method name at its declaration site should return None, got: {:?}",
+        result
+    );
+}
+
+/// Ctrl+Click on a class name at its own declaration site should return
+/// `None` rather than jumping to itself.
+#[tokio::test]
+async fn test_goto_definition_class_declaration_returns_none() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///self_ref_class.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class MyUniqueTestClass {\n",
+        "    public function foo(): void {}\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Click on "MyUniqueTestClass" in `class MyUniqueTestClass {` on line 1.
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 1,
+                character: 10,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_none(),
+        "GTD on a class name at its declaration site should return None, got: {:?}",
+        result
+    );
+}
+
+/// Ctrl+Click on a constant name inside its own `define()` call should
+/// return `None` rather than jumping to itself.
+#[tokio::test]
+async fn test_goto_definition_define_constant_at_definition_returns_none() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///self_ref_define.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "define('APP_VERSION', '1.0.0');\n",
+        "\n",
+        "echo APP_VERSION;\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Click on "APP_VERSION" inside `define('APP_VERSION', ...)` on line 1.
+    // The constant name starts at character 8 (after `define('`).
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 1,
+                character: 12,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_none(),
+        "GTD on a constant name inside its own define() call should return None, got: {:?}",
+        result
+    );
+
+    // Verify that clicking on the *usage* of APP_VERSION still works.
+    let usage_params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 3,
+                character: 7,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let usage_result = backend.goto_definition(usage_params).await.unwrap();
+    assert!(
+        usage_result.is_some(),
+        "GTD on a constant usage should still resolve to the define() call"
+    );
+}

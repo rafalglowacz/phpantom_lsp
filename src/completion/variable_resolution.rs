@@ -1338,7 +1338,7 @@ impl Backend {
             // functions always produce a Closure.
             Expression::PartialApplication(_)
             | Expression::Closure(_)
-            | Expression::ArrowFunction(_) => Some("Closure".to_string()),
+            | Expression::ArrowFunction(_) => Some("\\Closure".to_string()),
             _ => None,
         }
     }
@@ -1502,8 +1502,12 @@ impl Backend {
                 // closure literals (`function() { … }`), and
                 // arrow functions (`fn() => …`) all produce a
                 // `Closure` instance at runtime.
+                // Use the fully-qualified name so that resolution
+                // succeeds even inside a namespace block (unqualified
+                // class names are prefixed with the current namespace
+                // and do NOT fall back to the global scope in PHP).
                 Self::type_hint_to_classes(
-                    "Closure",
+                    "\\Closure",
                     &ctx.current_class.name,
                     ctx.all_classes,
                     ctx.class_loader,

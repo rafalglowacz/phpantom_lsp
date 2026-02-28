@@ -31,6 +31,14 @@ pub(crate) const PHP_NATIVE_TYPES: &[&str] = &[
 pub(crate) struct TypeHintContext {
     /// The partial identifier the user has typed so far (may be empty).
     pub partial: String,
+    /// Whether the insertion needs a leading space.
+    ///
+    /// This is `true` when the cursor is in a return-type position and
+    /// the character immediately before the partial (after the `:`) is
+    /// not a space.  For example, `function foo():` with the cursor
+    /// right after `:` needs a space so that the result is `: string`
+    /// rather than `:string`.
+    pub needs_space_prefix: bool,
 }
 
 /// Detect whether the cursor is at a type-hint position inside a
@@ -82,7 +90,25 @@ pub(crate) fn detect_type_hint_context(
 
     // ── Check: return type position  `):`  ──────────────────────────
     if prev_char == ':' && is_return_type_colon(&chars, before - 1) {
-        return Some(TypeHintContext { partial });
+        // Check whether the character immediately after the colon is a
+        // space.  When the user types `):` without a trailing space, we
+        // need to prepend one to the inserted text so the result is
+        // `: string` instead of `:string`.
+        let colon_pos = before - 1;
+        let needs_space = if partial.is_empty() {
+            // No partial typed yet — check if there is NO whitespace
+            // between the colon and the cursor.
+            colon_pos + 1 == partial_start
+        } else {
+            // Partial already typed — check if the char right after the
+            // colon is not whitespace (i.e. the partial is jammed
+            // against the colon).
+            colon_pos + 1 == partial_start
+        };
+        return Some(TypeHintContext {
+            partial,
+            needs_space_prefix: needs_space,
+        });
     }
 
     // ── Check: inside function-definition parameter list ────────────
@@ -106,7 +132,10 @@ pub(crate) fn detect_type_hint_context(
                     return None;
                 }
             }
-            return Some(TypeHintContext { partial });
+            return Some(TypeHintContext {
+                partial,
+                needs_space_prefix: false,
+            });
         }
     }
 
@@ -114,7 +143,10 @@ pub(crate) fn detect_type_hint_context(
     if (prev_char == '?' || prev_char == '|' || prev_char == '&')
         && is_type_modifier_in_definition(&chars, before - 1)
     {
-        return Some(TypeHintContext { partial });
+        return Some(TypeHintContext {
+            partial,
+            needs_space_prefix: false,
+        });
     }
 
     // ── Check: after property / promoted-param modifier keyword ─────
@@ -128,7 +160,10 @@ pub(crate) fn detect_type_hint_context(
         if partial_lower == "function" || partial_lower == "fn" {
             return None;
         }
-        return Some(TypeHintContext { partial });
+        return Some(TypeHintContext {
+            partial,
+            needs_space_prefix: false,
+        });
     }
 
     None

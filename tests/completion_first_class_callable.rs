@@ -1,5 +1,7 @@
 mod common;
 
+use std::collections::HashMap;
+
 use common::{create_psr4_workspace, create_test_backend};
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
@@ -859,6 +861,143 @@ async fn test_closure_top_level_resolves_to_closure() {
     assert!(
         names.contains(&"bindTo"),
         "Expected bindTo at top level in {:?}",
+        names,
+    );
+}
+
+// ─── Closure resolution in namespace context (stubs) ────────────────────────
+
+static CLOSURE_STUB: &str = "\
+<?php
+final class Closure
+{
+    /**
+     * @param ?object $newThis
+     * @param ?string $newScope
+     * @return ?Closure
+     */
+    public function bindTo(?object $newThis, ?string $newScope = null): ?Closure {}
+
+    /**
+     * @param Closure $closure
+     * @param ?object $newThis
+     * @param ?string $newScope
+     * @return ?Closure
+     */
+    public static function bind(Closure $closure, ?object $newThis, ?string $newScope = null): ?Closure {}
+
+    /**
+     * @param object $newThis
+     * @param mixed ...$args
+     * @return mixed
+     */
+    public function call(object $newThis, mixed ...$args): mixed {}
+}
+";
+
+/// Closure literal inside a `namespace Demo { }` block should resolve to
+/// the built-in Closure class from stubs, not to `Demo\Closure` (which
+/// does not exist).
+#[tokio::test]
+async fn test_closure_literal_in_namespace_resolves_via_stubs() {
+    let mut class_stubs: HashMap<&'static str, &'static str> = HashMap::new();
+    class_stubs.insert("Closure", CLOSURE_STUB);
+    let backend = phpantom_lsp::Backend::new_test_with_stubs(class_stubs);
+
+    let uri = tower_lsp::lsp_types::Url::parse("file:///test/ns_closure.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "namespace Demo {\n",
+        "    class Pen {\n",
+        "        public function write(): string { return ''; }\n",
+        "    }\n",
+        "\n",
+        "    class ClosureMembersDemo {\n",
+        "        public function run(): void {\n",
+        "            $typedClosure = function(Pen $p): string { return $p->write(); };\n",
+        "            $typedClosure->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, src, 9, 28).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"bindTo"),
+        "Expected bindTo from Closure stubs inside namespace block, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"call"),
+        "Expected call from Closure stubs inside namespace block, got: {:?}",
+        names,
+    );
+}
+
+/// Arrow function inside a namespace should also resolve to the built-in
+/// Closure class.
+#[tokio::test]
+async fn test_arrow_function_in_namespace_resolves_via_stubs() {
+    let mut class_stubs: HashMap<&'static str, &'static str> = HashMap::new();
+    class_stubs.insert("Closure", CLOSURE_STUB);
+    let backend = phpantom_lsp::Backend::new_test_with_stubs(class_stubs);
+
+    let uri = tower_lsp::lsp_types::Url::parse("file:///test/ns_arrow.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "namespace App\\Service {\n",
+        "    class ArrowDemo {\n",
+        "        public function run(): void {\n",
+        "            $fn = fn(int $x): float => $x * 1.5;\n",
+        "            $fn->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, src, 5, 17).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"bindTo"),
+        "Expected bindTo from Closure stubs for arrow fn in namespace, got: {:?}",
+        names,
+    );
+}
+
+/// First-class callable syntax inside a namespace should resolve to the
+/// built-in Closure class.
+#[tokio::test]
+async fn test_first_class_callable_in_namespace_resolves_via_stubs() {
+    let mut class_stubs: HashMap<&'static str, &'static str> = HashMap::new();
+    class_stubs.insert("Closure", CLOSURE_STUB);
+    let backend = phpantom_lsp::Backend::new_test_with_stubs(class_stubs);
+
+    let uri = tower_lsp::lsp_types::Url::parse("file:///test/ns_fcc.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "namespace Demo {\n",
+        "    class Pen {\n",
+        "        public function write(): string { return ''; }\n",
+        "    }\n",
+        "\n",
+        "    class FccDemo {\n",
+        "        public function run(): void {\n",
+        "            $fn = strlen(...);\n",
+        "            $fn->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, src, 9, 17).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"bindTo"),
+        "Expected bindTo from Closure stubs for first-class callable in namespace, got: {:?}",
         names,
     );
 }

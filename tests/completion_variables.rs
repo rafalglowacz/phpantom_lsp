@@ -15836,3 +15836,155 @@ async fn test_completion_union_sort_properties() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+// ─── Array element access after method call on non-$this variable ───────────
+
+/// When a variable holds an instance (`$src = new Foo()`) and a method on
+/// that instance returns an array type (`Pen[]`), array element access on
+/// the result should resolve to the element type.
+///
+/// This is the non-`$this` counterpart of
+/// `test_chained_method_call_extract_raw_type_chain` which uses
+/// `$this->getRepo()->findAll()`.
+#[tokio::test]
+async fn test_array_access_after_method_call_on_variable() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///var_method_array_access.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Pen {\n",
+        "    public function write(): string { return ''; }\n",
+        "    public function color(): string { return ''; }\n",
+        "}\n",
+        "\n",
+        "class PenSource {\n",
+        "    /** @return Pen[] */\n",
+        "    public function fetchAll(): array { return []; }\n",
+        "}\n",
+        "\n",
+        "class Demo {\n",
+        "    public function run(): void {\n",
+        "        $src = new PenSource();\n",
+        "        $pens = $src->fetchAll();\n",
+        "        $pens[0]->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor right after `$pens[0]->` on line 15
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 15,
+                character: 19,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for array element after $var->method() assignment"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("write")),
+                "Should include write() from Pen via $src->fetchAll()[0]->, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("color")),
+                "Should include color() from Pen via $src->fetchAll()[0]->, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Same as above but the intermediate variable is accessed directly:
+/// `$first = $pens[0]; $first->`
+#[tokio::test]
+async fn test_variable_assigned_from_array_access_on_variable_method() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///var_method_array_assign.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Pen {\n",
+        "    public function write(): string { return ''; }\n",
+        "}\n",
+        "\n",
+        "class PenSource {\n",
+        "    /** @return Pen[] */\n",
+        "    public function fetchAll(): array { return []; }\n",
+        "}\n",
+        "\n",
+        "class Demo {\n",
+        "    public function run(): void {\n",
+        "        $src = new PenSource();\n",
+        "        $pens = $src->fetchAll();\n",
+        "        $first = $pens[0];\n",
+        "        $first->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor right after `$first->` on line 15
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 15,
+                character: 17,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for $first assigned from $pens[0]"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("write")),
+                "Should include write() from Pen via intermediate $first = $pens[0], got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

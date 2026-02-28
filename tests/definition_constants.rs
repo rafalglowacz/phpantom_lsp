@@ -803,3 +803,126 @@ async fn test_goto_definition_constant_in_comparison() {
         other => panic!("Expected Scalar location, got: {:?}", other),
     }
 }
+
+// ─── define() constant inside class method ──────────────────────────────────
+
+/// When `define('CONST', ...)` and `echo CONST` are both inside a class
+/// method, GTD on the usage should still jump to the `define()` call,
+/// and GTD on the constant name inside the `define()` call should NOT
+/// jump to itself.
+#[tokio::test]
+async fn test_goto_definition_constant_inside_class_method() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///const_in_method.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                   // 0
+        "class Demo {\n",                            // 1
+        "    public function run(): void {\n",       // 2
+        "        define('APP_VERSION', '1.0.0');\n", // 3
+        "        echo APP_VERSION;\n",               // 4
+        "    }\n",                                   // 5
+        "}\n",                                       // 6
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Click on "APP_VERSION" in `echo APP_VERSION;` on line 4
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 4,
+                character: 15,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "GTD on APP_VERSION usage inside class method should jump to define() call"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 3,
+                "define('APP_VERSION', ...) is on line 3"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}
+
+/// Same as above but inside a namespace block, matching the example.php
+/// scenario where `Demo\APP_VERSION` could confuse namespace-qualified
+/// resolution.
+#[tokio::test]
+async fn test_goto_definition_constant_inside_namespace_class_method() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///const_ns_method.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                       // 0
+        "namespace Demo {\n",                            // 1
+        "    class GtdDemo {\n",                         // 2
+        "        public function demo(): void {\n",      // 3
+        "            define('APP_VERSION', '1.0.0');\n", // 4
+        "            echo APP_VERSION;\n",               // 5
+        "        }\n",                                   // 6
+        "    }\n",                                       // 7
+        "}\n",                                           // 8
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Click on "APP_VERSION" in `echo APP_VERSION;` on line 5
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 5,
+                character: 20,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "GTD on APP_VERSION usage in namespace class method should jump to define() call"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 4,
+                "define('APP_VERSION', ...) is on line 4"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}

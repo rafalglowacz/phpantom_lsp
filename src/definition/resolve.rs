@@ -40,24 +40,57 @@ impl Backend {
         let offset = Self::position_to_offset(content, position);
 
         // Fast path: consult precomputed symbol map.
-        if let Some(symbol) = self.lookup_symbol_map(uri, offset) {
-            return self.resolve_from_symbol(&symbol.kind, uri, content, position, offset);
-        }
-
-        // When the cursor is right at the end of a token (e.g. `$o|)`
-        // where `|` is the cursor), the offset lands one past the span.
-        // Retry with offset − 1 so the symbol-map path (which has proper
-        // VarDefKind checks for parameters, catch, foreach) handles it
-        // instead of falling through to the text-based fallback.
-        if offset > 0
+        let result = if let Some(symbol) = self.lookup_symbol_map(uri, offset) {
+            self.resolve_from_symbol(&symbol.kind, uri, content, position, offset)
+        } else if offset > 0
+            // When the cursor is right at the end of a token (e.g. `$o|)`
+            // where `|` is the cursor), the offset lands one past the span.
+            // Retry with offset − 1 so the symbol-map path (which has proper
+            // VarDefKind checks for parameters, catch, foreach) handles it
+            // instead of falling through to the text-based fallback.
             && let Some(symbol) = self.lookup_symbol_map(uri, offset - 1)
         {
-            return self.resolve_from_symbol(&symbol.kind, uri, content, position, offset - 1);
+            self.resolve_from_symbol(&symbol.kind, uri, content, position, offset - 1)
+        } else {
+            // Fallback: text-based resolution (parser panicked, map missing,
+            // cursor in a gap between spans, etc.).
+            self.resolve_definition_text_based(uri, content, position)
+        };
+
+        // ── Self-reference guard ────────────────────────────────────
+        // When the resolved location points back to the same file and
+        // the cursor is already within (or touching) the target range,
+        // the user is at the definition site.  Suppress the jump so
+        // that Ctrl+Click doesn't navigate to itself.
+        //
+        // Special case: zero-width (point) locations arise from
+        // `find_define_position` and similar helpers that return the
+        // start of a construct (e.g. the `define` keyword) but the
+        // cursor may be anywhere on the same line (e.g. on the
+        // constant name inside the string argument).  For these we
+        // expand the check to the entire line.
+        if let Some(ref loc) = result
+            && let Ok(parsed_uri) = Url::parse(uri)
+            && loc.uri == parsed_uri
+        {
+            let is_point = loc.range.start == loc.range.end;
+            let within = if is_point {
+                // Zero-width target: suppress when cursor is on the same line.
+                position.line == loc.range.start.line
+            } else {
+                position.line >= loc.range.start.line
+                    && position.line <= loc.range.end.line
+                    && (position.line != loc.range.start.line
+                        || position.character >= loc.range.start.character)
+                    && (position.line != loc.range.end.line
+                        || position.character <= loc.range.end.character)
+            };
+            if within {
+                return None;
+            }
         }
 
-        // Fallback: text-based resolution (parser panicked, map missing,
-        // cursor in a gap between spans, etc.).
-        self.resolve_definition_text_based(uri, content, position)
+        result
     }
 
     /// Look up the symbol at the given byte offset in the precomputed
