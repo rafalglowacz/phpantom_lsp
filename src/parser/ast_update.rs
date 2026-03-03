@@ -312,6 +312,15 @@ impl Backend {
         if let Ok(mut map) = self.namespace_map.lock() {
             map.insert(uri_string, namespace);
         }
+
+        // Invalidate the resolved-class cache.  Any class in any file
+        // could depend on the classes that just changed (via inheritance,
+        // traits, mixins, or interfaces), so the simplest correct strategy
+        // is to clear the entire cache.  It will be lazily repopulated on
+        // the next completion / hover / definition request.
+        if let Ok(mut cache) = self.resolved_class_cache.lock() {
+            cache.clear();
+        }
     }
 
     /// Resolve `parent_class` short names in a list of `ClassInfo` to

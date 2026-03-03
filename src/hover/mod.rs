@@ -90,6 +90,7 @@ impl Backend {
                     content,
                     cursor_offset,
                     class_loader: &class_loader,
+                    resolved_class_cache: Some(&self.resolved_class_cache),
                     function_loader: Some(&function_loader),
                 };
 
@@ -106,8 +107,11 @@ impl Backend {
                 );
 
                 for target_class in &candidates {
-                    let merged =
-                        crate::virtual_members::resolve_class_fully(target_class, &class_loader);
+                    let merged = crate::virtual_members::resolve_class_fully_cached(
+                        target_class,
+                        &class_loader,
+                        &self.resolved_class_cache,
+                    );
 
                     if *is_method_call {
                         if let Some(method) = merged
@@ -162,7 +166,11 @@ impl Backend {
                 };
 
                 if is_new_context && let Some(cls) = class_loader(lookup_name) {
-                    let merged = crate::virtual_members::resolve_class_fully(&cls, &class_loader);
+                    let merged = crate::virtual_members::resolve_class_fully_cached(
+                        &cls,
+                        &class_loader,
+                        &self.resolved_class_cache,
+                    );
                     if let Some(constructor) = merged
                         .methods
                         .iter()
@@ -683,6 +691,11 @@ fn namespace_line(namespace: &Option<String>) -> String {
 /// is no effective type.
 fn build_var_annotation(effective: Option<&str>, native: Option<&str>) -> Option<String> {
     let eff = effective?;
+    // When there is no native type hint, `mixed` is the implicit type
+    // in PHP — showing `@var mixed` would be noise.
+    if native.is_none() && eff == "mixed" {
+        return None;
+    }
     if native.is_some_and(|n| types_equivalent(n, eff)) {
         return None;
     }
@@ -727,7 +740,7 @@ fn build_param_return_section(
     for p in params {
         let type_differs = match (p.type_hint.as_deref(), p.native_type_hint.as_deref()) {
             (Some(eff), Some(nat)) => !types_equivalent(eff, nat),
-            (Some(_), None) => true,
+            (Some(eff), None) => eff != "mixed",
             _ => false,
         };
         let has_desc = p.description.as_ref().is_some_and(|d| !d.is_empty());
@@ -759,7 +772,7 @@ fn build_param_return_section(
     // return entry
     let ret_type_differs = match (effective_return, native_return) {
         (Some(eff), Some(nat)) => !types_equivalent(eff, nat),
-        (Some(_), None) => true,
+        (Some(eff), None) => eff != "mixed",
         _ => false,
     };
     let has_ret_desc = return_description.is_some_and(|d| !d.is_empty());
@@ -1050,7 +1063,7 @@ fn shorten_type_string(ty: &str) -> String {
     for (i, &b) in bytes.iter().enumerate() {
         if matches!(
             b,
-            b'|' | b'&' | b'<' | b'>' | b',' | b' ' | b'?' | b'{' | b'}' | b':'
+            b'|' | b'&' | b'<' | b'>' | b',' | b' ' | b'?' | b'{' | b'}' | b':' | b'(' | b')'
         ) {
             if i > segment_start {
                 result.push_str(short_name(&ty[segment_start..i]));

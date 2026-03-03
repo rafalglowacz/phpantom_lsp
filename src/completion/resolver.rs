@@ -52,6 +52,14 @@ pub(crate) struct ResolutionCtx<'a> {
     pub cursor_offset: u32,
     /// Cross-file class resolution callback.
     pub class_loader: &'a dyn Fn(&str) -> Option<ClassInfo>,
+    /// Shared cache of fully-resolved classes, keyed by FQN.
+    ///
+    /// When `Some`, [`resolve_class_fully_cached`](crate::virtual_members::resolve_class_fully_cached)
+    /// is used instead of the uncached variant, eliminating redundant
+    /// full-resolution work within a single request cycle.  `None` in
+    /// contexts where no `Backend` (and therefore no cache) is available
+    /// (e.g. standalone free-function callers, some test helpers).
+    pub resolved_class_cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
     /// Cross-file function resolution callback (optional).
     pub function_loader: FunctionLoaderFn<'a>,
 }
@@ -69,6 +77,10 @@ pub(super) struct VarResolutionCtx<'a> {
     pub cursor_offset: u32,
     pub class_loader: &'a dyn Fn(&str) -> Option<ClassInfo>,
     pub function_loader: FunctionLoaderFn<'a>,
+    /// Shared cache of fully-resolved classes, keyed by FQN.
+    ///
+    /// See [`ResolutionCtx::resolved_class_cache`] for details.
+    pub resolved_class_cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
     /// The `@return` type annotation of the enclosing function/method,
     /// if known.  Used inside generator bodies to reverse-infer variable
     /// types from `Generator<TKey, TValue, TSend, TReturn>`.
@@ -87,6 +99,7 @@ impl<'a> VarResolutionCtx<'a> {
             cursor_offset: self.cursor_offset,
             class_loader: self.class_loader,
             function_loader: self.function_loader,
+            resolved_class_cache: self.resolved_class_cache,
         }
     }
 
@@ -107,6 +120,7 @@ impl<'a> VarResolutionCtx<'a> {
             cursor_offset: self.cursor_offset,
             class_loader: self.class_loader,
             function_loader: self.function_loader,
+            resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type,
         }
     }
@@ -126,6 +140,7 @@ impl<'a> VarResolutionCtx<'a> {
             cursor_offset,
             class_loader: self.class_loader,
             function_loader: self.function_loader,
+            resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type: self.enclosing_return_type.clone(),
         }
     }

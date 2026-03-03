@@ -145,6 +145,7 @@ impl Backend {
                 cursor_offset,
                 class_loader,
                 function_loader,
+                resolved_class_cache: None,
                 enclosing_return_type: None,
             };
 

@@ -415,6 +415,7 @@ pub(crate) fn build_union_completion_items(
     effective_access: AccessKind,
     current_class: Option<&ClassInfo>,
     class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    cache: &crate::virtual_members::ResolvedClassCache,
 ) -> Vec<CompletionItem> {
     let current_class_name = current_class.map(|cc| cc.name.as_str());
     let num_candidates = candidates.len();
@@ -425,7 +426,8 @@ pub(crate) fn build_union_completion_items(
     let mut occurrence_count: HashMap<String, usize> = HashMap::new();
 
     for target_class in candidates {
-        let merged = crate::virtual_members::resolve_class_fully(target_class, class_loader);
+        let merged =
+            crate::virtual_members::resolve_class_fully_cached(target_class, class_loader, cache);
 
         let self_or_ancestor = is_ancestor_of(current_class, target_class, class_loader);
 

@@ -169,6 +169,14 @@ pub struct Backend {
     /// `ast_map` and PSR-4 resolution.  Stub files are parsed lazily on
     /// first access and cached in `ast_map` under `phpantom-stub://` URIs.
     pub(crate) stub_index: HashMap<&'static str, &'static str>,
+    /// Cache of fully-resolved classes (inheritance + virtual members).
+    ///
+    /// Keyed by fully-qualified class name.  Populated lazily by
+    /// [`resolve_class_fully_cached`](crate::virtual_members::resolve_class_fully_cached)
+    /// and cleared whenever a file is re-parsed (`update_ast` /
+    /// `parse_and_cache_content`) so that stale results never survive
+    /// an edit.
+    pub(crate) resolved_class_cache: virtual_members::ResolvedClassCache,
     /// Embedded PHP stubs for built-in functions (e.g. `array_map`,
     /// `str_contains`, …).  Maps function name → raw PHP source code.
     ///
@@ -208,6 +216,7 @@ impl Backend {
             stub_index: stubs::build_stub_class_index(),
             stub_function_index: stubs::build_stub_function_index(),
             stub_constant_index: stubs::build_stub_constant_index(),
+            resolved_class_cache: virtual_members::new_resolved_class_cache(),
         }
     }
 

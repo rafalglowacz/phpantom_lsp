@@ -200,6 +200,7 @@ pub(in crate::completion) fn resolve_variable_assignment_raw_type(
                 cursor_offset,
                 class_loader,
                 function_loader,
+                resolved_class_cache: None,
                 enclosing_return_type: None,
             };
 

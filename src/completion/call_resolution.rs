@@ -38,6 +38,25 @@ use crate::inheritance::apply_substitution;
 
 use tower_lsp::lsp_types::Position;
 
+/// Bundled parameters for [`Backend::resolve_method_return_types_with_args`].
+///
+/// Groups the resolution-context fields that are threaded through method
+/// return-type resolution so the function stays within clippy's argument
+/// limit.
+pub(super) struct MethodReturnCtx<'a> {
+    /// All classes known in the current file.
+    pub all_classes: &'a [ClassInfo],
+    /// Cross-file class resolution callback.
+    pub class_loader: &'a dyn Fn(&str) -> Option<ClassInfo>,
+    /// Template substitution map (method-level `@template` bindings).
+    pub template_subs: &'a HashMap<String, String>,
+    /// Resolves a variable name to class-string values (for conditional
+    /// return type evaluation).
+    pub var_resolver: VarClassStringResolver<'a>,
+    /// Shared resolved-class cache (when available).
+    pub cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
+}
+
 /// Build a [`VarClassStringResolver`] closure from a [`ResolutionCtx`].
 ///
 /// The returned closure resolves a variable name (e.g. `"$requestType"`)
@@ -97,7 +116,11 @@ impl Backend {
         };
 
         for owner in &owner_classes {
-            let merged = crate::virtual_members::resolve_class_fully(owner, rctx.class_loader);
+            let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                owner,
+                rctx.class_loader,
+                rctx.resolved_class_cache,
+            );
             if let Some(m) = merged
                 .methods
                 .iter()
@@ -125,7 +148,11 @@ impl Backend {
         rctx: &ResolutionCtx<'_>,
     ) -> Option<ResolvedCallableTarget> {
         let owner = super::resolver::resolve_static_owner_class(class, rctx)?;
-        let merged = crate::virtual_members::resolve_class_fully(&owner, rctx.class_loader);
+        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+            &owner,
+            rctx.class_loader,
+            rctx.resolved_class_cache,
+        );
         let m = merged
             .methods
             .iter()
@@ -154,9 +181,10 @@ impl Backend {
     fn resolve_constructor_callable(
         class_name: &str,
         class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+        cache: &crate::virtual_members::ResolvedClassCache,
     ) -> Option<ResolvedCallableTarget> {
         let ci = class_loader(class_name)?;
-        let merged = crate::virtual_members::resolve_class_fully(&ci, class_loader);
+        let merged = crate::virtual_members::resolve_class_fully_cached(&ci, class_loader, cache);
         let fqn = format_callable_fqn(&merged.name, &merged.file_namespace);
         let (parameters, return_type) =
             if let Some(ctor) = merged.methods.iter().find(|m| m.name == "__construct") {
@@ -207,6 +235,7 @@ impl Backend {
             content,
             cursor_offset,
             class_loader: &class_loader,
+            resolved_class_cache: Some(&self.resolved_class_cache),
             function_loader: Some(&function_loader_cl),
         };
 
@@ -222,9 +251,11 @@ impl Backend {
 
         match effective {
             // ── Constructor: `new ClassName` or `new ClassName()` ────
-            SubjectExpr::NewExpr { class_name } => {
-                Self::resolve_constructor_callable(class_name, &class_loader)
-            }
+            SubjectExpr::NewExpr { class_name } => Self::resolve_constructor_callable(
+                class_name,
+                &class_loader,
+                &self.resolved_class_cache,
+            ),
 
             // ── Instance method call: `$subject->method(…)` ─────────
             SubjectExpr::MethodCall { base, method } => {
@@ -315,14 +346,18 @@ impl Backend {
                         HashMap::new()
                     };
                     let var_resolver = build_var_resolver(ctx);
+                    let mr_ctx = MethodReturnCtx {
+                        all_classes: ctx.all_classes,
+                        class_loader: ctx.class_loader,
+                        template_subs: &template_subs,
+                        var_resolver: Some(&var_resolver),
+                        cache: ctx.resolved_class_cache,
+                    };
                     results.extend(Self::resolve_method_return_types_with_args(
                         owner,
                         method_name,
                         text_args,
-                        ctx.all_classes,
-                        ctx.class_loader,
-                        &template_subs,
-                        Some(&var_resolver),
+                        &mr_ctx,
                     ));
                 }
                 results
@@ -348,14 +383,18 @@ impl Backend {
                         HashMap::new()
                     };
                     let var_resolver = build_var_resolver(ctx);
+                    let mr_ctx = MethodReturnCtx {
+                        all_classes: ctx.all_classes,
+                        class_loader: ctx.class_loader,
+                        template_subs: &template_subs,
+                        var_resolver: Some(&var_resolver),
+                        cache: ctx.resolved_class_cache,
+                    };
                     return Self::resolve_method_return_types_with_args(
                         owner,
                         method_name,
                         text_args,
-                        ctx.all_classes,
-                        ctx.class_loader,
-                        &template_subs,
-                        Some(&var_resolver),
+                        &mr_ctx,
                     );
                 }
                 vec![]
@@ -529,11 +568,12 @@ impl Backend {
         class_info: &ClassInfo,
         method_name: &str,
         text_args: &str,
-        all_classes: &[ClassInfo],
-        class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
-        template_subs: &HashMap<String, String>,
-        var_resolver: VarClassStringResolver<'_>,
+        mr_ctx: &MethodReturnCtx<'_>,
     ) -> Vec<ClassInfo> {
+        let all_classes = mr_ctx.all_classes;
+        let class_loader = mr_ctx.class_loader;
+        let template_subs = mr_ctx.template_subs;
+        let var_resolver = mr_ctx.var_resolver;
         // Helper: try to resolve a method's conditional return type, falling
         // back to template-substituted return type, then plain return type.
         let resolve_method = |method: &MethodInfo| -> Vec<ClassInfo> {
@@ -620,7 +660,11 @@ impl Backend {
         }
 
         // Walk up the inheritance chain
-        let merged = crate::virtual_members::resolve_class_fully(class_info, class_loader);
+        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+            class_info,
+            class_loader,
+            mr_ctx.cache,
+        );
         if let Some(method) = merged.methods.iter().find(|m| m.name == method_name) {
             return resolve_method(method);
         }
@@ -650,8 +694,11 @@ impl Backend {
             .find(|m| m.name == method_name)
             .cloned()
             .or_else(|| {
-                let merged =
-                    crate::virtual_members::resolve_class_fully(class_info, ctx.class_loader);
+                let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                    class_info,
+                    ctx.class_loader,
+                    ctx.resolved_class_cache,
+                );
                 merged.methods.into_iter().find(|m| m.name == method_name)
             });
 

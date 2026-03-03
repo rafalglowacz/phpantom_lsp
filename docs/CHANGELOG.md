@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Faster class resolution.** Fully-resolved classes (inheritance + virtual members) are now cached and reused across completion, hover, and go-to-definition within each request cycle. The cache is automatically cleared whenever a file changes, so results are never stale.
 - **Resolution engine rewritten on AST.** Variable type inference, subject dispatch, call return type resolution, member-access detection, and go-to-definition lookups all run through the AST walker now. The text-based scanner and its line-by-line fallbacks have been removed entirely. This fixes a class of edge-case bugs with null-safe chains, parenthesized `new` expressions, chained method calls, and complex array access patterns.
 - **Go-to-definition and go-to-implementation use only the symbol map.** The text-based fallbacks (`extract_word_at_position`, `extract_member_access_context`, `resolve_type_hint_at_variable_text`) have been removed from both features. Cursor context detection now relies exclusively on the precomputed symbol map.
 - **Go-to-definition uses byte offsets exclusively.** All definition lookups use AST-derived byte offsets instead of text search, including for built-in stubs and `define()` constants.

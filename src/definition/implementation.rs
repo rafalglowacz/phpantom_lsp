@@ -190,6 +190,7 @@ impl Backend {
             content,
             cursor_offset,
             class_loader: &class_loader,
+            resolved_class_cache: Some(&self.resolved_class_cache),
             function_loader: Some(&function_loader),
         };
         let candidates =
@@ -210,7 +211,11 @@ impl Backend {
 
             // Verify the method exists on this interface/abstract class
             // (directly or inherited).
-            let merged = crate::virtual_members::resolve_class_fully(candidate, &class_loader);
+            let merged = crate::virtual_members::resolve_class_fully_cached(
+                candidate,
+                &class_loader,
+                &self.resolved_class_cache,
+            );
             let has_method = merged.methods.iter().any(|m| m.name == member_name);
             let has_property = merged.properties.iter().any(|p| p.name == member_name);
 
@@ -233,7 +238,11 @@ impl Backend {
 
             for imp in &implementors {
                 // Check that the implementor actually has this member.
-                let imp_merged = crate::virtual_members::resolve_class_fully(imp, &class_loader);
+                let imp_merged = crate::virtual_members::resolve_class_fully_cached(
+                    imp,
+                    &class_loader,
+                    &self.resolved_class_cache,
+                );
                 let imp_has = match member_kind {
                     MemberKind::Method => imp_merged.methods.iter().any(|m| m.name == member_name),
                     MemberKind::Property => {

@@ -28,6 +28,7 @@ use crate::docblock;
 use crate::types::ClassInfo;
 
 use super::resolution::build_var_resolver_from_ctx;
+use crate::completion::call_resolution::MethodReturnCtx;
 use crate::completion::conditional_resolution::resolve_conditional_with_args;
 use crate::completion::resolver::VarResolutionCtx;
 
@@ -419,14 +420,18 @@ impl Backend {
             } else {
                 HashMap::new()
             };
+            let mr_ctx = MethodReturnCtx {
+                all_classes: ctx.all_classes,
+                class_loader: ctx.class_loader,
+                template_subs: &template_subs,
+                var_resolver: Some(&var_resolver),
+                cache: ctx.resolved_class_cache,
+            };
             let results = Self::resolve_method_return_types_with_args(
                 owner,
                 &method_name,
                 &text_args,
-                ctx.all_classes,
-                ctx.class_loader,
-                &template_subs,
-                Some(&var_resolver),
+                &mr_ctx,
             );
             if !results.is_empty() {
                 return results;
@@ -471,14 +476,18 @@ impl Backend {
                     HashMap::new()
                 };
                 let var_resolver = build_var_resolver_from_ctx(ctx);
+                let mr_ctx = MethodReturnCtx {
+                    all_classes: ctx.all_classes,
+                    class_loader: ctx.class_loader,
+                    template_subs: &template_subs,
+                    var_resolver: Some(&var_resolver),
+                    cache: ctx.resolved_class_cache,
+                };
                 return Self::resolve_method_return_types_with_args(
                     owner,
                     &method_name,
                     &text_args,
-                    ctx.all_classes,
-                    ctx.class_loader,
-                    &template_subs,
-                    Some(&var_resolver),
+                    &mr_ctx,
                 );
             }
         }

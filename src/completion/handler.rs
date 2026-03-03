@@ -728,6 +728,7 @@ impl Backend {
                         content,
                         cursor_offset,
                         class_loader: &class_loader,
+                        resolved_class_cache: Some(&self.resolved_class_cache),
                         function_loader: Some(&function_loader),
                     };
                     super::resolver::resolve_target_classes(
@@ -759,6 +760,7 @@ impl Backend {
                     effective_access,
                     current_class,
                     &class_loader,
+                    &self.resolved_class_cache,
                 )
             },
         );

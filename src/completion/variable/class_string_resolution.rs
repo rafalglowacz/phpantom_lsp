@@ -49,6 +49,7 @@ impl Backend {
                     cursor_offset,
                     class_loader,
                     function_loader: None,
+                    resolved_class_cache: None,
                     enclosing_return_type: None,
                 };
                 Self::resolve_class_string_in_statements(program.statements.iter(), &ctx)

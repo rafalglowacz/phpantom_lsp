@@ -270,3 +270,13 @@ fn shorten_type_string_mixed_union_with_generics() {
         "Collection<int, User>|null"
     );
 }
+
+#[test]
+fn shorten_type_string_parenthesized_callable_union() {
+    assert_eq!(
+        shorten_type_string(
+            "(\\Closure(static): mixed)|string|array|\\Illuminate\\Contracts\\Database\\Query\\Expression"
+        ),
+        "(Closure(static): mixed)|string|array|Expression"
+    );
+}

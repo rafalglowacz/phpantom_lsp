@@ -186,6 +186,12 @@ impl Backend {
             map.insert(uri.to_owned(), file_namespace);
         }
 
+        // Invalidate the resolved-class cache — the newly parsed file
+        // may contain classes that other resolved entries depend on.
+        if let Ok(mut cache) = self.resolved_class_cache.lock() {
+            cache.clear();
+        }
+
         Some(classes)
     }
 

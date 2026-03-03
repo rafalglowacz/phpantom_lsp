@@ -24,6 +24,18 @@
 //! lower-priority one, and all virtual members lose to real declared
 //! members.
 //!
+//! # Caching
+//!
+//! [`resolve_class_fully`] is called from many code paths (completion,
+//! hover, go-to-definition, call resolution, etc.) and often for the
+//! same class within a single request.  The full resolution (inheritance
+//! walk + virtual member providers + interface merging) is expensive, so
+//! [`resolve_class_fully_cached`] accepts a [`ResolvedClassCache`] that
+//! stores results keyed by fully-qualified class name.  The cache is
+//! stored on `Backend` and cleared whenever a file is re-parsed
+//! (`update_ast` / `parse_and_cache_content`), so stale entries never
+//! survive an edit.
+//!
 //! # Precedence model
 //!
 //! ```text
@@ -39,8 +51,24 @@
 pub mod laravel;
 pub mod phpdoc;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use crate::inheritance::resolve_class_with_inheritance;
 use crate::types::{ClassInfo, ConstantInfo, MethodInfo, PropertyInfo};
+
+/// Thread-safe cache of fully-resolved classes, keyed by FQN.
+///
+/// Stored on [`Backend`](crate::Backend) and cleared on every file
+/// change so that stale results never survive an edit.  Within a
+/// single request cycle (completion, hover, etc.) the cache eliminates
+/// redundant calls to [`resolve_class_fully`] for the same class.
+pub type ResolvedClassCache = Arc<Mutex<HashMap<String, ClassInfo>>>;
+
+/// Create a new, empty [`ResolvedClassCache`].
+pub fn new_resolved_class_cache() -> ResolvedClassCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 /// Members synthesized by a provider.
 ///
@@ -219,6 +247,74 @@ pub fn resolve_class_fully(
     class: &ClassInfo,
     class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
 ) -> ClassInfo {
+    resolve_class_fully_inner(class, class_loader, None)
+}
+
+/// Cached variant of [`resolve_class_fully`].
+///
+/// Identical semantics, but stores and retrieves results from `cache`
+/// so that repeated resolutions of the same class within a single
+/// request cycle (or across requests between edits) are free.
+///
+/// The cache is keyed by the class's fully-qualified name
+/// (`namespace\ClassName` or just `ClassName` for the global namespace).
+/// Callers that apply post-resolution transforms (e.g.
+/// [`apply_generic_args`](crate::inheritance::apply_generic_args)) should
+/// still call this function for the base resolution and apply the
+/// transform to the returned value.
+pub fn resolve_class_fully_cached(
+    class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    cache: &ResolvedClassCache,
+) -> ClassInfo {
+    resolve_class_fully_inner(class, class_loader, Some(cache))
+}
+
+/// Resolve a class fully, using the cache when available.
+///
+/// This is the preferred entry point for code paths that may or may
+/// not have access to a [`ResolvedClassCache`] (e.g. context structs
+/// where the cache field is `Option<&ResolvedClassCache>`).  When
+/// `cache` is `Some`, behaves like [`resolve_class_fully_cached`];
+/// when `None`, behaves like [`resolve_class_fully`].
+pub fn resolve_class_fully_maybe_cached(
+    class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    cache: Option<&ResolvedClassCache>,
+) -> ClassInfo {
+    resolve_class_fully_inner(class, class_loader, cache)
+}
+
+/// Compute the fully-qualified name used as the cache key.
+///
+/// Mirrors the FQN construction in `update_ast_inner` and
+/// `parse_and_cache_content`: `namespace\ClassName` when a namespace
+/// is present, or just the short name otherwise.
+fn class_fqn(class: &ClassInfo) -> String {
+    match &class.file_namespace {
+        Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, class.name),
+        _ => class.name.clone(),
+    }
+}
+
+/// Shared implementation behind [`resolve_class_fully`] and
+/// [`resolve_class_fully_cached`].
+fn resolve_class_fully_inner(
+    class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    cache: Option<&ResolvedClassCache>,
+) -> ClassInfo {
+    let fqn = class_fqn(class);
+
+    // ── Cache lookup ────────────────────────────────────────────────
+    if let Some(cache) = cache
+        && let Ok(map) = cache.lock()
+        && let Some(cached) = map.get(&fqn)
+    {
+        return cached.clone();
+    }
+
+    // ── Uncached resolution ─────────────────────────────────────────
     let mut merged = resolve_class_with_inheritance(class, class_loader);
     let providers = default_providers();
     if !providers.is_empty() {
@@ -275,6 +371,13 @@ pub fn resolve_class_fully(
                 }
             }
         }
+    }
+
+    // ── Cache store ─────────────────────────────────────────────────
+    if let Some(cache) = cache
+        && let Ok(mut map) = cache.lock()
+    {
+        map.insert(fqn, merged.clone());
     }
 
     merged

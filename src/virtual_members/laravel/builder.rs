@@ -66,6 +66,14 @@ pub(super) fn build_builder_forwarded_methods(
     // including @mixin Query\Builder).  This is safe because Builder
     // does not extend Model, so the LaravelModelProvider will not
     // recurse.
+    // Use the uncached variant here.  This code runs inside
+    // `resolve_class_fully` (called by the LaravelModelProvider),
+    // so the cache entry for the *model* class is still being
+    // built.  Caching the Builder resolution is safe (no deadlock
+    // — the mutex is never held across resolution), but Builder
+    // itself rarely changes, and the top-level `resolve_class_fully_cached`
+    // call on the model class already caches the final merged result
+    // that includes these forwarded methods.
     let resolved_builder =
         crate::virtual_members::resolve_class_fully(&builder_class, class_loader);
 

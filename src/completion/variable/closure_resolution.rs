@@ -704,7 +704,11 @@ impl Backend {
                 .or_else(|| (ctx.class_loader)(&name))
         });
         if let Some(ref cls) = owner {
-            let resolved = crate::virtual_members::resolve_class_fully(cls, ctx.class_loader);
+            let resolved = crate::virtual_members::resolve_class_fully_maybe_cached(
+                cls,
+                ctx.class_loader,
+                ctx.resolved_class_cache,
+            );
             let params = Self::find_callable_params_on_method(&resolved, method_name, arg_idx, ctx);
             params
                 .into_iter()
@@ -724,7 +728,11 @@ impl Backend {
         ctx: &VarResolutionCtx<'_>,
     ) -> Vec<String> {
         for cls in classes {
-            let resolved = crate::virtual_members::resolve_class_fully(cls, ctx.class_loader);
+            let resolved = crate::virtual_members::resolve_class_fully_maybe_cached(
+                cls,
+                ctx.class_loader,
+                ctx.resolved_class_cache,
+            );
             let result = Self::find_callable_params_on_method(&resolved, method_name, arg_idx, ctx);
             if !result.is_empty() {
                 return result;

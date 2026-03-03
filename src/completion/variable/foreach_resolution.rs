@@ -103,7 +103,11 @@ impl Backend {
         };
 
         for cls in &iterable_classes {
-            let merged = crate::virtual_members::resolve_class_fully(cls, ctx.class_loader);
+            let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                cls,
+                ctx.class_loader,
+                ctx.resolved_class_cache,
+            );
             if let Some(value_type) = Self::extract_iterable_element_type_from_class(&merged) {
                 Self::push_foreach_resolved_types(&value_type, ctx, results, conditional);
                 return;
@@ -185,7 +189,11 @@ impl Backend {
         };
 
         for cls in &iterable_classes {
-            let merged = crate::virtual_members::resolve_class_fully(cls, ctx.class_loader);
+            let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                cls,
+                ctx.class_loader,
+                ctx.resolved_class_cache,
+            );
             if let Some(key_type) = Self::extract_iterable_key_type_from_class(&merged) {
                 Self::push_foreach_resolved_types(&key_type, ctx, results, conditional);
                 return;
