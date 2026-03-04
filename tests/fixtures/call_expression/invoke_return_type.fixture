@@ -1,0 +1,21 @@
+// test: __invoke method call resolves return type
+// feature: completion
+// Adapted from phpactor call-expression/invoke.test
+// ignore: __invoke() return type not resolved when calling $obj()
+// expect: format(
+---
+<?php
+
+class Formatter {
+    public function format(): string {}
+}
+
+class Foobar
+{
+    public function __invoke(): Formatter
+    {
+    }
+}
+
+$f = new Foobar();
+$f()-><>

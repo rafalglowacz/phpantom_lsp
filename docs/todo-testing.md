@@ -226,43 +226,43 @@ For each `.test` file in `phpactor/lib/WorseReflection/Tests/Inference/<category
 - [x] `class_implements_single1` — ❌ `generics/class_implements_single.fixture` (ignored: @implements generic resolution not yet supported)
 - [x] `class_implements_multiple1` — ❌ `generics/class_implements_multiple.fixture` (ignored: @implements generic resolution not yet supported)
 - [x] `class_template_extends1` — ❌ `generics/class_template_extends.fixture` (ignored: @template-extends syntax not recognized, only @extends)
-- [ ] `class_template_implements1` — child re-templates interface's template
+- [x] `class_template_implements1` — ❌ `generics/class_template_implements.fixture` (ignored: @implements generic resolution not yet supported, @template-implements syntax not recognized)
 - [x] `constructor-params` — ❌ `generics/constructor_params.fixture` (ignored: needs todo.md §2)
 - [x] `constructor-array_arg` — ❌ `generics/constructor_array_arg.fixture` (ignored: needs todo.md §2)
 - [x] `constructor-generic-arg` — ❌ `generics/constructor_generic_arg.fixture` (ignored: needs todo.md §2)
 - [x] `constructor-param-and-extend` — ❌ `generics/constructor_param_and_extend.fixture` (ignored: needs todo.md §2)
 - [x] `class-string-generic` — ✅ `generics/class_string_generic.fixture` — `class-string<T>` resolves T from `Foo::class`
-- [ ] `class-string-generic-union` — class-string with union return
-- [ ] `class-string-generic-nested-return` — class-string with nested return type
+- [x] `class-string-generic-union` — ❌ `generics/class_string_generic_union.fixture` (ignored: needs function-level @template argument inference with variadic params, todo.md §2)
+- [x] `class-string-generic-nested-return` — ❌ `generics/class_string_nested_return.fixture` (ignored: needs function-level @template argument inference, todo.md §2)
 - [x] `class-string-generic-decared-interface` — ❌ `generics/class_string_generic_interface.fixture` (ignored: class-string<T> on interface method not inherited by implementing class)
 - [x] `method_generic` — ❌ `generics/method_generic.fixture` (ignored: needs todo.md §2 function-level @template argument inference)
 - [x] `method_generic_class-string-2nd-arg` — ✅ `generics/class_string_2nd_arg.fixture` — class-string as 2nd parameter
-- [ ] `method_generic_class-string-union_return` — class-string method with union return
-- [ ] `method_generic_covariant` — `@template-covariant`
-- [ ] `method_returns_collection` — method returning a generic collection
-- [ ] `method_returns_collection2` — variant of collection return
-- [ ] `method_returns_templated_generic` — method returns `Generic<T>`
+- [ ] `method_generic_class-string-union_return` — class-string method with union return (similar to class-string-generic-union but on method)
+- [ ] `method_generic_covariant` — `@template-covariant` (hover-only assertion, low priority)
+- [x] `method_returns_collection` — ❌ `generics/method_returns_collection.fixture` (ignored: needs @implements generic resolution and IteratorAggregate foreach support, todo.md §4)
+- [ ] `method_returns_collection2` — variant of collection return (interface chain, similar to method_returns_collection)
+- [ ] `method_returns_templated_generic` — method returns `Generic<T>` (needs constructor argument type inference, todo.md §2)
 - [x] `nullable_template_param` — ✅ `generics/nullable_template_param.fixture` — `?T` template usage
-- [ ] `parameter` — template parameter type resolution
-- [ ] `type_from_template_in_class` — template used as property type
-- [ ] `generic_with_this` — template resolving to `$this`
-- [ ] `generator_1` — Generator<TKey, TValue>
-- [ ] `generator_2` — Generator with send type
-- [ ] `generator_yield_from_1` — yield from with generics
-- [ ] `interface` — generic interface resolution
-- [ ] `iterable` — `iterable<K, V>` resolution
-- [ ] `iterator1` — `Iterator<K, V>` foreach key/value (relevant to todo.md §16: SPL iterator generic stubs)
-- [ ] `iterator2` — nested iterator resolution (relevant to todo.md §16)
-- [ ] `iterator_aggregate1` — `IteratorAggregate<K, V>` (relevant to todo.md §16)
-- [ ] `iterator_aggregate2` — aggregate with custom iterator (relevant to todo.md §16)
-- [ ] `array_access1` — `ArrayAccess<K, V>` offset get
-- [ ] `array_access_resolve_method_type1` — ArrayAccess method resolution
+- [ ] `parameter` — template parameter type resolution (needs @implements generic resolution on method params)
+- [ ] `type_from_template_in_class` — template used as property type (hover-only assertion, low priority)
+- [ ] `generic_with_this` — template resolving to `$this` (needs constructor argument type inference, todo.md §2)
+- [x] `generator_1` — ❌ `generics/generator_foreach.fixture` (ignored: needs Generator generic foreach resolution, todo.md §4)
+- [ ] `generator_2` — Generator with single type param (similar to generator_1)
+- [ ] `generator_yield_from_1` — yield from with generics (uses wrReturnType, not applicable to completion)
+- [x] `interface` — ❌ `generics/interface_extends_traversable.fixture` (ignored: needs @implements generic resolution and Traversable foreach support, todo.md §4)
+- [ ] `iterable` — `iterable<K, V>` resolution (needs generic iterable foreach support)
+- [x] `iterator1` — covered by `iterator2` fixture below (iterator1 has single type param, iterator2 has key+value)
+- [x] `iterator2` — ❌ `generics/iterator_foreach.fixture` (ignored: needs @implements generic resolution and Iterator foreach support, todo.md §4)
+- [x] `iterator_aggregate1` — ❌ `generics/iterator_aggregate_foreach.fixture` (ignored: needs @implements generic resolution and IteratorAggregate foreach support, todo.md §4)
+- [ ] `iterator_aggregate2` — aggregate with complex nested type (similar to iterator_aggregate1)
+- [ ] `array_access1` — `ArrayAccess<K, V>` offset get (relevant to todo.md §23)
+- [ ] `array_access_resolve_method_type1` — ArrayAccess method resolution (relevant to todo.md §23)
 - [x] `phpactor_reflection_collection` — ⏭️ **skip:** Phpactor-internal
 - [x] `phpactor_reflection_of_type` — ⏭️ **skip:** Phpactor-internal
 - [x] `gh-1530-example` — ✅ `generics/collection_chain_gh1530.fixture` — Collection first() through generic interface chain
-- [ ] `gh-1771` — GitHub issue regression (uses wrAssertOffset, not applicable)
+- [x] `gh-1771` — ⏭️ **skip:** uses wrAssertOffset, not applicable to completion/hover
 - [x] `gh-1800` — ❌ `generics/reflection_collection_chain.fixture` (ignored: needs @implements generic resolution and complex generic chain)
-- [ ] `gh-1875` — GitHub issue regression (nested generic iterator, relevant to todo.md §16)
+- [ ] `gh-1875` — GitHub issue regression (nested generic iterator chain, relevant to todo.md §16)
 - [x] `gh-2295-test` — ✅ `generics/nested_factory_extends.fixture` — nested factory extends resolves through inheritance chain
 
 #### if-statement/ (35 files)
@@ -301,11 +301,11 @@ For each `.test` file in `phpactor/lib/WorseReflection/Tests/Inference/<category
 - [x] `property_negated` — ❌ `narrowing/property_narrowing_negated.fixture` (ignored: negated property narrowing not supported)
 - [x] `remove_null_type1` — ✅ `narrowing/remove_null_not_null_check.fixture` — `!== null` strips null
 - [x] `remove_null_type2` — ✅ `narrowing/remove_null_equal_return.fixture` — `null ===` with return strips null
-- [ ] `union_and` — `instanceof A && instanceof B` → we show union of members (PHPantom design choice)
-- [ ] `union_and_else` — intersection with else branch → same design choice
+- [x] `union_and` — ❌ `narrowing/union_and_instanceof.fixture` (ignored: double instanceof in && condition does not narrow untyped variable)
+- [x] `union_and_else` — ✅ `narrowing/union_and_else.fixture` — after && instanceof with early return, remaining branches show all members
 - [x] `union_or` — ✅ `narrowing/or_instanceof.fixture` — `instanceof A || instanceof B` → union
 - [x] `union_or_else` — ✅ `narrowing/or_instanceof_else_narrows.fixture` — else after `||` strips both types
-- [ ] `variable_introduced_in_branch` — **gap:** var declared inside if
+- [x] `variable_introduced_in_branch` — ❌ `narrowing/variable_introduced_in_branch.fixture` (ignored: variable assigned inside if branch not tracked after branch merges)
 
 #### function/ (20 files)
 
@@ -329,27 +329,32 @@ For each `.test` file in `phpactor/lib/WorseReflection/Tests/Inference/<category
 #### type/ (26 files)
 
 - [ ] `arrayshape` / `arrayshape_multiline` / `arrayshape_multiline_optional` — array shape parsing (likely already covered)
-- [ ] `callable` — callable type resolution
-- [ ] `class-string` / `class-string-new` / `class-string-new-no-type` / `class-string-static-call` — `class-string<T>` usage
-- [ ] `closure` — Closure type resolution
+- [ ] `callable` — callable type (hover-only assertion, no completion impact)
+- [x] `class-string` — ⏭️ **skip:** hover-only (asserts class-string<Foo> type string, no completion impact)
+- [x] `class-string-new` — ❌ `type/class_string_new.fixture` (ignored: new $classStringVar does not resolve to the class type)
+- [ ] `class-string-new-no-type` — new from untyped class-string (low priority)
+- [x] `class-string-static-call` — ❌ `type/class_string_static_call.fixture` (ignored: $classStringVar::staticMethod() does not resolve return type)
+- [ ] `closure` — Closure type (hover-only assertion, no completion impact)
 - [x] `conditional-type` — ✅ `type/conditional_return_type.fixture` — conditional return type with class-string resolves
 - [x] `conditional-type2` — ❌ `type/conditional_return_type_string.fixture` (ignored: literal string conditional not supported)
-- [ ] `conditional-type3` — literal string conditional (non-matching branch)
-- [ ] `conditional-type-container` — conditional on container class
-- [ ] `conditional-type-nested` — nested conditional
+- [ ] `conditional-type3` — literal string conditional (non-matching branch, similar to conditional-type2)
+- [x] `conditional-type-container` — ✅ `type/conditional_return_container.fixture` — conditional return type on container interface resolves from class-string
+- [ ] `conditional-type-nested` — nested conditional (literal string matching, low priority)
 - [x] `conditional-type-nullable` — ✅ `type/conditional_return_null.fixture` — conditional with null parameter resolves
 - [ ] `conditional-type-on-function` — conditional return on standalone function (relevant to todo.md §3)
-- [ ] `false` — `false` pseudo-type
+- [ ] `false` — `false` pseudo-type (hover-only assertion, no completion impact)
 - [ ] `int-range` — `int<0, max>` range type (low priority — no completion impact)
-- [ ] `list` — `list<T>` type
-- [ ] `never` — `never` type
-- [ ] `parenthesized` / `parenthesized_closure` — `(A|B)` grouping
+- [ ] `list` — `list<T>` type (hover-only assertion, no completion impact)
+- [ ] `never` — `never` type (hover-only assertion, no completion impact)
+- [ ] `parenthesized` / `parenthesized_closure` — `(A|B)` grouping (hover-only assertions)
 - [x] `self_context_trait` — ✅ `type/self_in_trait.fixture` — `self` in trait resolves to using class
 - [x] `static` — ✅ `type/static_return_type.fixture` — `static` return type resolves to declaring class
 - [x] `static_context` — ✅ `type/static_return_child.fixture` — `static` on parent resolves to child class
 - [ ] `string-literal` — string literal type (low priority — no completion impact)
-- [ ] `union_from_relative_docblock` — union from relative docblock reference
-- [ ] `variadic` — variadic parameter type
+- [ ] `union_from_relative_docblock` — union from relative docblock reference (hover-only assertion)
+- [ ] `variadic` — variadic parameter type (hover-only assertion)
+- [x] `phpstan-type-alias` — ❌ `type/phpstan_type_alias.fixture` (ignored: @phpstan-type alias not resolved when used as return type in foreach)
+- [x] `psalm-type-alias` — ⏭️ **skip:** structurally identical to phpstan-type-alias
 
 #### foreach/ (13 files)
 
@@ -359,9 +364,9 @@ For each `.test` file in `phpactor/lib/WorseReflection/Tests/Inference/<category
 - [ ] `list_deconstruct` / `list_deconstruct_1` — `foreach ($arr as [$a, $b])` (literal types, low priority)
 - [ ] `literal_keys` / `literal_values` / `literal_values_removes_dupes` — literal type preservation (low priority)
 - [x] `namespaced` — ✅ `foreach/namespaced.fixture` — foreach with namespaced types resolves
-- [ ] `preserve_types_after_break` — type after `break` in foreach
+- [ ] `preserve_types_after_break` — type after `break` in foreach (hover-only assertion)
 - [x] `with_docblock` — ❌ `foreach/docblock_override.fixture` (ignored: @var on foreach loop variable with untyped collection not resolved)
-- [ ] `gh-1708` — regression test
+- [ ] `gh-1708` — regression test (hover-only assertion)
 
 #### reflection/ (12 files)
 
@@ -371,11 +376,12 @@ For each `.test` file in `phpactor/lib/WorseReflection/Tests/Inference/<category
 - [ ] `mixin_recursive` — recursive mixin resolution
 - [x] `mixin_static` — ✅ `reflection/mixin_static.fixture` — @mixin with static return type resolves to consuming class
 - [x] `multiple_mixins` — ✅ `reflection/multiple_mixins.fixture` — multiple @mixin tags contribute members from all mixed classes
-- [ ] `promoted_property_with_params` — constructor promotion
-- [ ] `self-referencing-constant` — constant referencing self
-- [ ] `virtial_static_method` — `@method static` virtual
-- [ ] `circular-dependency-trait` / `circular-dependency_interface` / `circular-dependency_parent` — circular dep protection (we have `MAX_INHERITANCE_DEPTH` / `MAX_TRAIT_DEPTH` / `MAX_MIXIN_DEPTH` guards)
-- [ ] `gh-2207` — regression
+- [x] `mixin_recursive` — ✅ `reflection/mixin_recursive.fixture` — recursive mixin resolves without infinite loop
+- [ ] `promoted_property_with_params` — constructor promotion (hover-only assertion)
+- [ ] `self-referencing-constant` — constant referencing self (hover-only assertion)
+- [x] `virtial_static_method` — ❌ `reflection/virtual_static_method.fixture` (ignored: @method static return type with generics not resolved on static call)
+- [ ] `circular-dependency-trait` / `circular-dependency_interface` / `circular-dependency_parent` — circular dep protection (we have `MAX_INHERITANCE_DEPTH` / `MAX_TRAIT_DEPTH` / `MAX_MIXIN_DEPTH` guards, already tested indirectly)
+- [ ] `gh-2207` — regression (hover-only assertion)
 
 #### virtual_member/ (7 files)
 
@@ -391,20 +397,20 @@ For each `.test` file in `phpactor/lib/WorseReflection/Tests/Inference/<category
 
 - [ ] `assignment/` (10) — array mutation, list, ternary, nested destructuring
 - [ ] `binary-expression/` (7) — arithmetic, concat, bitwise, comparison (low priority — no completion impact)
-- [ ] `call-expression/` (5) — first-class callable, `__invoke`
-- [x] `combination/` (8) — 3 converted: `combination/narrow_abstract_assert.fixture` ✅, `combination/param_with_multiple_types.fixture` ✅, `combination/union_narrow_with_ancestors.fixture` ✅. Remaining 5 need adjustments for union-completion semantics or use `is_string`.
-- [x] `narrowing/` (4) — 3 converted: `narrowing/phpstan_assert_function.fixture` ✅, `narrowing/phpstan_assert_static.fixture` ❌ (ignored: static method @phpstan-assert), `narrowing/phpstan_assert_negated.fixture` ❌ (ignored: negated assert). 1 remaining: `narrow-generic` (generic narrowing).
-- [x] `enum/` (5) — 3 converted: `enum/custom_member.fixture` ✅, `enum/enum_trait.fixture` ✅, `enum/enum_implements_interface.fixture` ✅. Remaining: `backed_enum_case` (literal type assertions), `enum_case` (literal type assertions).
-- [ ] `catch-clause/` (2) — exception types, union catch (likely already covered via `completion_catch.rs`)
+- [x] `call-expression/` (5) — 1 converted: `call_expression/invoke_return_type.fixture` ❌ (ignored: __invoke() return type not resolved when calling $obj()). Remaining: `1st-class-callable` (covered by `completion_first_class_callable.rs`), `invoke2` (Generator __invoke, needs generator support), `invoke-gh-1686` (regression), `type-from-invoked-callable` (callable invocation).
+- [x] `combination/` (8) — 6 converted: `combination/narrow_abstract_assert.fixture` ✅, `combination/param_with_multiple_types.fixture` ✅, `combination/union_narrow_with_ancestors.fixture` ✅, `combination/union_narrow_negated.fixture` ✅, `combination/intersect_interface_assert.fixture` ❌ (ignored: sequential assert narrowing), `combination/property_instanceof.fixture` ❌ (ignored: property-level narrowing). Remaining 2: `union` (hover-only), `inline_assertion` (wrAssertType inside assert, not completion-testable).
+- [x] `narrowing/` (4) — 3 converted: `narrowing/phpstan_assert_function.fixture` ✅, `narrowing/phpstan_assert_static.fixture` ❌ (ignored: static method @phpstan-assert), `narrowing/phpstan_assert_negated.fixture` ❌ (ignored: negated assert). 1 remaining: `narrow-generic` (generic narrowing with @phpstan-assert and class-string<T>).
+- [x] `enum/` (5) — 5 converted: `enum/custom_member.fixture` ✅, `enum/enum_trait.fixture` ✅, `enum/enum_implements_interface.fixture` ✅, `enum/enum_case_members.fixture` ❌ (ignored: enum case instance properties not shown), `enum/backed_enum_case_members.fixture` ❌ (ignored: enum case instance properties not shown).
+- [x] `catch-clause/` (2) — 2 converted: `catch_clause/basic_exception.fixture` ✅, `catch_clause/union_catch.fixture` ✅.
 - [ ] `cast/` (1) — cast expression types (low priority)
-- [ ] `anonymous_function/` (2) — closure as Closure type
+- [ ] `anonymous_function/` (2) — closure as Closure type (hover-only assertion)
 - [ ] `arrow_function/` (5) — arrow function parameter/return
 - [ ] `constant/` (3) — namespaced constants, imported constants
 - [ ] `generator/` (1) — yield expression type (likely already covered via `completion_generators.rs`)
 - [ ] `ternary_expression/` (2) — ternary type inference
 - [ ] `subscript-expression/` (1) — array shape access (relevant to todo.md §23: GTD for array shape keys)
-- [ ] `null-coalesce/` (2) — `??` strips null
-- [ ] `type-alias/` (2) — `@phpstan-type`, `@psalm-type` (likely already covered via `completion_type_aliases.rs`)
+- [ ] `null-coalesce/` (2) — `??` strips null (hover-only assertions)
+- [x] `type-alias/` (2) — 1 converted: `type/phpstan_type_alias.fixture` ❌ (ignored: @phpstan-type alias not resolved when used as return type in foreach). `psalm-type-alias` is structurally identical; skip.
 - [ ] `property-hooks/` (4) — PHP 8.4 property hooks (**ignore:** depends on todo.md §14)
 - [ ] `pipe-operator/` (1) — pipe operator (**ignore:** depends on todo.md §1)
 - [ ] `return-statement/` (4) — return type inference (low priority — no completion impact)
@@ -476,16 +482,16 @@ Phpactor's completion tests in `Completion/Tests/Integration/Bridge/TolerantPars
 
 Key files:
 
-| Test file | Cases | Relevance |
-|---|---|---|
-| `WorseClassMemberCompletorTest.php` | ~60 yields | Member completion: visibility, static, virtual, parent::, nullable, union narrowing with completion |
-| `WorseLocalVariableCompletorTest.php` | ~12 yields | Variable completion: partial matching, array shape keys as variables, closure `use` vars |
-| `WorseSignatureHelperTest.php` | ~10 yields | Signature help edge cases |
-| `WorseNamedParameterCompletorTest.php` | ? | Named argument completion |
-| `WorseConstructorCompletorTest.php` | ? | Constructor completion |
-| `WorseFunctionCompletorTest.php` | ? | Standalone function completion |
-| `WorseSubscriptCompletorTest.php` | ? | Array subscript completion |
-| `DocblockCompletorTest.php` | ? | PHPDoc tag completion |
+| Test file | Cases | Relevance | Status |
+|---|---|---|---|
+| `WorseClassMemberCompletorTest.php` | ~60 yields | Member completion: visibility, static, virtual, parent::, nullable, union narrowing with completion | 🔶 12 fixtures converted |
+| `WorseLocalVariableCompletorTest.php` | ~12 yields | Variable completion: partial matching, array shape keys as variables, closure `use` vars | Not started |
+| `WorseSignatureHelperTest.php` | ~10 yields | Signature help edge cases | 🔶 3 fixtures converted |
+| `WorseNamedParameterCompletorTest.php` | ~10 yields | Named argument completion | Not started |
+| `WorseConstructorCompletorTest.php` | ? | Constructor completion | Not started |
+| `WorseFunctionCompletorTest.php` | ? | Standalone function completion | Not started |
+| `WorseSubscriptCompletorTest.php` | ~4 yields | Array subscript completion | Not started |
+| `DocblockCompletorTest.php` | ? | PHPDoc tag completion | Not started |
 
 The conversion is straightforward:
 
@@ -516,10 +522,13 @@ $foobar->foo-><>
 
 ### Tasks
 
-- [ ] Read through each completion test file and note unique scenarios not in our `tests/completion_*.rs`
-- [ ] Convert the gaps into `.fixture` files — skip duplicates
-- [ ] Pay special attention to `WorseLocalVariableCompletorTest` — their array-shape-key-as-variable-completion pattern is interesting
-- [ ] The `parent::` and `parent::__construct` completion tests are worth comparing against `completion_parent.rs`
+- [x] Read through `WorseClassMemberCompletorTest.php` and note unique scenarios not in our `tests/completion_*.rs`
+- [x] Convert first batch of gaps into `.fixture` files in `completion/` directory (12 fixtures)
+- [x] Read through `WorseSignatureHelperTest.php` and convert 3 signature help fixtures
+- [ ] Read through `WorseLocalVariableCompletorTest.php` — their array-shape-key-as-variable-completion pattern is interesting
+- [ ] Read through `WorseNamedParameterCompletorTest.php` and convert gaps
+- [ ] Read through `WorseSubscriptCompletorTest.php` and convert gaps
+- [ ] The `parent::` and `parent::__construct` completion tests are worth comparing against `completion_parent.rs` (✅ already converted as fixtures)
 
 ---
 
@@ -579,28 +588,33 @@ When working on these todo.md items, check the corresponding Phpactor fixtures f
 | Phase | Deliverable | Status |
 |---|---|---|
 | 1 | Fixture runner infrastructure (`tests/fixture_runner.rs`, format spec, 5 proof-of-concept fixtures) | ✅ Done |
-| 2 | Audit: 261 Phpactor fixtures mapped to our existing coverage (use the checklists above) | 🔶 Partial (generics, if-statement, type, foreach, reflection, virtual_member, narrowing, combination, enum audited; function, remaining categories pending) |
-| 3 Tier 1 | Regression tests for existing features | 🔶 49 passing fixtures converted across 8 categories |
-| 3 Tier 2 | Ignored tests for planned features, with cross-references | 🔶 19 ignored fixtures converted |
-| 4 | Completion test mining from Phpactor | Not started |
+| 2 | Audit: 261 Phpactor fixtures mapped to our existing coverage (use the checklists above) | 🔶 Most categories audited; function/ and some remaining categories still pending |
+| 3 Tier 1 | Regression tests for existing features | 🔶 72 passing fixtures converted across 12 categories |
+| 3 Tier 2 | Ignored tests for planned features, with cross-references | 🔶 41 ignored fixtures converted |
+| 4 | Completion test mining from Phpactor | 🔶 Started: 12 class-member completion fixtures + 3 signature help fixtures |
 | 5 | Smoke test suite + benchmark suite | Not started |
 
-**Current fixture counts (68 total):**
+**Current fixture counts (113 total):**
 
 | Category | Passing | Ignored | Total |
 |---|---|---|---|
-| narrowing (if-statement + narrowing/) | 20 | 4 | 24 |
-| generics | 8 | 10 | 18 |
+| narrowing (if-statement + narrowing/) | 21 | 6 | 27 |
+| generics | 8 | 18 | 26 |
+| completion (from Phase 4 mining) | 15 | 2 | 17 |
+| type | 6 | 4 | 10 |
+| reflection | 6 | 1 | 7 |
+| combination | 4 | 2 | 6 |
 | virtual_member | 3 | 3 | 6 |
-| type | 5 | 1 | 6 |
-| reflection | 5 | 0 | 5 |
-| enum | 3 | 0 | 3 |
+| enum | 3 | 2 | 5 |
 | foreach | 2 | 1 | 3 |
-| combination | 3 | 0 | 3 |
+| signature_help | 3 | 0 | 3 |
+| catch_clause | 2 | 0 | 2 |
+| call_expression | 0 | 1 | 1 |
 
 **Gaps discovered during conversion (not previously tracked):**
 - `@implements` generic resolution (class_implements_single, class_implements_multiple)
 - `@template-extends` syntax (only `@extends` is recognized)
+- `@template-implements` syntax (only `@implements` is recognized)
 - `class-string<T>` on interface method not inherited by implementing class
 - `@method` on trait does not propagate to class using it
 - `@method` with `static` or `$this` return type does not chain through to child class
@@ -609,5 +623,15 @@ When working on these todo.md items, check the corresponding Phpactor fixtures f
 - `@var` on foreach loop variable with untyped collection not resolved
 - Literal string conditional return type resolution (`$param is "foo"`)
 - Property-level narrowing (`$this->prop instanceof Foo`)
+- `new $classStringVar` does not resolve to the class type
+- `$classStringVar::staticMethod()` does not resolve return type
+- `__invoke()` return type not resolved when calling `$obj()`
+- Accessor on new line with extra whitespace before cursor not resolved
+- Enum case instance properties (`name`, `value`) not shown in `->` completion
+- Sequential `assert($x instanceof Foo)` calls do not accumulate narrowed types
+- Double negated `instanceof` with early return does not narrow to remaining types
+- Variable assigned inside if branch not tracked after branch merges
+- `@phpstan-type` alias not resolved when used as method return type in foreach
+- `@method static` with generic return type not resolved on static `::` call
 
-**Recommended next steps: Phase 4 (completion test mining) → Phase 3 remaining categories → Phase 5 (smoke tests)**
+**Recommended next steps: Phase 4 remaining (WorseLocalVariableCompletorTest, WorseNamedParameterCompletorTest, WorseSubscriptCompletorTest) → Phase 3 remaining categories (function/, assignment/, arrow_function/) → Phase 5 (smoke tests)**

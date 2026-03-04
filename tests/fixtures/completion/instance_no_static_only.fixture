@@ -1,0 +1,16 @@
+// test: static method not shown on instance -> access
+// feature: completion
+// Adapted from phpactor WorseClassMemberCompletorTest 'shows static member on instance method'
+// PHPantom does not show static methods on instance -> access, which is correct
+// expect: hello(
+// expect_absent: goodbye(
+---
+<?php
+
+class BarBar {
+    public function hello() {}
+    public static function goodbye() {}
+}
+
+$bar = new BarBar();
+$bar-><>
