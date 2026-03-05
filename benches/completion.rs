@@ -2,10 +2,15 @@
 //!
 //! Run with: `cargo bench`
 //!
-//! These benchmarks track completion latency, AST parse time, and
-//! cross-file resolution performance to catch regressions early.
+//! These benchmarks track completion latency, AST parse time, diagnostic
+//! collection, and cross-file resolution performance to catch regressions
+//! early.
+//!
+//! The diagnostic benchmarks use the same fixture files as PHPactor's
+//! `DiagnosticsBench` (from `lib/WorseReflection/Tests/Benchmarks/`) for
+//! a direct 1:1 comparison.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use phpantom_lsp::Backend;
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
@@ -558,6 +563,61 @@ $b->a()->b()->c()->d()->e()->
     });
 }
 
+// ─── Diagnostic benchmarks ─────────────────────────────────────────────────
+//
+// These use the exact same fixture files as PHPactor's `DiagnosticsBench`
+// (`lib/WorseReflection/Tests/Benchmarks/fixtures/diagnostics/*.test`),
+// copied to `benches/fixtures/diagnostics/*.php`.  PHPactor runs its
+// `MissingMemberProvider` (missing member detection) on each fixture; we
+// run all three of our diagnostic providers (deprecated, unused imports,
+// unknown classes).
+//
+// Only fixtures that exercise diagnostics we actually implement are
+// enabled.  The others are listed here for parity once the corresponding
+// features land:
+//
+//   "lots_of_missing_methods" — needs unresolved-member-access diagnostic
+//                               (see docs/todo/diagnostics.md §2)
+//   "method_chain"            — needs unresolved-member-access diagnostic
+//   "phpstan"                 — needs unresolved-member-access diagnostic;
+//                               also ~5 000 lines with hundreds of
+//                               unresolvable vendor class refs
+
+/// PHPactor diagnostic fixture files that are fair to benchmark today.
+/// Each file exercises known-class resolution (our unknown-class provider)
+/// without requiring member-level diagnostics we haven't implemented yet.
+const DIAGNOSTIC_FIXTURES: &[&str] = &[
+    "lots_of_new_generic_objects", // 66 lines — repeated `new` of a @template class
+    "lots_of_new_objects",         // 62 lines — repeated `new` of a plain class
+];
+
+fn bench_diagnostics_phpactor_fixtures(c: &mut Criterion) {
+    let mut group = c.benchmark_group("diagnostics");
+    for name in DIAGNOSTIC_FIXTURES {
+        let path = format!("benches/fixtures/diagnostics/{name}.php");
+        let content =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let uri = format!("file:///bench/{name}.php");
+
+        group.bench_with_input(
+            BenchmarkId::new("fixture", *name),
+            &content,
+            |b, content| {
+                let backend = Backend::new_test();
+                backend.update_ast(&uri, content);
+                b.iter(|| {
+                    let mut out = Vec::new();
+                    backend.collect_deprecated_diagnostics(&uri, black_box(content), &mut out);
+                    backend.collect_unused_import_diagnostics(&uri, content, &mut out);
+                    backend.collect_unknown_class_diagnostics(&uri, content, &mut out);
+                    black_box(out)
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_completion_simple,
@@ -571,5 +631,6 @@ criterion_group!(
     bench_hover,
     bench_definition,
     bench_reparse_after_edit,
+    bench_diagnostics_phpactor_fixtures,
 );
 criterion_main!(benches);
