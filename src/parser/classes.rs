@@ -1518,6 +1518,7 @@ impl Backend {
                         conditional_return,
                         deprecation_message,
                         method_template_params,
+                        method_template_param_bounds,
                         method_template_bindings,
                     ) = if let Some(ctx) = doc_ctx {
                         let docblock_text =
@@ -1534,11 +1535,19 @@ impl Backend {
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, method)
                                 .and_then(docblock::extract_conditional_return_type);
 
-                        // Extract method-level @template params and their
-                        // @param bindings for general template substitution.
-                        let tpl_params = docblock_text
-                            .map(docblock::extract_template_params)
+                        // Extract method-level @template params, their bounds,
+                        // and @param bindings for generic type substitution.
+                        let tpl_params_with_bounds = docblock_text
+                            .map(docblock::extract_template_params_with_bounds)
                             .unwrap_or_default();
+                        let tpl_params: Vec<String> = tpl_params_with_bounds
+                            .iter()
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        let tpl_param_bounds: HashMap<String, String> = tpl_params_with_bounds
+                            .into_iter()
+                            .filter_map(|(n, b)| b.map(|b| (n, b)))
+                            .collect();
                         let tpl_bindings = if !tpl_params.is_empty() {
                             docblock_text
                                 .map(|doc| {
@@ -1578,6 +1587,7 @@ impl Backend {
                             conditional,
                             deprecation_message,
                             tpl_params,
+                            tpl_param_bounds,
                             tpl_bindings,
                         )
                     } else {
@@ -1586,6 +1596,7 @@ impl Backend {
                             None,
                             None,
                             Vec::new(),
+                            HashMap::new(),
                             Vec::new(),
                         )
                     };
@@ -1716,6 +1727,7 @@ impl Backend {
                         conditional_return,
                         deprecation_message,
                         template_params: method_template_params,
+                        template_param_bounds: method_template_param_bounds,
                         template_bindings: method_template_bindings,
                         has_scope_attribute: has_scope_attr,
                         is_virtual: false,

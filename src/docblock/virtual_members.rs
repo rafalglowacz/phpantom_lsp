@@ -7,6 +7,8 @@
 //!   - `@method ReturnType methodName(ParamType $param, ...)`
 //!   - `@method static ReturnType methodName(...)`
 
+use std::collections::HashMap;
+
 use super::types::{clean_type, split_type_token};
 use crate::types::{MethodInfo, ParameterInfo, Visibility};
 
@@ -213,6 +215,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             conditional_return: None,
             deprecation_message: None,
             template_params: Vec::new(),
+            template_param_bounds: HashMap::new(),
             template_bindings: Vec::new(),
             has_scope_attribute: false,
             is_virtual: true,

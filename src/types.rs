@@ -319,6 +319,12 @@ pub struct MethodInfo {
     /// (`ClassInfo::template_params`) and are used for general
     /// method-level generic type substitution at call sites.
     pub template_params: Vec<String>,
+    /// Upper bounds for method-level template parameters.
+    ///
+    /// For `@template T of Model`, maps `"T"` → `"Model"`.  Used by
+    /// hover to display the constraint when the return type or a
+    /// parameter type is a method-level template parameter.
+    pub template_param_bounds: HashMap<String, String>,
     /// Mappings from method-level template parameter names to the method
     /// parameter names (with `$` prefix) that directly bind them via
     /// `@param` annotations.
@@ -377,6 +383,7 @@ impl MethodInfo {
             conditional_return: None,
             deprecation_message: None,
             template_params: Vec::new(),
+            template_param_bounds: HashMap::new(),
             template_bindings: Vec::new(),
             has_scope_attribute: false,
             is_virtual: true,

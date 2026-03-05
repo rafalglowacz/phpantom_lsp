@@ -319,8 +319,53 @@ pub fn find_var_raw_type_in_source(
 ) -> Option<String> {
     let search_area = content.get(..before_offset)?;
 
+    // Track brace depth so that annotations inside other function/method
+    // bodies are not visible from the current scope.  When scanning
+    // backward:
+    //   `}` → entering a block above us → depth increases
+    //   `{` → leaving that block        → depth decreases
+    // Annotations found while `brace_depth > 0` belong to an inner
+    // scope and must be skipped.  Once `min_depth` goes negative we
+    // have exited our containing scope; if we then re-enter a block at
+    // depth >= 0 we are inside a sibling scope (e.g. a different method
+    // in the same class) and all further annotations are foreign.
+    let mut brace_depth = 0i32;
+    let mut min_depth = 0i32;
+    let mut seen_sibling_scope = false;
+
     for line in search_area.lines().rev() {
         let trimmed = line.trim();
+
+        // Count braces on non-docblock lines to track scope depth.
+        // Docblock lines are skipped because they may contain `{` / `}`
+        // in array shape type annotations (e.g. `array{key: string}`).
+        let is_comment_line =
+            trimmed.starts_with('*') || trimmed.starts_with("/*") || trimmed.starts_with("//");
+
+        if !is_comment_line {
+            let (opens, closes) = count_braces_on_line(trimmed);
+            // Going backward: `}` means entering a block, `{` means leaving.
+            brace_depth += closes;
+            brace_depth -= opens;
+        }
+
+        min_depth = min_depth.min(brace_depth);
+
+        // Once we have exited our containing scope (min_depth < 0) and
+        // re-entered a block at depth >= 0, we are inside a sibling
+        // scope (e.g. a different method in the same class).  From that
+        // point on every annotation belongs to a foreign scope.
+        if min_depth < 0 && brace_depth >= 0 {
+            seen_sibling_scope = true;
+        }
+        if seen_sibling_scope {
+            continue;
+        }
+
+        // Skip annotations that belong to a deeper (inner) scope.
+        if brace_depth > 0 {
+            continue;
+        }
 
         // Quick reject: must mention both `@var` and the variable.
         if !trimmed.contains("@var") || !trimmed.contains(var_name) {

@@ -457,7 +457,7 @@ impl Backend {
     fn hover_variable(
         &self,
         name: &str,
-        _uri: &str,
+        uri: &str,
         content: &str,
         cursor_offset: u32,
         current_class: Option<&ClassInfo>,
@@ -503,12 +503,23 @@ impl Backend {
             Some(&function_loader as &dyn Fn(&str) -> Option<FunctionInfo>),
         ) {
             let short_type = shorten_type_string(&type_str);
+
+            // When the type is a template parameter, show its variance
+            // and bound (e.g. "**template-covariant** `TNode` of `AstNode`")
+            // above the code block so the user sees the constraint.
+            let template_line = self.find_template_info_for_type(&type_str, uri, cursor_offset);
+
             let ns = resolve_type_namespace(&type_str, &class_loader);
             let ns_line = namespace_line(&ns);
-            return Some(make_hover(format!(
+            let code_block = format!(
                 "```php\n<?php\n{}{} = {}\n```",
                 ns_line, var_name, short_type
-            )));
+            );
+            return if let Some(tpl) = template_line {
+                Some(make_hover(format!("{}\n\n{}", tpl, code_block)))
+            } else {
+                Some(make_hover(code_block))
+            };
         }
 
         // Fall back to ClassInfo-based resolution (handles cases the
@@ -562,6 +573,48 @@ impl Backend {
             }
             None
         }
+    }
+
+    /// Build a template-info line for a type string that might be a
+    /// template parameter.  Returns `None` when the type is not a
+    /// template param in scope.
+    ///
+    /// For example, `"TNode"` at a cursor inside a class with
+    /// `@template-covariant TNode of AstNode` returns
+    /// `Some("**template-covariant** \`TNode\` of \`AstNode\`")`.
+    fn find_template_info_for_type(
+        &self,
+        type_str: &str,
+        uri: &str,
+        cursor_offset: u32,
+    ) -> Option<String> {
+        // Only bare names (no `\`, `<`, `|`) can be template params.
+        let name = type_str.trim();
+        if name.is_empty()
+            || name.contains('\\')
+            || name.contains('<')
+            || name.contains('|')
+            || name.contains('&')
+        {
+            return None;
+        }
+
+        let maps = self.symbol_maps.lock().ok()?;
+        let map = maps.get(uri)?;
+        let def = map.find_template_def(name, cursor_offset)?;
+
+        let bound_display = if let Some(ref bound) = def.bound {
+            format!(" of `{}`", shorten_type_string(bound))
+        } else {
+            String::new()
+        };
+
+        Some(format!(
+            "**{}** `{}`{}",
+            def.variance.tag_name(),
+            def.name,
+            bound_display
+        ))
     }
 
     /// Check whether `name` is a `@template` parameter in scope at
@@ -632,6 +685,27 @@ impl Backend {
         );
 
         let mut lines = Vec::new();
+
+        // When the return type or a parameter type is a template
+        // parameter on the method or owning class, show the template's
+        // variance and bound so the user understands the constraint.
+        // Method-level templates take priority over class-level ones.
+        let mut seen_templates = Vec::new();
+        if let Some(ref ret) = method.return_type
+            && let Some(tpl_line) = find_template_info_in_method_or_class(ret, method, owner)
+        {
+            seen_templates.push(ret.clone());
+            lines.push(tpl_line);
+        }
+        for param in &method.parameters {
+            if let Some(ref hint) = param.type_hint
+                && !seen_templates.iter().any(|s| s == hint)
+                && let Some(tpl_line) = find_template_info_in_method_or_class(hint, method, owner)
+            {
+                seen_templates.push(hint.clone());
+                lines.push(tpl_line);
+            }
+        }
 
         // Origin indicator (override / implements / virtual).
         let origin = build_origin_lines(
@@ -710,6 +784,16 @@ impl Backend {
         );
 
         let mut lines = Vec::new();
+
+        // When the property type is a template parameter on the owning
+        // class, show the template's variance and bound so the user
+        // understands the constraint (e.g. "**template-covariant**
+        // `TNode` of `AstNode`").
+        if let Some(ref type_hint) = property.type_hint
+            && let Some(tpl_line) = find_template_info_in_class(type_hint, owner)
+        {
+            lines.push(tpl_line);
+        }
 
         // Origin indicator (override / implements / virtual).
         let origin = build_origin_lines(
@@ -953,6 +1037,85 @@ fn resolve_type_namespace(
     }
 
     None
+}
+
+/// Check whether `type_str` is a `@template` parameter declared on
+/// the method's own docblock or the owning class's docblock.  Method-level
+/// templates take priority.  Returns a formatted info line like
+/// `"**template** \`T\` of \`Model\`"`, or `None` when the type is
+/// not a template param in either scope.
+fn find_template_info_in_method_or_class(
+    type_str: &str,
+    method: &MethodInfo,
+    owner: &ClassInfo,
+) -> Option<String> {
+    if let Some(line) = find_template_info_in_method(type_str, method) {
+        return Some(line);
+    }
+    find_template_info_in_class(type_str, owner)
+}
+
+/// Check whether `type_str` is a `@template` parameter declared on
+/// the method's own docblock.  Returns a formatted info line like
+/// `"**template** \`T\` of \`Model\`"`, or `None` when the type is
+/// not a method-level template param.
+fn find_template_info_in_method(type_str: &str, method: &MethodInfo) -> Option<String> {
+    let name = type_str.trim();
+    if name.is_empty()
+        || name.contains('\\')
+        || name.contains('<')
+        || name.contains('|')
+        || name.contains('&')
+    {
+        return None;
+    }
+
+    // Method-level template_params stores just the names.
+    if !method.template_params.iter().any(|p| p == name) {
+        return None;
+    }
+
+    let bound_display = method
+        .template_param_bounds
+        .get(name)
+        .map(|b| format!(" of `{}`", shorten_type_string(b)))
+        .unwrap_or_default();
+
+    // Method-level templates don't carry variance info (always invariant).
+    Some(format!("**template** `{}`{}", name, bound_display))
+}
+
+/// Check whether `type_str` is a `@template` parameter declared on
+/// `owner`'s class docblock.  Returns a formatted info line like
+/// `"**template-covariant** \`TNode\` of \`AstNode\`"`, or `None`
+/// when the type is not a template param on the class.
+fn find_template_info_in_class(type_str: &str, owner: &ClassInfo) -> Option<String> {
+    let name = type_str.trim();
+    if name.is_empty()
+        || name.contains('\\')
+        || name.contains('<')
+        || name.contains('|')
+        || name.contains('&')
+    {
+        return None;
+    }
+
+    let docblock = owner.class_docblock.as_deref()?;
+    let tpl = extract_template_params_full(docblock)
+        .into_iter()
+        .find(|(tpl_name, _, _)| tpl_name == name)?;
+
+    let (tpl_name, bound, variance) = tpl;
+    let bound_display = bound
+        .map(|b| format!(" of `{}`", shorten_type_string(&b)))
+        .unwrap_or_default();
+
+    Some(format!(
+        "**{}** `{}`{}",
+        variance.tag_name(),
+        tpl_name,
+        bound_display
+    ))
 }
 
 /// Maximum number of enum cases or trait methods to show before

@@ -4748,3 +4748,465 @@ class MyService {
         text
     );
 }
+
+/// When a variable's type is a `@template` parameter, hover should show
+/// the template variance and bound above the code block.
+#[test]
+fn hover_variable_with_template_type_shows_template_info() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template-covariant TNode of AstNode
+ */
+class NodeList {
+    /**
+     * @param TNode $node
+     */
+    public function add($node): void {
+        echo $node;
+    }
+}
+class AstNode {}
+"#;
+
+    // Hover on `$node` in `echo $node;` (line 9)
+    let hover = hover_at(&backend, uri, content, 9, 14).expect("hover should be active on $node");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("template-covariant"),
+        "should show template variance, got: {}",
+        text
+    );
+    assert!(
+        text.contains("TNode"),
+        "should show template name, got: {}",
+        text
+    );
+    assert!(
+        text.contains("AstNode"),
+        "should show template bound, got: {}",
+        text
+    );
+    assert!(
+        text.contains("$node = TNode"),
+        "should still show type assignment, got: {}",
+        text
+    );
+}
+
+/// An invariant `@template` without a bound shows just the variance and name.
+#[test]
+fn hover_variable_with_unbounded_template_shows_variance() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template T
+ */
+class Box {
+    /**
+     * @param T $value
+     */
+    public function set($value): void {
+        echo $value;
+    }
+}
+"#;
+
+    let hover = hover_at(&backend, uri, content, 9, 14).expect("hover should be active on $value");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("template"),
+        "should show template variance, got: {}",
+        text
+    );
+    assert!(
+        text.contains("`T`"),
+        "should show template name, got: {}",
+        text
+    );
+    assert!(
+        text.contains("$value = T"),
+        "should still show type assignment, got: {}",
+        text
+    );
+}
+
+/// When a property's `@var` type is a `@template` parameter on the owning
+/// class, hover should show the template variance and bound.
+#[test]
+fn hover_property_with_template_type_shows_template_info() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template-covariant TNode of AstNode
+ */
+class NodeList {
+    /** @var TNode */
+    public $node;
+
+    public function demo(): void {
+        $this->node;
+    }
+}
+class AstNode {
+    public function getChildren(): array { return []; }
+}
+"#;
+
+    // Hover on `node` in `$this->node` (line 9)
+    let hover = hover_at(&backend, uri, content, 9, 16).expect("expected hover on node property");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("template-covariant"),
+        "should show template variance, got: {}",
+        text
+    );
+    assert!(
+        text.contains("TNode"),
+        "should show template name, got: {}",
+        text
+    );
+    assert!(
+        text.contains("AstNode"),
+        "should show template bound, got: {}",
+        text
+    );
+}
+
+/// A property typed with a `@template` parameter that has no bound
+/// should still show the variance and name.
+#[test]
+fn hover_property_with_unbounded_template_shows_variance() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template T
+ */
+class Box {
+    /** @var T */
+    public $value;
+
+    public function demo(): void {
+        $this->value;
+    }
+}
+"#;
+
+    let hover = hover_at(&backend, uri, content, 9, 16).expect("expected hover on value property");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("template"),
+        "should show template variance, got: {}",
+        text
+    );
+    assert!(
+        text.contains("`T`"),
+        "should show template name, got: {}",
+        text
+    );
+}
+
+/// When a method's `@return` type is a `@template` parameter on the owning
+/// class, hover should show the template variance and bound.
+#[test]
+fn hover_method_with_template_return_type_shows_template_info() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template-covariant TNode of AstNode
+ */
+class NodeList {
+    /**
+     * @return TNode
+     */
+    public function first() {}
+
+    public function demo(): void {
+        $this->first();
+    }
+}
+class AstNode {}
+"#;
+
+    // Hover on `first` in `$this->first()` (line 11)
+    let hover = hover_at(&backend, uri, content, 11, 16).expect("expected hover on first()");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("template-covariant"),
+        "should show template variance, got: {}",
+        text
+    );
+    assert!(
+        text.contains("TNode"),
+        "should show template name, got: {}",
+        text
+    );
+    assert!(
+        text.contains("AstNode"),
+        "should show template bound, got: {}",
+        text
+    );
+}
+
+/// When a method's `@param` type is a `@template` parameter, hover should
+/// show the template info.  Duplicate templates (same name in both param
+/// and return) should appear only once.
+#[test]
+fn hover_method_with_template_param_type_shows_template_info() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template T
+ * @template-covariant TNode of AstNode
+ */
+class NodeList {
+    /**
+     * @param TNode $node
+     * @param T $extra
+     * @return TNode
+     */
+    public function add($node, $extra) {}
+
+    public function demo(): void {
+        $this->add(null, null);
+    }
+}
+class AstNode {}
+"#;
+
+    // Hover on `add` in `$this->add(...)` (line 14)
+    let hover = hover_at(&backend, uri, content, 14, 15).expect("expected hover on add()");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("template-covariant"),
+        "should show covariant variance for TNode, got: {}",
+        text
+    );
+    assert!(
+        text.contains("`T`"),
+        "should show template T info, got: {}",
+        text
+    );
+    // TNode appears in both @return and @param — should only show once
+    let count = text.matches("template-covariant").count();
+    assert_eq!(
+        count, 1,
+        "TNode template info should appear exactly once, got {} in: {}",
+        count, text
+    );
+}
+
+// ─── @var scope isolation ───────────────────────────────────────────────────
+
+/// An inline `/** @var Type $var */` annotation in one method must not
+/// leak into a different method that uses the same variable name.
+#[test]
+fn hover_var_annotation_does_not_leak_across_method_scopes() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class ObjectShapeDemo {
+    public function demo(): void {
+        /** @var object{title: string, score: float} $item */
+        $item = getUnknownValue();
+        $item->title;
+    }
+}
+
+class ObjectMapper {
+    /**
+     * @template T
+     * @param T $item
+     * @return T
+     */
+    public function identity(mixed $item): mixed {
+        return $item;
+    }
+}
+"#;
+
+    // Hover on `$item` in ObjectMapper::identity (line 16, `return $item;`)
+    let hover = hover_at(&backend, uri, content, 16, 16).expect("expected hover on $item");
+    let text = hover_text(&hover);
+    assert!(
+        !text.contains("object{"),
+        "should NOT leak @var from ObjectShapeDemo into ObjectMapper, got: {}",
+        text
+    );
+    assert!(
+        text.contains("$item = T"),
+        "should resolve $item to template param T, got: {}",
+        text
+    );
+}
+
+/// Same-method `/** @var */` still works after the scope fix.
+#[test]
+fn hover_var_annotation_within_same_method_still_works() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Demo {
+    public function run(): void {
+        /** @var object{name: string} $thing */
+        $thing = getUnknown();
+        echo $thing;
+    }
+}
+"#;
+
+    // Hover on `$thing` in `echo $thing;` (line 5)
+    let hover = hover_at(&backend, uri, content, 5, 14).expect("expected hover on $thing");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("object{name: string}"),
+        "should still resolve @var in the same method, got: {}",
+        text
+    );
+}
+
+// ─── Method-level template info in hover ────────────────────────────────────
+
+/// When a method declares its own `@template T` and uses it in `@return`,
+/// hover should show `**template** \`T\`` (method-level, always invariant).
+#[test]
+fn hover_method_level_template_in_return_shows_info() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class ObjectMapper {
+    /**
+     * @template T
+     * @param T $item
+     * @return T
+     */
+    public function identity(mixed $item): mixed {
+        return $item;
+    }
+
+    public function demo(): void {
+        $this->identity(null);
+    }
+}
+"#;
+
+    // Hover on `identity` in `$this->identity(null)` (line 12)
+    let hover = hover_at(&backend, uri, content, 12, 16).expect("expected hover on identity()");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("**template** `T`"),
+        "should show method-level template info for T, got: {}",
+        text
+    );
+}
+
+/// Method-level `@template T of Model` should show the bound.
+#[test]
+fn hover_method_level_template_with_bound_shows_info() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Model {}
+class Repo {
+    /**
+     * @template T of Model
+     * @param class-string<T> $class
+     * @return T
+     */
+    public function find(string $class): mixed {
+        return new $class();
+    }
+
+    public function demo(): void {
+        $this->find(Model::class);
+    }
+}
+"#;
+
+    // Hover on `find` in `$this->find(...)` (line 13)
+    let hover = hover_at(&backend, uri, content, 13, 16).expect("expected hover on find()");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("**template** `T` of `Model`"),
+        "should show method-level template with bound, got: {}",
+        text
+    );
+}
+
+/// Method-level template takes priority over a same-named class-level template.
+#[test]
+fn hover_method_level_template_takes_priority_over_class_level() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Animal {}
+class Plant {}
+/**
+ * @template T of Animal
+ */
+class Container {
+    /**
+     * @template T of Plant
+     * @param T $item
+     * @return T
+     */
+    public function wrap($item) {}
+
+    public function demo(): void {
+        $this->wrap(null);
+    }
+}
+"#;
+
+    // Hover on `wrap` in `$this->wrap(null)` (line 15)
+    let hover = hover_at(&backend, uri, content, 15, 16).expect("expected hover on wrap()");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("of `Plant`"),
+        "should show method-level bound (Plant), not class-level (Animal), got: {}",
+        text
+    );
+    assert!(
+        !text.contains("of `Animal`"),
+        "should NOT show class-level bound, got: {}",
+        text
+    );
+}
+
+/// When the method has no templates but the class does, class-level
+/// template info should still appear (existing behavior preserved).
+#[test]
+fn hover_class_level_template_still_shown_when_method_has_none() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template-covariant TValue of object
+ */
+class TypedBox {
+    /**
+     * @return TValue
+     */
+    public function get() {}
+
+    public function demo(): void {
+        $this->get();
+    }
+}
+"#;
+
+    // Hover on `get` in `$this->get()` (line 11)
+    let hover = hover_at(&backend, uri, content, 11, 16).expect("expected hover on get()");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("**template-covariant** `TValue` of `object`"),
+        "should show class-level template info when method has no own templates, got: {}",
+        text
+    );
+}

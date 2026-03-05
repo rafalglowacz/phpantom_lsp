@@ -181,7 +181,9 @@ pub(super) fn extract_docblock_symbols(
     let mut template_params: Vec<(String, u32, Option<String>, TemplateVariance)> = Vec::new();
 
     for line in docblock.split('\n') {
-        if let Some(at_pos) = line.find('@') {
+        if let Some(at_pos) = line.find('@')
+            && is_tag_position(line, at_pos)
+        {
             let tag_start_in_line = at_pos;
             let after_at = &line[tag_start_in_line..];
 
@@ -292,6 +294,26 @@ pub(super) fn extract_docblock_symbols(
 }
 
 // ─── Type span emission ─────────────────────────────────────────────────────
+
+/// Check whether `@` at byte position `at_pos` in a docblock line is
+/// in a valid tag position.
+///
+/// A valid tag position means the `@` is preceded only by whitespace
+/// and an optional `*` (the standard `" * @tag"` docblock prefix).
+/// An `@` that appears mid-sentence (e.g. `"filtered out of @throws
+/// suggestions."`) is description text, not a tag.
+fn is_tag_position(line: &str, at_pos: usize) -> bool {
+    let before = &line[..at_pos];
+    let trimmed = before.trim_start();
+    // After stripping leading whitespace, valid prefixes are:
+    //   ""        — `@tag` at start of line (after whitespace)
+    //   "*"       — `* @tag` (single asterisk)
+    //   "* "...   — `*   @tag` (asterisk + whitespace before @)
+    //   "/**"     — `/** @tag` (opening of single-line docblock)
+    // The key rule: after removing leading whitespace, the remaining
+    // prefix before `@` must be only `*`, `/`, or more whitespace.
+    trimmed.is_empty() || trimmed.bytes().all(|b| b == b'*' || b == b'/' || b == b' ')
+}
 
 /// Emit `SymbolSpan` entries for a type token, splitting unions and
 /// intersections and skipping scalars.
