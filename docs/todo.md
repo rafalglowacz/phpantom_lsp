@@ -24,7 +24,6 @@ with each step.
 | [Signature Help](todo/signature-help.md) | Parameter descriptions, signature-level docs, default values, attribute/closure support |
 | [Laravel](todo/laravel.md) | Model property gaps, relationship methods, type narrowing, custom builders |
 | [Blade](todo/blade.md) | Preprocessor, component support, cross-file view intelligence |
-| [Testing](todo/testing.md) | Fixture runner, Phpactor test mining, benchmarks |
 | [Bug Fixes](todo/bugs.md) | Incorrect behaviour that should be fixed regardless of feature priority |
 | [Configuration](todo/config.md) | Per-project `.phpantom.toml` file, PHP version override, diagnostic tool toggles, prompt-and-remember settings |
 | [Refactoring](todo/refactor.md) | Technical debt and cleanup tasks. Gate check between sprints: clear all items before starting the next sprint |
@@ -243,17 +242,3 @@ Blade is a multi-phase project tracked in [todo/blade.md](todo/blade.md).
 | Phase 3 | Cross-file view intelligence | View name GTD, signature merging for `@extends`, component→template variable typing |
 | Phase 4 | Blade directive completion | Directive name completion with snippet insertion |
 
----
-
-## Testing
-
-Testing infrastructure and Phpactor fixture mining are tracked in
-[todo/testing.md](todo/testing.md).
-
-| Phase | Scope |
-|---|---|
-| Phase 1 | Build a fixture runner |
-| Phase 2 | Audit Phpactor's fixtures against our coverage |
-| Phase 3 | Convert high-value fixtures |
-| Phase 4 | Mine Phpactor's completion tests |
-| Phase 5 | Smoke tests and benchmarks |

@@ -1,6 +1,6 @@
 // test: @implements resolves generic template parameter on interface method
 // feature: completion
-// ignore: @implements generic resolution not yet supported (see generics/class_implements in todo-testing.md)
+// ignore: @implements generic resolution not yet supported (see type-inference.md §17)
 // Adapted from phpactor generics/class_implements_single1.test
 // expect: bazMethod(
 ---
