@@ -1215,21 +1215,23 @@ class GeneratorDemo
 //
 // Generator<TKey, TValue, TSend, TReturn>
 //
-// - `yield $expr` produces TValue to the consumer
-// - `$var = yield $expr` assigns TSend (the sent value) to $var
-// - Reverse yield inference: when `yield $var` appears and $var has no
-//   prior assignment, PHPantom infers $var as TValue from the @return type
+// - `yield $expr` produces TValue to the consumer. The yielded variable
+//   keeps its own type (from its assignment), not the Generator annotation.
+// - `$var = yield $expr` assigns TSend (the sent value) to $var. The yield
+//   expression evaluates to whatever was passed via ->send().
 
 class GeneratorYieldDemo
 {
     /** @return \Generator<int, Pen> */
     public function findAll(): \Generator
     {
-        // Reverse yield inference: $pen has no assignment, so the LSP
-        // infers it as Pen from @return Generator<int, Pen> (TValue)
+        // The type of $pen comes from `new Pen(...)`, not from the @return.
+        // Completion on $pen-> works because the assignment is known.
+        $pen = new Pen('blue');
         yield $pen;
         $pen->write();                    // resolves to Pen
 
+        $anotherPen = new Pen('red');
         yield 0 => $anotherPen;
         $anotherPen->color();             // key => value yields also work
     }
@@ -1238,9 +1240,9 @@ class GeneratorYieldDemo
     public function yieldInsideControlFlow(): \Generator
     {
         if (true) {
-            // Reverse inference works inside control flow blocks too
+            $pen = new Pen('green');
             yield $pen;
-            $pen->write();                // resolves to Pen
+            $pen->write();                // resolves inside control flow blocks
         }
     }
 
@@ -1249,7 +1251,7 @@ class GeneratorYieldDemo
     {
         $pen = new Pen('black');
         yield $pen;
-        $pen->rename('Bold')->color();    // chains through inferred type
+        $pen->rename('Bold')->color();    // chains through yielded variable
     }
 
     /** @return \Generator<int, string, Pencil, void> */
@@ -1257,7 +1259,7 @@ class GeneratorYieldDemo
     {
         // TSend inference: $var = yield gets the 3rd Generator type param.
         // yield produces 'ready' (TValue = string) to the consumer;
-        // the yield expression evaluates to whatever was ->send()'d (TSend = Pencil)
+        // the yield expression evaluates to whatever was ->send()'d (TSend = Pencil).
         $pencil = yield 'ready';
         $pencil->sketch();                // resolves to Pencil (TSend)
     }
@@ -4034,9 +4036,11 @@ function runDemoAssertions(): void
     }
 
     // ── Generator yield inference (GeneratorYieldDemo) ───────────────────
-    // findAll() uses reverse yield inference (unassigned vars) so it yields
-    // null at runtime. Only chainingThroughYieldInferred() yields real Pens.
     $yieldDemo = new GeneratorYieldDemo();
+    foreach ($yieldDemo->findAll() as $yieldedPen) {
+        assert($yieldedPen instanceof Pen, 'GeneratorYieldDemo::findAll() must yield Pen');
+        break;
+    }
     foreach ($yieldDemo->chainingThroughYieldInferred() as $chainPen) {
         assert($chainPen instanceof Pen, 'chainingThroughYieldInferred() must yield Pen');
         break;
