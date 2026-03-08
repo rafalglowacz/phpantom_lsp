@@ -28,6 +28,7 @@ with each step.
 | [Configuration](todo/config.md) | Per-project `.phpantom.toml` file, PHP version override, diagnostic tool toggles, prompt-and-remember settings |
 | [Refactoring](todo/refactor.md) | Technical debt and cleanup tasks. Gate check between sprints: clear all items before starting the next sprint |
 | [Indexing](todo/indexing.md) | Self-generated classmap, staleness detection, parallel file processing, full background indexing, disk cache |
+| [External Stubs](todo/external-stubs.md) | Composer stub discovery, IDE-provided stub paths, GTD for built-in symbols, stub override priority, SPL overlay stubs |
 | [Performance](todo/performance.md) | FQN index, `Arc<ClassInfo>`, `RwLock`, inheritance dedup, file content cloning, type substitution optimisation |
 
 ---
@@ -72,6 +73,7 @@ Fixing these first means every subsequent sprint benefits automatically.
 | 86 | `Arc<SymbolMap>` to avoid snapshot cloning | Low | Performance | [performance.md §6](todo/performance.md#6-arcsymbolmap-to-avoid-snapshot-cloning) |
 | 87 | Reference-counted `ClassInfo` (`Arc<ClassInfo>`) | Medium | Performance | [performance.md §2](todo/performance.md#2-reference-counted-classinfo-arcclassinfo) |
 | 88 | Early-exit and `Cow` return in `apply_substitution` | Low | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
+| 90 | Lazy autoload file indexing | Medium | Performance | [indexing.md §2.5](todo/indexing.md#phase-25-lazy-autoload-file-indexing) |
 
 Item 89 (incremental text sync) is in the backlog because the parser
 requires a full re-parse regardless, limiting the benefit to IPC
@@ -145,6 +147,7 @@ deepens that lead and rounds out the remaining feature surface.
 | 38 | Property hooks (PHP 8.4) | Medium | Type Inference | [type-inference.md §6](todo/type-inference.md#6-property-hooks-php-84) |
 | 39 | Simplify with null coalescing / null-safe operator (code action) | Medium | Code Actions | [actions.md §2](todo/actions.md#2-simplify-with-null-coalescing--null-safe-operator) |
 | 40 | Inlay hints (`textDocument/inlayHint`) | Medium | LSP Features | [lsp-features.md §9](todo/lsp-features.md#9-inlay-hints-textdocumentinlayhint) |
+| 91 | GTD for built-in symbols via project-level phpstorm-stubs | Low | External Stubs | [external-stubs.md §1](todo/external-stubs.md#phase-1-project-level-phpstorm-stubs-for-gtd) |
 
 **After Sprint 5:** PHPantom has a complete, polished LSP feature set.
 Users moving to Zed/Neovim/Helix lose nothing on the intelligence side
@@ -213,7 +216,7 @@ eventually but don't move the needle.
 |---|---|---|---|---|
 | 58 | Array functions needing new code paths | High | Completion | [completion.md §2](todo/completion.md#2-array-functions-needing-new-code-paths) |
 | 59 | Go-to-definition for array shape keys via bracket access | Medium | Completion | [completion.md §6](todo/completion.md#6-go-to-definition-for-array-shape-keys-via-bracket-access) |
-| 60 | No go-to-definition for built-in (stub) functions and constants | Medium | LSP Features | [lsp-features.md §11](todo/lsp-features.md#11-no-go-to-definition-for-built-in-stub-functions-and-constants) |
+| 60 | No go-to-definition for built-in (stub) functions and constants — superseded by item 91 | Medium | LSP Features | [external-stubs.md §1](todo/external-stubs.md#phase-1-project-level-phpstorm-stubs-for-gtd) |
 | 61 | `str_contains` / `str_starts_with` / `str_ends_with` → non-empty-string narrowing | Low | Type Inference | [type-inference.md §10](todo/type-inference.md#10-str_contains--str_starts_with--str_ends_with--non-empty-string-narrowing) |
 | 62 | `count` / `sizeof` comparison → non-empty-array narrowing | Low | Type Inference | [type-inference.md §11](todo/type-inference.md#11-count--sizeof-comparison--non-empty-array-narrowing) |
 | 63 | Fiber type resolution | Low | Type Inference | [type-inference.md §12](todo/type-inference.md#12-fiber-type-resolution) |
@@ -243,6 +246,14 @@ eventually but don't move the needle.
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
 | 90 | Type AST for `apply_substitution` (full refactor) | High | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
+
+### External stubs
+
+| # | Item | Effort | Domain | Doc Link |
+|---|---|---|---|---|
+| 92 | Project-level stubs as type resolution source | Medium | External Stubs | [external-stubs.md §2](todo/external-stubs.md#phase-2-project-level-stubs-as-resolution-source) |
+| 93 | IDE-provided and `.phpantom.toml` stub paths | Low | External Stubs | [external-stubs.md §3](todo/external-stubs.md#phase-3-ide-provided-and-phpantomtoml-stub-paths) |
+| 94 | Ship SPL overlay stubs, let external stubs override | Low | External Stubs | [external-stubs.md §4](todo/external-stubs.md#phase-4-embedded-stub-override-with-external-stubs) |
 
 ---
 

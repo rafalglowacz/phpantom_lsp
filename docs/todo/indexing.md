@@ -188,6 +188,145 @@ happens rarely (a few times per day at most).
 
 ---
 
+## Phase 2.5: Lazy autoload file indexing
+
+**Goal:** Replace the eager full-AST parse of every Composer autoload
+file at init with a lightweight byte-level scan that builds name-to-path
+indices, deferring full parsing to the moment a symbol is actually used.
+
+### Problem
+
+During `initialized`, PHPantom calls `update_ast` on every file listed
+in `vendor/composer/autoload_files.php` (and any files discovered by
+following `require_once` chains). `update_ast` is a full mago AST
+parse that extracts `ClassInfo`, `FunctionInfo`, `DefineInfo`,
+`SymbolMap`, use maps, and namespace maps. It also populates
+`ast_map`, `symbol_maps`, `use_map`, `namespace_map`, `class_index`,
+`global_functions`, and `global_defines`.
+
+A typical Laravel project has 50-100+ autoload files. Parsing all of
+them eagerly at startup adds hundreds of milliseconds to init time and
+fills memory with AST data for files the user may never interact with.
+
+The justification was that functions and `define()` constants can only
+be discovered through these files (classes have PSR-4 and the classmap
+as alternative discovery paths). But "discovery" and "full parsing"
+are separate concerns. The stubs already prove this: `stub_function_index`
+maps function names to raw PHP source at build time, and
+`find_or_load_function` parses the source lazily on first access,
+caching the result in `global_functions` for subsequent lookups.
+
+### Approach: lightweight scan + lazy parse
+
+Apply the same pattern the stubs use. At init, run a fast byte-level
+scan over autoload files to build three lightweight indices:
+
+| Index | Key | Value | Purpose |
+|---|---|---|---|
+| `autoload_function_index` | FQN (e.g. `"Illuminate\\Support\\str"`) | file path | Lazy function resolution |
+| `autoload_constant_index` | constant name (e.g. `"LARAVEL_START"`) | file path | Lazy constant resolution |
+| `class_index` | FQN (e.g. `"Some\\NonPsr4\\Helper"`) | file URI | Cross-file class lookup (same as today) |
+
+No `ClassInfo`, `FunctionInfo`, `SymbolMap`, or use maps are built at
+init. The indices contain only names and paths.
+
+### Scanner design
+
+Extend the byte-level state machine in `classmap_scanner.rs` (or
+build a sibling module) to also recognise:
+
+- **`function` keyword** at a valid keyword boundary, followed by a
+  name. Combine with the current namespace to produce the FQN.
+  Skip `function` inside class bodies (track brace depth after
+  `class`/`trait`/`interface`/`enum` to distinguish methods from
+  standalone functions).
+- **`define(` calls** where the first argument is a string literal.
+  Extract the constant name from the string. These are always global
+  (not affected by namespace).
+- **`const` keyword** at the top level (brace depth 0 or inside a
+  namespace block but outside a class body). Combine with namespace
+  to produce the FQN.
+
+The existing comment/string/heredoc skipping logic is reused
+unchanged. The `memchr` quick-rejection pass can check for `function`,
+`define`, and `const` in addition to the class keywords.
+
+`require_once` following stays as-is (it already works at the text
+level via `extract_require_once_paths`). The only change is that
+discovered files are scanned with the lightweight scanner instead of
+`update_ast`.
+
+### Resolution changes
+
+**Functions.** Add a new phase to `find_or_load_function` between the
+existing Phase 1 (global_functions) and Phase 2 (stubs):
+
+1. Check `global_functions` (already-parsed user code and cached results).
+2. **New: check `autoload_function_index`.** If the function name maps
+   to a file path, read the file, call `update_ast` (or a targeted
+   function-only parse), cache the results in `global_functions`, and
+   return the match. The index entry can be removed or left as-is
+   (the global_functions cache takes priority on subsequent lookups).
+3. Check `stub_function_index` (built-in PHP functions).
+
+**Constants.** Same pattern for `resolve_constant_definition` and
+constant completion: check `global_defines` first, then the new
+`autoload_constant_index`, then `stub_constant_index`.
+
+**Classes.** No change needed. Classes from autoload files are already
+discoverable via `class_index` (populated by the lightweight scan)
+and lazily parsed on demand by `find_or_load_class`.
+
+**Completion.** Function name completion and constant name completion
+currently iterate `global_functions` and `global_defines`. They need
+to also iterate the keys of the new indices to show autoload-file
+symbols that haven't been lazily parsed yet. For these not-yet-parsed
+entries, the completion item can omit the detail/signature (just show
+the name). The full detail appears once the user selects the item and
+triggers resolution, or after the first use triggers a lazy parse.
+
+### What this does NOT change
+
+- Files the user opens (`did_open` / `did_change`) still get a full
+  `update_ast`. This is about init-time processing of vendor autoload
+  files only.
+- The `require_once` following logic is unchanged.
+- Stub resolution is unchanged.
+
+### Effort and dependencies
+
+**Effort:** Medium. The scanner extension is straightforward (the
+hard parts of the state machine already exist). The resolution
+changes are small (one new lookup phase each for functions and
+constants, following the existing stub pattern). Completion changes
+are minor (iterate one extra map's keys).
+
+**Dependencies:** None. This is independent of the performance
+prerequisites in Sprint 2.5 and the parallelism work in Phase 3.
+It can be done at any time.
+
+**Risk:** The byte-level scanner may miss edge cases that the full AST
+parse handles (e.g. functions defined inside `if (! function_exists(...))`
+guards, or `define()` calls with concatenated names). These are
+acceptable misses: the symbol simply won't appear in completion until
+the file is opened or lazily parsed through another path. The same
+limitation applies to the classmap scanner today.
+
+### Measurables
+
+- **Init time:** Measure before/after on a Laravel project. Expect
+  a reduction proportional to the number of autoload files (50-100
+  fewer full AST parses at startup).
+- **Memory at idle:** Measure RSS after init, before any files are
+  opened. Expect a reduction from not holding `ClassInfo`, `SymbolMap`,
+  and AST data for autoload files that are never accessed.
+- **First-use latency:** The first completion or hover that triggers a
+  lazy parse of an autoload file will be slightly slower than today
+  (one file parse on demand). This is the same tradeoff stubs make
+  and is not noticeable in practice.
+
+---
+
 ## Phase 3: Parallel file processing
 
 **Goal:** Speed up workspace-wide operations (find references,
