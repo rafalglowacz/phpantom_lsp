@@ -525,6 +525,11 @@ acceptable.
 ## 17. Incremental text sync
 **Impact: Low-Medium · Effort: Medium**
 
+> **Cross-reference:** This item is also tracked as
+> [performance.md §8](performance.md#8-incremental-text-sync) and
+> roadmap item 89. The canonical spec lives here; the performance
+> document includes it for completeness.
+
 PHPantom uses `TextDocumentSyncKind::FULL`, meaning every
 `textDocument/didChange` notification sends the entire file content.
 Switching to `TextDocumentSyncKind::INCREMENTAL` means the client sends

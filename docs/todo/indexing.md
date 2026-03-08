@@ -194,6 +194,24 @@ happens rarely (a few times per day at most).
 go-to-implementation, self-scan, diagnostics) by processing files in
 parallel with priority awareness.
 
+**Prerequisites (from [performance.md](performance.md)):**
+
+- **§3 `RwLock` for read-heavy maps.** Parallel `spawn_blocking` tasks
+  need concurrent read access to `ast_map`, `symbol_maps`, `use_map`,
+  and `namespace_map`. With `Mutex`, every reader serializes against
+  every other reader, defeating the purpose of parallelism regardless
+  of how clever the priority scheduling is. `RwLock` lets all readers
+  proceed concurrently; only writes (which happen on `did_change` and
+  on-demand file loading) take an exclusive lock.
+- **§5 `Arc<String>` for file content.** Parallel tasks that need file
+  content should share references rather than each cloning the full
+  string out of `open_files`.
+- **§6 `Arc<SymbolMap>` to avoid snapshot cloning.** Find References
+  snapshots all user-file symbol maps before scanning. With owned
+  `SymbolMap` values, this deep-clones hundreds of maps. With
+  `Arc<SymbolMap>`, the snapshot is cheap and the lock is released
+  immediately.
+
 ### Why not rayon?
 
 `rayon` is the obvious choice for "process N files in parallel" and
@@ -289,6 +307,28 @@ is a nice-to-have, not a requirement.
 enabling workspace symbols, fast find-references without on-demand
 scanning, and complete completion item detail.
 
+**Prerequisites (from [performance.md](performance.md)):**
+
+- **§1 FQN secondary index.** The second pass calls `update_ast` on
+  every file, populating `ast_map` with thousands of entries. Without
+  a FQN index, every `find_class_in_ast_map` call (Phase 1 of
+  `find_or_load_class`) becomes an O(thousands) linear scan. With the
+  index, it is O(1).
+- **§2 `Arc<ClassInfo>`.** Full indexing stores a `ClassInfo` for every
+  class in the project. Without `Arc`, every resolution clones the
+  entire struct out of the map. With `Arc`, retrieval is a
+  reference-count increment. This is the difference between full
+  indexing using ~200 MB vs. ~500 MB for a large project.
+- **§3 `RwLock`.** The second pass writes to `ast_map` at Low priority
+  while High-priority LSP requests read from it. `Mutex` would force
+  every completion/hover request to wait for the current background
+  parse to finish its map insertion. `RwLock` lets reads proceed
+  concurrently with other reads; only the brief write window blocks.
+- **§4 `HashSet` dedup.** Full indexing means every class resolution
+  pulls from a fully populated inheritance tree. Eloquent models with
+  150+ inherited methods across 8+ levels hit the O(N²) dedup path
+  on every resolution. The `HashSet` fix brings this to O(N).
+
 ### Trigger
 
 When `strategy = "full"` is set in `.phpantom.toml`.
@@ -343,7 +383,13 @@ Currently we store `ClassInfo`, `FunctionInfo`, and `SymbolMap`
 structs that are not as lean as they could be. For a 21K-file
 codebase, full indexing will use meaningful RAM. This is acceptable
 because it's an opt-in mode, but we should profile and trim struct
-sizes over time. The aim is to stay under 512MB for a full project.
+sizes over time. The aim is to stay under 512 MB for a full project.
+
+The performance prerequisites above (§2 `Arc<ClassInfo>`, §5
+`Arc<String>`, §6 `Arc<SymbolMap>`) directly reduce memory usage by
+sharing data across the ast_map, caches, and snapshot copies instead
+of deep-cloning each. These should be measured before and after to
+validate the 512 MB target.
 
 ### Workspace symbols
 

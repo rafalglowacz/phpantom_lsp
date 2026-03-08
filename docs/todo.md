@@ -28,6 +28,7 @@ with each step.
 | [Configuration](todo/config.md) | Per-project `.phpantom.toml` file, PHP version override, diagnostic tool toggles, prompt-and-remember settings |
 | [Refactoring](todo/refactor.md) | Technical debt and cleanup tasks. Gate check between sprints: clear all items before starting the next sprint |
 | [Indexing](todo/indexing.md) | Self-generated classmap, staleness detection, parallel file processing, full background indexing, disk cache |
+| [Performance](todo/performance.md) | FQN index, `Arc<ClassInfo>`, `RwLock`, inheritance dedup, file content cloning, type substitution optimisation |
 
 ---
 
@@ -53,6 +54,49 @@ of the box. This also covers non-Composer projects.
 **After Sprint 2:** PHPantom works without any setup beyond opening a
 PHP project. The README can drop the `composer dump-autoload -o`
 requirement to a performance tip instead of a prerequisite.
+
+---
+
+## Sprint 2.5 — Performance foundations
+
+These structural fixes reduce latency and contention on the hot paths
+that every LSP request exercises. They are sequenced here, before
+refactoring and feature sprints, because later work amplifies the
+underlying costs:
+
+- **Parallel file processing** (indexing.md Phase 3) adds concurrent
+  readers. Without `RwLock`, parallelism is defeated by lock
+  contention.
+- **Full background indexing** (indexing.md Phase 5) puts thousands of
+  files into `ast_map`. Without the FQN index, every class lookup
+  becomes an O(thousands) scan. Without `Arc<ClassInfo>`, every lookup
+  deep-clones a large struct.
+- **Sprint 6 Laravel generics** (`collect()`, custom builders) increase
+  the depth of generic substitution chains. Without the `HashSet` dedup
+  and substitution early-exit, Eloquent models pay O(N²) per resolution.
+
+Fixing these first means every subsequent sprint benefits automatically.
+
+| # | Item | Effort | Domain | Doc Link |
+|---|---|---|---|---|
+| 82 | FQN secondary index for `find_class_in_ast_map` | Low | Performance | [performance.md §1](todo/performance.md#1-fqn-secondary-index-for-find_class_in_ast_map) |
+| 83 | `RwLock` for read-heavy maps | Low | Performance | [performance.md §3](todo/performance.md#3-rwlock-for-read-heavy-maps) |
+| 84 | `HashSet` dedup in inheritance merging | Low | Performance | [performance.md §4](todo/performance.md#4-hashset-dedup-in-inheritance-merging) |
+| 85 | `Arc<String>` for file content in `open_files` | Low | Performance | [performance.md §5](todo/performance.md#5-arcstring-for-file-content-in-open_files) |
+| 86 | `Arc<SymbolMap>` to avoid snapshot cloning | Low | Performance | [performance.md §6](todo/performance.md#6-arcsymbolmap-to-avoid-snapshot-cloning) |
+| 87 | Reference-counted `ClassInfo` (`Arc<ClassInfo>`) | Medium | Performance | [performance.md §2](todo/performance.md#2-reference-counted-classinfo-arcclassinfo) |
+| 88 | Early-exit and `Cow` return in `apply_substitution` | Low | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
+
+Item 89 (incremental text sync) is in the backlog because the parser
+requires a full re-parse regardless, limiting the benefit to IPC
+bandwidth savings on large files.
+
+**After Sprint 2.5:** Every resolution path is O(1) lookup instead of
+O(N) scan. Concurrent reads no longer block each other. Inheritance
+merging is O(N) instead of O(N²). File content and symbol maps are
+shared by reference instead of deep-cloned. The codebase is ready for
+parallel file processing and full background indexing without
+performance regressions.
 
 ---
 
@@ -116,7 +160,7 @@ deepens that lead and rounds out the remaining feature surface.
 | 39 | Simplify with null coalescing / null-safe operator (code action) | Medium | Code Actions | [actions.md §2](todo/actions.md#2-simplify-with-null-coalescing--null-safe-operator) |
 | 40 | Inlay hints (`textDocument/inlayHint`) | Medium | LSP Features | [lsp-features.md §9](todo/lsp-features.md#9-inlay-hints-textdocumentinlayhint) |
 
-**After Sprint 6:** PHPantom has a complete, polished LSP feature set.
+**After Sprint 5:** PHPantom has a complete, polished LSP feature set.
 Users moving to Zed/Neovim/Helix lose nothing on the intelligence side
 and gain 1000× faster startup. The remaining gaps are Blade and
 formatting (not our domain).
@@ -152,7 +196,7 @@ the Laravel-specific manifestation is a small incremental step. Item 51
 (Type Hierarchy) depends on the go-to-implementation infrastructure and
 should be scheduled after that work is stable. Item 56 (partial result
 streaming) addresses outbound latency for large result sets. See also
-item 73 (incremental text sync) in the backlog, which addresses the
+item 89 (incremental text sync) in the backlog, which addresses the
 complementary inbound direction.
 
 ---
@@ -206,8 +250,13 @@ eventually but don't move the needle.
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
 | 72 | Switch → match conversion | Medium | Code Actions | [actions.md §4](todo/actions.md#4-switch--match-conversion) |
-| 73 | Incremental text sync | Medium | LSP Features | [lsp-features.md §17](todo/lsp-features.md#17-incremental-text-sync) |
+| 89 | Incremental text sync | Medium | Performance | [performance.md §8](todo/performance.md#8-incremental-text-sync) |
 
+### Performance long-tail
+
+| # | Item | Effort | Domain | Doc Link |
+|---|---|---|---|---|
+| 90 | Type AST for `apply_substitution` (full refactor) | High | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
 
 ---
 
@@ -243,4 +292,3 @@ Blade is a multi-phase project tracked in [todo/blade.md](todo/blade.md).
 | Phase 2 | Component support | Template/component discovery, `<x-component>` parsing, `@props`/`@aware`, name completion |
 | Phase 3 | Cross-file view intelligence | View name GTD, signature merging for `@extends`, component→template variable typing |
 | Phase 4 | Blade directive completion | Directive name completion with snippet insertion |
-
