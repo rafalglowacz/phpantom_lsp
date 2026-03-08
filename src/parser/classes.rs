@@ -51,26 +51,9 @@ use crate::types::*;
 use crate::virtual_members::laravel::infer_relationship_from_body;
 
 use super::{
-    DocblockCtx, extract_deprecated_attribute, extract_hint_string, extract_parameters,
-    extract_property_info, extract_visibility, is_available_for_version,
+    DeprecationInfo, DocblockCtx, extract_hint_string, extract_parameters, extract_property_info,
+    extract_visibility, is_available_for_version, merge_deprecation_info,
 };
-
-/// Merge a docblock `@deprecated` message with a `#[Deprecated]` attribute.
-///
-/// The docblock tag takes priority (it is author-written and often more
-/// specific).  When the docblock has no `@deprecated` tag, falls back to
-/// the `#[Deprecated]` attribute if present.
-fn merge_deprecation_message(
-    docblock_msg: Option<String>,
-    attribute_lists: &Sequence<'_, AttributeList<'_>>,
-    doc_ctx: Option<&DocblockCtx<'_>>,
-) -> Option<String> {
-    if docblock_msg.is_some() {
-        return docblock_msg;
-    }
-    let ctx = doc_ctx?;
-    extract_deprecated_attribute(attribute_lists, ctx).map(|attr| attr.to_message())
-}
 
 /// Docblock-derived metadata common to all class-like declarations.
 ///
@@ -713,6 +696,11 @@ impl Backend {
 
                     let column_names = extract_column_names(class.members.iter(), content);
 
+                    let class_depr = merge_deprecation_info(
+                        doc_info.deprecation_message.clone(),
+                        &class.attribute_lists,
+                        doc_ctx,
+                    );
                     classes.push(ClassInfo {
                         kind: ClassLikeKind::Class,
                         name: class_name,
@@ -728,11 +716,8 @@ impl Backend {
                         mixins: doc_info.mixins,
                         is_final: class.modifiers.contains_final(),
                         is_abstract: class.modifiers.contains_abstract(),
-                        deprecation_message: merge_deprecation_message(
-                            doc_info.deprecation_message.clone(),
-                            &class.attribute_lists,
-                            doc_ctx,
-                        ),
+                        deprecation_message: class_depr.message,
+                        deprecated_replacement: class_depr.replacement,
                         link: doc_info.link,
                         template_params: doc_info.template_params,
                         template_param_bounds: doc_info.template_param_bounds,
@@ -797,6 +782,11 @@ impl Backend {
                     let start_offset = iface.left_brace.start.offset;
                     let end_offset = iface.right_brace.end.offset;
 
+                    let iface_depr = merge_deprecation_info(
+                        doc_info.deprecation_message.clone(),
+                        &iface.attribute_lists,
+                        doc_ctx,
+                    );
                     classes.push(ClassInfo {
                         kind: ClassLikeKind::Interface,
                         name: iface_name,
@@ -812,11 +802,8 @@ impl Backend {
                         mixins: doc_info.mixins,
                         is_final: false,
                         is_abstract: false,
-                        deprecation_message: merge_deprecation_message(
-                            doc_info.deprecation_message.clone(),
-                            &iface.attribute_lists,
-                            doc_ctx,
-                        ),
+                        deprecation_message: iface_depr.message,
+                        deprecated_replacement: iface_depr.replacement,
                         link: doc_info.link,
                         template_params: doc_info.template_params,
                         template_param_bounds: doc_info.template_param_bounds,
@@ -862,6 +849,11 @@ impl Backend {
                     let start_offset = trait_def.left_brace.start.offset;
                     let end_offset = trait_def.right_brace.end.offset;
 
+                    let trait_depr = merge_deprecation_info(
+                        doc_info.deprecation_message.clone(),
+                        &trait_def.attribute_lists,
+                        doc_ctx,
+                    );
                     classes.push(ClassInfo {
                         kind: ClassLikeKind::Trait,
                         name: trait_name,
@@ -877,11 +869,8 @@ impl Backend {
                         mixins: doc_info.mixins,
                         is_final: false,
                         is_abstract: false,
-                        deprecation_message: merge_deprecation_message(
-                            doc_info.deprecation_message.clone(),
-                            &trait_def.attribute_lists,
-                            doc_ctx,
-                        ),
+                        deprecation_message: trait_depr.message,
+                        deprecated_replacement: trait_depr.replacement,
                         link: doc_info.link,
                         template_params: doc_info.template_params,
                         template_param_bounds: doc_info.template_param_bounds,
@@ -945,6 +934,11 @@ impl Backend {
                     let end_offset = enum_def.right_brace.end.offset;
 
                     // Enums are implicitly final and cannot be extended.
+                    let enum_depr = merge_deprecation_info(
+                        doc_info.deprecation_message,
+                        &enum_def.attribute_lists,
+                        doc_ctx,
+                    );
                     classes.push(ClassInfo {
                         kind: ClassLikeKind::Enum,
                         name: enum_name,
@@ -960,11 +954,8 @@ impl Backend {
                         mixins: doc_info.mixins,
                         is_final: true,
                         is_abstract: false,
-                        deprecation_message: merge_deprecation_message(
-                            doc_info.deprecation_message,
-                            &enum_def.attribute_lists,
-                            doc_ctx,
-                        ),
+                        deprecation_message: enum_depr.message,
+                        deprecated_replacement: enum_depr.replacement,
                         link: doc_info.link,
                         template_params: vec![],
                         template_param_bounds: HashMap::new(),
@@ -1057,6 +1048,7 @@ impl Backend {
             is_final: false,
             is_abstract: false,
             deprecation_message: None,
+            deprecated_replacement: None,
             template_params: vec![],
             template_param_bounds: HashMap::new(),
             extends_generics: vec![],
@@ -1530,6 +1522,7 @@ impl Backend {
                         return_type,
                         conditional_return,
                         deprecation_message,
+                        method_deprecated_replacement,
                         method_template_params,
                         method_template_param_bounds,
                         method_template_bindings,
@@ -1621,16 +1614,18 @@ impl Backend {
                             )
                         });
 
-                        let deprecation_message = merge_deprecation_message(
+                        let depr_info = merge_deprecation_info(
                             docblock_text.and_then(docblock::extract_deprecation_message),
                             &method.attribute_lists,
                             doc_ctx,
                         );
+                        let deprecation_message = depr_info.message;
 
                         (
                             effective,
                             conditional,
                             deprecation_message,
+                            depr_info.replacement,
                             tpl_params,
                             tpl_param_bounds,
                             tpl_bindings,
@@ -1638,6 +1633,7 @@ impl Backend {
                     } else {
                         (
                             native_return_type.clone(),
+                            None,
                             None,
                             None,
                             Vec::new(),
@@ -1693,6 +1689,7 @@ impl Backend {
                                     is_static: false,
                                     visibility: prop_visibility,
                                     deprecation_message: None,
+                                    deprecated_replacement: None,
                                     is_virtual: false,
                                 });
                             }
@@ -1779,6 +1776,7 @@ impl Backend {
                         visibility,
                         conditional_return,
                         deprecation_message,
+                        deprecated_replacement: method_deprecated_replacement,
                         template_params: method_template_params,
                         template_param_bounds: method_template_param_bounds,
                         template_bindings: method_template_bindings,
@@ -1804,27 +1802,34 @@ impl Backend {
                         && let Some(doc_text) =
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
                     {
-                        let deprecation_msg = docblock::extract_deprecation_message(doc_text);
-                        // Merge docblock @deprecated with #[Deprecated] attribute.
-                        let deprecation_msg = if deprecation_msg.is_some() {
-                            deprecation_msg
-                        } else if let Some(attr_lists) = prop_attr_lists {
-                            extract_deprecated_attribute(attr_lists, ctx)
-                                .map(|attr| attr.to_message())
+                        let docblock_msg = docblock::extract_deprecation_message(doc_text);
+                        // Use merge_deprecation_info for version-aware suppression
+                        // and replacement extraction.  Re-use the attribute lists
+                        // from the property variant.
+                        let depr_info = if let Some(attr_lists) = prop_attr_lists {
+                            merge_deprecation_info(docblock_msg, attr_lists, doc_ctx)
                         } else {
-                            None
+                            DeprecationInfo {
+                                message: docblock_msg,
+                                replacement: None,
+                            }
                         };
+                        if let Some(ref msg) = depr_info.message {
+                            for prop in &mut prop_infos {
+                                prop.deprecation_message = Some(msg.clone());
+                            }
+                        }
+                        if let Some(ref repl) = depr_info.replacement {
+                            for prop in &mut prop_infos {
+                                prop.deprecated_replacement = Some(repl.clone());
+                            }
+                        }
                         if let Some(doc_type) = docblock::extract_var_type(doc_text) {
                             for prop in &mut prop_infos {
                                 prop.type_hint = docblock::resolve_effective_type(
                                     prop.type_hint.as_deref(),
                                     Some(&doc_type),
                                 );
-                            }
-                        }
-                        if let Some(ref msg) = deprecation_msg {
-                            for prop in &mut prop_infos {
-                                prop.deprecation_message = Some(msg.clone());
                             }
                         }
                         let description =
@@ -1843,11 +1848,17 @@ impl Backend {
                     if prop_infos.iter().all(|p| p.deprecation_message.is_none())
                         && let Some(ctx) = doc_ctx
                         && let Some(attr_lists) = prop_attr_lists
-                        && let Some(attr) = extract_deprecated_attribute(attr_lists, ctx)
                     {
-                        let msg = attr.to_message();
-                        for prop in &mut prop_infos {
-                            prop.deprecation_message = Some(msg.clone());
+                        let depr_info = merge_deprecation_info(None, attr_lists, Some(ctx));
+                        if let Some(ref msg) = depr_info.message {
+                            for prop in &mut prop_infos {
+                                prop.deprecation_message = Some(msg.clone());
+                            }
+                        }
+                        if let Some(ref repl) = depr_info.replacement {
+                            for prop in &mut prop_infos {
+                                prop.deprecated_replacement = Some(repl.clone());
+                            }
                         }
                     }
 
@@ -1856,15 +1867,17 @@ impl Backend {
                 ClassLikeMember::Constant(constant) => {
                     let type_hint = constant.hint.as_ref().map(|h| extract_hint_string(h));
                     let visibility = extract_visibility(constant.modifiers.iter());
-                    let deprecation_message = {
+                    let depr_info = {
                         let docblock_msg = if let Some(ctx) = doc_ctx {
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
                                 .and_then(docblock::extract_deprecation_message)
                         } else {
                             None
                         };
-                        merge_deprecation_message(docblock_msg, &constant.attribute_lists, doc_ctx)
+                        merge_deprecation_info(docblock_msg, &constant.attribute_lists, doc_ctx)
                     };
+                    let deprecation_message = depr_info.message;
+                    let constant_deprecated_replacement = depr_info.replacement;
                     let const_description = doc_ctx
                         .and_then(|ctx| {
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
@@ -1882,6 +1895,7 @@ impl Backend {
                             type_hint: type_hint.clone(),
                             visibility,
                             deprecation_message: deprecation_message.clone(),
+                            deprecated_replacement: constant_deprecated_replacement.clone(),
                             description: const_description.clone(),
                             is_enum_case: false,
                             enum_value: None,
@@ -1908,6 +1922,7 @@ impl Backend {
                         type_hint: None,
                         visibility: Visibility::Public,
                         deprecation_message: None,
+                        deprecated_replacement: None,
                         description: None,
                         is_enum_case: true,
                         enum_value,

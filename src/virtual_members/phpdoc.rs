@@ -174,6 +174,7 @@ impl VirtualMemberProvider for PHPDocProvider {
                     is_static: false,
                     visibility: Visibility::Public,
                     deprecation_message: None,
+                    deprecated_replacement: None,
                     is_virtual: true,
                 });
             }
@@ -217,6 +218,7 @@ impl VirtualMemberProvider for PHPDocProvider {
                             is_static: false,
                             visibility: Visibility::Public,
                             deprecation_message: None,
+                            deprecated_replacement: None,
                             is_virtual: true,
                         });
                     }
@@ -270,6 +272,7 @@ impl VirtualMemberProvider for PHPDocProvider {
                                 is_static: false,
                                 visibility: Visibility::Public,
                                 deprecation_message: None,
+                                deprecated_replacement: None,
                                 is_virtual: true,
                             });
                         }

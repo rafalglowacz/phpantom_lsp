@@ -45,6 +45,7 @@ fn virtual_members_not_empty_with_constant() {
             type_hint: None,
             visibility: Visibility::Public,
             deprecation_message: None,
+            deprecated_replacement: None,
             description: None,
             is_enum_case: false,
             enum_value: None,

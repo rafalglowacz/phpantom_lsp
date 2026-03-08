@@ -283,6 +283,7 @@ fn test_apply_substitution_to_method_modifies_return_and_params() {
         visibility: Visibility::Public,
         conditional_return: None,
         deprecation_message: None,
+        deprecated_replacement: None,
         template_params: Vec::new(),
         template_param_bounds: HashMap::new(),
         template_bindings: Vec::new(),

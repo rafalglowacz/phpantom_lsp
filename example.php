@@ -1961,6 +1961,22 @@ class DeprecationDemo
 
         // Docblock @deprecated wins when both are present
         $src->bothDocAndAttr();
+
+        // ── Version-aware suppression ───────────────────────────────
+        // When #[Deprecated(since: "X.Y")] declares a version and your
+        // project targets an older PHP version (via composer.json or
+        // .phpantom.toml), the deprecation diagnostic is suppressed.
+        // For example, if you target PHP 8.0:
+        //   - attrDeprecatedMethod() (since: "8.1") → suppressed
+        //   - nativeDeprecatedMethod() (since: "8.4") → suppressed
+        //   - sendLegacy() (@deprecated docblock, no since) → still shown
+
+        // ── Replacement code action ─────────────────────────────────
+        // When #[Deprecated(replacement: "...")] provides a template,
+        // placing the cursor on the call and pressing the quick-fix
+        // shortcut offers "Replace with `newFunc(...)`".
+        // Template variables: %parametersList%, %parameter0%, %class%.
+        $src->legacySetTimezone('UTC');
     }
 }
 
@@ -2319,6 +2335,11 @@ class ScaffoldingDeprecation
      */
     #[\Deprecated(reason: "Attribute message loses")]
     public function bothDocAndAttr(): void {}
+
+    #[\Deprecated(replacement: "%class%->setTimezone(%parametersList%)", since: "5.5")]
+    public function legacySetTimezone(string $tz): void {}
+
+    public function setTimezone(string $tz): void {}
 }
 
 /**

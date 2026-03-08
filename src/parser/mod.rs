@@ -206,8 +206,8 @@ fn extract_version_availability(
 ///
 /// - `reason` — human-readable explanation (may also appear as a positional arg).
 /// - `since` — PHP version when the element was deprecated.
-/// - `replacement` — code template for auto-replacement (wired up to code
-///   actions in a future sprint).
+/// - `replacement` — code template for auto-replacement, wired to the
+///   "Replace deprecated call" code action.
 ///
 /// When only a bare `#[Deprecated]` is present, all three fields are `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -217,9 +217,21 @@ pub(crate) struct DeprecatedAttribute {
     /// Code template for auto-replacement, e.g.
     /// `"exif_read_data(%parametersList%)"`.
     ///
-    /// TODO: wire this up to a "replace deprecated call" code action once
-    /// the general code-action infrastructure lands.
-    #[allow(dead_code)]
+    /// Template variables (`%parametersList%`, `%parameter0%`, `%class%`)
+    /// are expanded at call sites by the "Replace deprecated call" code
+    /// action.
+    pub replacement: Option<String>,
+}
+
+/// Combined deprecation metadata returned by [`merge_deprecation_info`].
+///
+/// Bundles the human-readable message with the optional replacement
+/// template so callers can populate both `deprecation_message` and
+/// `deprecated_replacement` on the type structs in a single pass.
+pub(crate) struct DeprecationInfo {
+    /// Human-readable message (may be empty for bare `@deprecated` / `#[Deprecated]`).
+    pub message: Option<String>,
+    /// Replacement code template from `#[Deprecated(replacement: "...")]`.
     pub replacement: Option<String>,
 }
 
@@ -237,6 +249,65 @@ impl DeprecatedAttribute {
             (None, Some(since)) => format!("since PHP {}", since),
             (None, None) => String::new(),
         }
+    }
+}
+
+/// Merge a docblock `@deprecated` message with a `#[Deprecated]` attribute.
+///
+/// The docblock tag takes priority (it is author-written and often more
+/// specific).  When the docblock has no `@deprecated` tag, falls back to
+/// the `#[Deprecated]` attribute if present.
+///
+/// **Version-aware suppression:** when the `#[Deprecated]` attribute has a
+/// `since` field and the target PHP version (from `DocblockCtx`) is older
+/// than `since`, the element is not considered deprecated and `None` is
+/// returned for the message.  Docblock `@deprecated` tags have no
+/// structured `since` data and are always honoured.
+pub(crate) fn merge_deprecation_info(
+    docblock_msg: Option<String>,
+    attribute_lists: &Sequence<'_, attribute::AttributeList<'_>>,
+    doc_ctx: Option<&DocblockCtx<'_>>,
+) -> DeprecationInfo {
+    // Docblock @deprecated always wins — it has no `since` field so
+    // version-aware suppression does not apply.
+    if docblock_msg.is_some() {
+        return DeprecationInfo {
+            message: docblock_msg,
+            replacement: None,
+        };
+    }
+
+    let Some(ctx) = doc_ctx else {
+        return DeprecationInfo {
+            message: None,
+            replacement: None,
+        };
+    };
+
+    let Some(attr) = extract_deprecated_attribute(attribute_lists, ctx) else {
+        return DeprecationInfo {
+            message: None,
+            replacement: None,
+        };
+    };
+
+    // Version-aware suppression: if the attribute declares `since` and
+    // the project targets an older PHP version, this element is not yet
+    // deprecated from the user's perspective.
+    if let Some(since_str) = &attr.since
+        && let Some(target) = ctx.php_version
+        && let Some(since_ver) = PhpVersion::from_composer_constraint(since_str)
+        && (target.major, target.minor) < (since_ver.major, since_ver.minor)
+    {
+        return DeprecationInfo {
+            message: None,
+            replacement: None,
+        };
+    }
+
+    DeprecationInfo {
+        message: Some(attr.to_message()),
+        replacement: attr.replacement,
     }
 }
 
@@ -565,6 +636,7 @@ pub(crate) fn extract_property_info(property: &Property) -> Vec<PropertyInfo> {
                 is_static,
                 visibility,
                 deprecation_message: None,
+                deprecated_replacement: None,
                 is_virtual: false,
             }
         })

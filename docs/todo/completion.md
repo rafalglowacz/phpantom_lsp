@@ -132,24 +132,7 @@ parsing and should feed into the same `return_type` field on
 
 ---
 
-## 4. `#[Deprecated]` structured deprecation metadata
-**Impact: Low · Effort: Low**
-
-The `#[Deprecated]` attribute is parsed and wired into hover, completion
-strikethrough, and deprecation diagnostics. Two pieces remain:
-
-- **Replacement code action.** The `replacement` field is parsed and
-  stored but not yet wired to a code action. Once the general
-  code-action infrastructure lands, a "replace deprecated call"
-  quick-fix can use the template (e.g.
-  `"exif_read_data(%parametersList%)"`) to offer automatic replacement.
-- **Version-aware suppression.** Use the `since` field to suppress
-  deprecation warnings when targeting a PHP version older than the
-  `since` value.
-
----
-
-## 5. Go-to-definition for array shape keys via bracket access
+## 4. Go-to-definition for array shape keys via bracket access
 **Impact: Low-Medium · Effort: Medium**
 
 Array shape keys accessed via bracket notation (`$status['code']`)
@@ -168,7 +151,7 @@ key inside the matching `array{…}` annotation.
 
 ---
 
-## 6. Non-array functions with dynamic return types
+## 5. Non-array functions with dynamic return types
 **Impact: Low · Effort: High**
 
 PHPStan also provides dynamic return type extensions for many non-array
@@ -199,7 +182,7 @@ return types (less impactful for class-based completion).
 
 ---
 
-## 7. `#[ReturnTypeContract]` parameter-dependent return types
+## 6. `#[ReturnTypeContract]` parameter-dependent return types
 **Impact: Low · Effort: Low**
 
 phpstorm-stubs use `#[ReturnTypeContract]` on 4 functions to express
@@ -242,7 +225,7 @@ type. This integrates into the call return type resolution path.
 
 ---
 
-## 8. `#[ExpectedValues]` parameter value suggestions
+## 7. `#[ExpectedValues]` parameter value suggestions
 **Impact: Low · Effort: Medium**
 
 phpstorm-stubs annotate ~62 parameters and return values with
@@ -287,7 +270,7 @@ combinations.
 
 ---
 
-## 9. `class_alias()` support
+## 8. `class_alias()` support
 **Impact: Low-Medium · Effort: Medium**
 
 Resolve `class_alias('OriginalClass', 'AliasName')` so that the alias

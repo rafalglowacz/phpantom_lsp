@@ -1898,3 +1898,330 @@ class Consumer {
         deprecated
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Version-aware deprecation suppression
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Suppressed when target PHP version is older than since ─────────────────
+
+#[test]
+fn deprecated_since_suppressed_when_target_is_older() {
+    let backend = create_test_backend();
+    // Target PHP 7.4 — function deprecated since 8.0 should NOT produce a diagnostic.
+    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(7, 4));
+
+    let uri = "file:///test_since_suppressed.php";
+    let text = r#"<?php
+#[\Deprecated(reason: "Use newFunc()", since: "8.0")]
+function oldFunc(): void {}
+
+oldFunc();
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.is_empty(),
+        "Deprecation should be suppressed when target PHP (7.4) < since (8.0), got: {:?}",
+        deprecated
+    );
+}
+
+// ─── Not suppressed when target PHP version equals since ────────────────────
+
+#[test]
+fn deprecated_since_not_suppressed_when_target_equals_since() {
+    let backend = create_test_backend();
+    // Target PHP 8.0 — function deprecated since 8.0 SHOULD produce a diagnostic.
+    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 0));
+
+    let uri = "file:///test_since_equal.php";
+    let text = r#"<?php
+#[\Deprecated(reason: "Use newFunc()", since: "8.0")]
+function oldFunc(): void {}
+
+oldFunc();
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        !deprecated.is_empty(),
+        "Deprecation should fire when target PHP (8.0) == since (8.0)"
+    );
+}
+
+// ─── Not suppressed when target PHP version is newer than since ─────────────
+
+#[test]
+fn deprecated_since_not_suppressed_when_target_is_newer() {
+    let backend = create_test_backend();
+    // Target PHP 8.4 — function deprecated since 7.2 SHOULD produce a diagnostic.
+    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 4));
+
+    let uri = "file:///test_since_newer.php";
+    let text = r#"<?php
+#[\Deprecated(reason: "Use newFunc()", since: "7.2")]
+function oldFunc(): void {}
+
+oldFunc();
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        !deprecated.is_empty(),
+        "Deprecation should fire when target PHP (8.4) > since (7.2)"
+    );
+}
+
+// ─── Docblock @deprecated is never suppressed by version ────────────────────
+
+#[test]
+fn docblock_deprecated_never_suppressed_by_version() {
+    let backend = create_test_backend();
+    // Even with a very old target version, @deprecated docblock has no
+    // `since` data and should always produce a diagnostic.
+    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(5, 6));
+
+    let uri = "file:///test_docblock_not_suppressed.php";
+    let text = r#"<?php
+/**
+ * @deprecated Use newFunc() instead
+ */
+function oldFunc(): void {}
+
+oldFunc();
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        !deprecated.is_empty(),
+        "Docblock @deprecated should always produce a diagnostic regardless of PHP version"
+    );
+}
+
+// ─── Method deprecated since suppressed when target is older ────────────────
+
+#[test]
+fn deprecated_method_since_suppressed_when_target_is_older() {
+    let backend = create_test_backend();
+    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 0));
+
+    let uri = "file:///test_method_since.php";
+    let text = r#"<?php
+class Formatter {
+    #[\Deprecated(reason: "Use format() instead", since: "8.4")]
+    public function oldFormat(): string { return ''; }
+}
+
+$f = new Formatter();
+$f->oldFormat();
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.is_empty(),
+        "Method deprecation should be suppressed when target PHP (8.0) < since (8.4), got: {:?}",
+        deprecated
+    );
+}
+
+// ─── Class deprecated since suppressed when target is older ─────────────────
+
+#[test]
+fn deprecated_class_since_suppressed_when_target_is_older() {
+    let backend = create_test_backend();
+    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(7, 4));
+
+    let uri = "file:///test_class_since.php";
+    let text = r#"<?php
+#[\Deprecated(reason: "Use NewService", since: "8.1")]
+class OldService {}
+
+new OldService();
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.is_empty(),
+        "Class deprecation should be suppressed when target PHP (7.4) < since (8.1), got: {:?}",
+        deprecated
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Replace deprecated call code action
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Replacement code action offered for deprecated function with template ───
+
+#[test]
+fn replace_deprecated_function_call_action_offered() {
+    use phpantom_lsp::types::FunctionInfo;
+
+    let backend = create_test_backend();
+    let uri = "file:///test_replace_func.php";
+    let text = concat!("<?php\n", "read_exif_data('photo.jpg');\n",);
+
+    // Register a deprecated function with a replacement template.
+    {
+        let mut fmap = backend.global_functions().write();
+        fmap.insert(
+            "read_exif_data".to_string(),
+            (
+                "file:///stubs.php".to_string(),
+                FunctionInfo {
+                    name: "read_exif_data".to_string(),
+                    name_offset: 0,
+                    parameters: vec![],
+                    return_type: Some("array".to_string()),
+                    native_return_type: None,
+                    description: None,
+                    return_description: None,
+                    link: None,
+                    namespace: None,
+                    conditional_return: None,
+                    type_assertions: vec![],
+                    deprecation_message: Some("since PHP 7.2".to_string()),
+                    deprecated_replacement: Some("exif_read_data(%parametersList%)".to_string()),
+                    template_params: vec![],
+                    template_bindings: vec![],
+                },
+            ),
+        );
+    }
+
+    backend.update_ast(uri, text);
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier {
+            uri: uri.parse().unwrap(),
+        },
+        range: Range {
+            start: Position::new(1, 0),
+            end: Position::new(1, 14),
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let actions = backend.handle_code_action(uri, text, &params);
+
+    let replace_actions: Vec<_> = actions
+        .iter()
+        .filter(|a| match a {
+            tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(ca) => {
+                ca.title.contains("Replace")
+            }
+            _ => false,
+        })
+        .collect();
+
+    assert!(
+        !replace_actions.is_empty(),
+        "Should offer a 'Replace' code action for deprecated function with replacement template, got actions: {:?}",
+        actions
+            .iter()
+            .map(|a| match a {
+                tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(ca) => ca.title.clone(),
+                tower_lsp::lsp_types::CodeActionOrCommand::Command(c) => c.title.clone(),
+            })
+            .collect::<Vec<_>>()
+    );
+
+    // Verify the replacement text includes the expanded template.
+    if let tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(ca) = &replace_actions[0] {
+        let edit = ca.edit.as_ref().expect("code action should have an edit");
+        let changes = edit.changes.as_ref().expect("edit should have changes");
+        let edits = changes
+            .values()
+            .next()
+            .expect("should have at least one file edit");
+        let text_edit = &edits[0];
+        assert!(
+            text_edit.new_text.contains("exif_read_data"),
+            "Replacement should contain 'exif_read_data', got: {}",
+            text_edit.new_text
+        );
+        assert!(
+            text_edit.new_text.contains("'photo.jpg'"),
+            "Replacement should contain the original argument, got: {}",
+            text_edit.new_text
+        );
+    }
+}
+
+// ─── No replacement action when no replacement template ─────────────────────
+
+#[test]
+fn no_replace_action_when_no_replacement_template() {
+    let backend = create_test_backend();
+    let uri = "file:///test_no_replace.php";
+    let text = concat!(
+        "<?php\n",
+        "/**\n",
+        " * @deprecated Use something else\n",
+        " */\n",
+        "function oldFunc(): void {}\n",
+        "\n",
+        "oldFunc();\n",
+    );
+
+    backend.update_ast(uri, text);
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier {
+            uri: uri.parse().unwrap(),
+        },
+        range: Range {
+            start: Position::new(6, 0),
+            end: Position::new(6, 7),
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+
+    let actions = backend.handle_code_action(uri, text, &params);
+
+    let replace_actions: Vec<_> = actions
+        .iter()
+        .filter(|a| match a {
+            tower_lsp::lsp_types::CodeActionOrCommand::CodeAction(ca) => {
+                ca.title.contains("Replace")
+            }
+            _ => false,
+        })
+        .collect();
+
+    assert!(
+        replace_actions.is_empty(),
+        "Should NOT offer a Replace action when there is no replacement template"
+    );
+}

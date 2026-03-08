@@ -325,6 +325,12 @@ pub struct MethodInfo {
     /// `None` means not deprecated. `Some("")` means deprecated without a
     /// message. `Some("Use foo() instead")` includes the explanation.
     pub deprecation_message: Option<String>,
+    /// Replacement code template (from `#[Deprecated(replacement: "...")]`).
+    ///
+    /// Contains template variables like `%parametersList%`, `%parameter0%`,
+    /// `%class%` that are expanded at call sites to offer a "replace
+    /// deprecated call" code action.  `None` when no replacement is specified.
+    pub deprecated_replacement: Option<String>,
     /// Template parameter names declared via `@template` tags in the
     /// method-level docblock.
     ///
@@ -401,6 +407,7 @@ impl MethodInfo {
             && self.native_return_type == other.native_return_type
             && self.conditional_return == other.conditional_return
             && self.deprecation_message == other.deprecation_message
+            && self.deprecated_replacement == other.deprecated_replacement
             && self.template_params == other.template_params
             && self.template_param_bounds == other.template_param_bounds
             && self.template_bindings == other.template_bindings
@@ -443,6 +450,7 @@ impl MethodInfo {
             visibility: Visibility::Public,
             conditional_return: None,
             deprecation_message: None,
+            deprecated_replacement: None,
             template_params: Vec::new(),
             template_param_bounds: HashMap::new(),
             template_bindings: Vec::new(),
@@ -492,6 +500,10 @@ pub struct PropertyInfo {
     /// `None` means not deprecated. `Some("")` means deprecated without a
     /// message. `Some("Use foo() instead")` includes the explanation.
     pub deprecation_message: Option<String>,
+    /// Replacement code template (from `#[Deprecated(replacement: "...")]`).
+    ///
+    /// `None` when no replacement is specified.
+    pub deprecated_replacement: Option<String>,
     /// Whether this property is a virtual (synthesized) member.
     ///
     /// Virtual properties come from `@property` / `@property-read` /
@@ -517,6 +529,7 @@ impl PropertyInfo {
             && self.visibility == other.visibility
             && self.is_static == other.is_static
             && self.deprecation_message == other.deprecation_message
+            && self.deprecated_replacement == other.deprecated_replacement
             && self.is_virtual == other.is_virtual
     }
 
@@ -543,6 +556,7 @@ impl PropertyInfo {
             is_static: false,
             visibility: Visibility::Public,
             deprecation_message: None,
+            deprecated_replacement: None,
             is_virtual: true,
         }
     }
@@ -568,6 +582,10 @@ pub struct ConstantInfo {
     /// `None` means not deprecated. `Some("")` means deprecated without a
     /// message. `Some("Use OK instead")` includes the explanation.
     pub deprecation_message: Option<String>,
+    /// Replacement code template (from `#[Deprecated(replacement: "...")]`).
+    ///
+    /// `None` when no replacement is specified.
+    pub deprecated_replacement: Option<String>,
     /// Human-readable description extracted from the constant's docblock.
     ///
     /// This is the free-text portion of the docblock (before any `@tag` lines).
@@ -605,6 +623,7 @@ impl ConstantInfo {
             && self.type_hint == other.type_hint
             && self.visibility == other.visibility
             && self.deprecation_message == other.deprecation_message
+            && self.deprecated_replacement == other.deprecated_replacement
             && self.is_enum_case == other.is_enum_case
             && self.enum_value == other.enum_value
             && self.value == other.value
@@ -754,6 +773,12 @@ pub struct FunctionInfo {
     /// `None` means not deprecated. `Some("")` means deprecated without a
     /// message. `Some("Use newHelper() instead")` includes the explanation.
     pub deprecation_message: Option<String>,
+    /// Replacement code template (from `#[Deprecated(replacement: "...")]`).
+    ///
+    /// Contains template variables like `%parametersList%`, `%parameter0%`,
+    /// `%class%` that are expanded at call sites to offer a "replace
+    /// deprecated call" code action.  `None` when no replacement is specified.
+    pub deprecated_replacement: Option<String>,
     /// Template parameter names declared via `@template` tags in the
     /// function-level docblock.
     ///
@@ -1042,6 +1067,10 @@ pub struct ClassInfo {
     /// `None` means not deprecated. `Some("")` means deprecated without a
     /// message. `Some("Use NewApi instead")` includes the explanation.
     pub deprecation_message: Option<String>,
+    /// Replacement code template (from `#[Deprecated(replacement: "...")]`).
+    ///
+    /// `None` when no replacement is specified.
+    pub deprecated_replacement: Option<String>,
     /// URL from the `@link` tag in the class-level docblock.
     ///
     /// For `@link https://php.net/manual/en/reserved.classes.php`,
@@ -1175,6 +1204,7 @@ impl ClassInfo {
             || self.is_final != other.is_final
             || self.is_abstract != other.is_abstract
             || self.deprecation_message != other.deprecation_message
+            || self.deprecated_replacement != other.deprecated_replacement
             || self.template_params != other.template_params
             || self.template_param_bounds != other.template_param_bounds
             || self.extends_generics != other.extends_generics
@@ -1367,6 +1397,7 @@ mod tests {
             type_hint: Some("string".to_string()),
             visibility: Visibility::Public,
             deprecation_message: None,
+            deprecated_replacement: None,
             description: None,
             is_enum_case: false,
             enum_value: None,

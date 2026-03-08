@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Replace deprecated call.** A new quick-fix code action rewrites calls to deprecated functions and methods when the `#[Deprecated(replacement: "...")]` attribute provides a template. Template variables (`%parametersList%`, `%parameter0%`, `%class%`) are expanded with the actual call-site arguments. Works on standalone function calls and instance/static method calls.
+- **Version-aware deprecation suppression.** When a `#[Deprecated(since: "X.Y")]` attribute declares the PHP version it was deprecated in and your project targets an older version (via `composer.json` or `.phpantom.toml`), the deprecation diagnostic and strikethrough are suppressed. Docblock `@deprecated` tags (which have no structured `since` data) are always shown regardless of target version.
 - **Parallel workspace indexing.** Find References and other workspace-wide operations now parse files across multiple CPU cores using `std::thread::scope`. On a project with hundreds of PHP files, the first find-references call completes significantly faster.
 - **Self-generated classmap.** PHPantom now works without running `composer dump-autoload -o`. When the Composer classmap is missing or incomplete, PHPantom scans the project's autoload directories itself to build a class index. Non-Composer projects are also supported by scanning all PHP files in the workspace. The strategy is configurable via `[indexing] strategy` in `.phpantom.toml` (`"composer"`, `"self"`, `"full"`, or `"none"`).
 - **Pipe operator (PHP 8.5).** `$input |> trim(...) |> createDate(...)` resolves through the chain, returning the last callable's return type. Completion works after assigning the pipe result to a variable.

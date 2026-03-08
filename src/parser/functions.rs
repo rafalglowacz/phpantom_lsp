@@ -11,8 +11,8 @@ use crate::docblock;
 use crate::types::*;
 
 use super::{
-    DocblockCtx, extract_deprecated_attribute, extract_hint_string, extract_parameters,
-    is_available_for_version,
+    DocblockCtx, extract_hint_string, extract_parameters, is_available_for_version,
+    merge_deprecation_info,
 };
 
 impl Backend {
@@ -61,6 +61,7 @@ impl Backend {
                         conditional_return,
                         type_assertions,
                         deprecation_message,
+                        deprecated_replacement,
                         description,
                         return_description,
                         link,
@@ -118,16 +119,13 @@ impl Backend {
                             .map(docblock::extract_type_assertions)
                             .unwrap_or_default();
 
-                        let deprecation_message = {
-                            let doc_msg =
-                                docblock_text.and_then(docblock::extract_deprecation_message);
-                            if doc_msg.is_some() {
-                                doc_msg
-                            } else {
-                                extract_deprecated_attribute(&func.attribute_lists, ctx)
-                                    .map(|attr| attr.to_message())
-                            }
-                        };
+                        let depr_info = merge_deprecation_info(
+                            docblock_text.and_then(docblock::extract_deprecation_message),
+                            &func.attribute_lists,
+                            Some(ctx),
+                        );
+                        let deprecation_message = depr_info.message;
+                        let deprecated_replacement = depr_info.replacement;
 
                         let desc = docblock_text
                             .and_then(|doc| crate::hover::extract_docblock_description(Some(doc)));
@@ -141,6 +139,7 @@ impl Backend {
                             conditional,
                             assertions,
                             deprecation_message,
+                            deprecated_replacement,
                             desc,
                             ret_desc,
                             link_url,
@@ -156,6 +155,7 @@ impl Backend {
                             native_return_type.clone(),
                             None,
                             Vec::new(),
+                            None,
                             None,
                             None,
                             None,
@@ -201,6 +201,7 @@ impl Backend {
                         conditional_return,
                         type_assertions,
                         deprecation_message,
+                        deprecated_replacement,
                         template_params: func_template_params,
                         template_bindings: func_template_bindings,
                     });

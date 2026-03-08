@@ -11,10 +11,14 @@
 //! - **Implement missing methods** — when the cursor is inside a
 //!   concrete class that extends an abstract class or implements an
 //!   interface with unimplemented methods, offer to generate stubs.
+//! - **Replace deprecated call** — when the cursor is on a deprecated
+//!   function or method call that has a `#[Deprecated(replacement: "...")]`
+//!   template, offer to rewrite the call to the suggested replacement.
 
 mod implement_methods;
 mod import_class;
 mod remove_unused_import;
+mod replace_deprecated;
 
 use tower_lsp::lsp_types::*;
 
@@ -40,6 +44,9 @@ impl Backend {
 
         // ── Implement missing methods ───────────────────────────────────
         self.collect_implement_methods_actions(uri, content, params, &mut actions);
+
+        // ── Replace deprecated call ─────────────────────────────────────
+        self.collect_replace_deprecated_actions(uri, content, params, &mut actions);
 
         actions
     }

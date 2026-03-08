@@ -214,6 +214,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             visibility: Visibility::Public,
             conditional_return: None,
             deprecation_message: None,
+            deprecated_replacement: None,
             template_params: Vec::new(),
             template_param_bounds: HashMap::new(),
             template_bindings: Vec::new(),

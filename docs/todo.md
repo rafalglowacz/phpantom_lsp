@@ -122,11 +122,11 @@ projects that care about types.
 | 45 | `abort_if`/`abort_unless` type narrowing | Medium | Laravel | [laravel.md §4](todo/laravel.md#4-abort_ifabort_unless-type-narrowing) |
 | 46 | Narrow types of `&$var` parameters after function calls | Medium | Type Inference | [type-inference.md §7](todo/type-inference.md#7-narrow-types-of-var-parameters-after-function-calls) |
 | 47 | SPL iterator generic stubs | Medium | Type Inference | [type-inference.md §8](todo/type-inference.md#8-spl-iterator-generic-stubs) |
-| 48 | `LanguageLevelTypeAware` version-aware type hints | Medium | Completion | [completion.md §3](todo/completion.md#3-languageleveltypeaware-version-aware-type-hints) |
-| 49 | `#[ArrayShape]` return shapes on stub functions | Medium | Completion | [completion.md §4](todo/completion.md#4-arrayshape-return-shapes-on-stub-functions) |
+| 48 | `LanguageLevelTypeAware` version-aware type hints | Medium | Completion | [completion.md §2](todo/completion.md#2-languageleveltypeaware-version-aware-type-hints) |
+| 49 | `#[ArrayShape]` return shapes on stub functions | Medium | Completion | [completion.md §3](todo/completion.md#3-arrayshape-return-shapes-on-stub-functions) |
 | 50 | Asymmetric visibility (PHP 8.4) | Low | Type Inference | [type-inference.md §9](todo/type-inference.md#9-asymmetric-visibility-php-84) |
 | 51 | Type Hierarchy (`textDocument/prepareTypeHierarchy`) | Medium | LSP Features | [lsp-features.md §16](todo/lsp-features.md#16-type-hierarchy-textdocumentpreparetypehierarchy) |
-| 52 | `class_alias()` support | Medium | Completion | [completion.md §10](todo/completion.md#10-class_alias-support) |
+| 52 | `class_alias()` support | Medium | Completion | [completion.md §8](todo/completion.md#8-class_alias-support) |
 | 53 | Attribute constructor signature help | Medium | Signature Help | [signature-help.md §4](todo/signature-help.md#4-attribute-constructor-signature-help) |
 | 54 | Closure/arrow function parameter signature help | Medium | Signature Help | [signature-help.md §5](todo/signature-help.md#5-closure--arrow-function-parameter-signature-help) |
 | 55 | Diagnostic suppression intelligence | Medium | Diagnostics | [diagnostics.md §3](todo/diagnostics.md#3-diagnostic-suppression-intelligence) |
@@ -167,17 +167,17 @@ eventually but don't move the needle.
 
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
-| 58 | Array functions needing new code paths | High | Completion | [completion.md §2](todo/completion.md#2-array-functions-needing-new-code-paths) |
-| 59 | Go-to-definition for array shape keys via bracket access | Medium | Completion | [completion.md §6](todo/completion.md#6-go-to-definition-for-array-shape-keys-via-bracket-access) |
+| 58 | Array functions needing new code paths | High | Completion | [completion.md §1](todo/completion.md#1-array-functions-needing-new-code-paths) |
+| 59 | Go-to-definition for array shape keys via bracket access | Medium | Completion | [completion.md §4](todo/completion.md#4-go-to-definition-for-array-shape-keys-via-bracket-access) |
 | 60 | No go-to-definition for built-in (stub) functions and constants — superseded by item 91 | Medium | LSP Features | [external-stubs.md §1](todo/external-stubs.md#phase-1-project-level-phpstorm-stubs-for-gtd) |
 | 61 | `str_contains` / `str_starts_with` / `str_ends_with` → non-empty-string narrowing | Low | Type Inference | [type-inference.md §10](todo/type-inference.md#10-str_contains--str_starts_with--str_ends_with--non-empty-string-narrowing) |
 | 62 | `count` / `sizeof` comparison → non-empty-array narrowing | Low | Type Inference | [type-inference.md §11](todo/type-inference.md#11-count--sizeof-comparison--non-empty-array-narrowing) |
 | 63 | Fiber type resolution | Low | Type Inference | [type-inference.md §12](todo/type-inference.md#12-fiber-type-resolution) |
 | 64 | Non-empty-string propagation through string functions | Low | Type Inference | [type-inference.md §13](todo/type-inference.md#13-non-empty-string-propagation-through-string-functions) |
 | 65 | `Closure::bind()` / `Closure::fromCallable()` return type preservation | Low-Medium | Type Inference | [type-inference.md §14](todo/type-inference.md#14-closurebind--closurefromcallable-return-type-preservation) |
-| 66 | Non-array functions with dynamic return types | High | Completion | [completion.md §7](todo/completion.md#7-non-array-functions-with-dynamic-return-types) |
-| 67 | `#[ReturnTypeContract]` parameter-dependent return types | Low | Completion | [completion.md §8](todo/completion.md#8-returntypecontract-parameter-dependent-return-types) |
-| 68 | `#[ExpectedValues]` parameter value suggestions | Medium | Completion | [completion.md §9](todo/completion.md#9-expectedvalues-parameter-value-suggestions) |
+| 66 | Non-array functions with dynamic return types | High | Completion | [completion.md §5](todo/completion.md#5-non-array-functions-with-dynamic-return-types) |
+| 67 | `#[ReturnTypeContract]` parameter-dependent return types | Low | Completion | [completion.md §6](todo/completion.md#6-returntypecontract-parameter-dependent-return-types) |
+| 68 | `#[ExpectedValues]` parameter value suggestions | Medium | Completion | [completion.md §7](todo/completion.md#7-expectedvalues-parameter-value-suggestions) |
 
 ### Signature help polish
 
