@@ -327,7 +327,7 @@ impl Backend {
 
         // Build the precomputed symbol map while the AST is still alive.
         // This must happen before the `Program` (and its arena) are dropped.
-        let symbol_map = extract_symbol_map(program, content);
+        let symbol_map = std::sync::Arc::new(extract_symbol_map(program, content));
 
         self.ast_map.write().insert(uri_string.clone(), classes);
         self.symbol_maps

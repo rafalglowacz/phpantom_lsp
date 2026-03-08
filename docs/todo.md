@@ -37,21 +37,23 @@ with each step.
 
 This sprint delivers parallel file processing for workspace-wide
 operations (find references, go-to-implementation, self-scan,
-diagnostics). The two prerequisite items replace shared data
-structures with concurrent-read-friendly wrappers so that parallel
-`spawn_blocking` tasks do not serialize on lock contention.
+diagnostics). The prerequisite items replace shared data structures
+with reference-counted wrappers so that parallel threads share data
+cheaply instead of deep-cloning.
 
-| # | Item | Effort | Domain | Doc Link |
-|---|---|---|---|---|
-| 85 | `Arc<String>` for file content in `open_files` | Low | Performance | [performance.md §5](todo/performance.md#5-arcstring-for-file-content-in-open_files) |
-| 86 | `Arc<SymbolMap>` to avoid snapshot cloning | Low | Performance | [performance.md §6](todo/performance.md#6-arcsymbolmap-to-avoid-snapshot-cloning) |
-| 95 | Parallel file processing | Medium | Indexing | [indexing.md §3](todo/indexing.md#phase-3-parallel-file-processing) |
-| 14 | Signature help fires on function definition sites | Low | Bug Fix | [bugs.md §14](todo/bugs.md#14-signature-help-fires-on-function-definition-sites) |
+| # | Item | Effort | Domain | Doc Link | Status |
+|---|---|---|---|---|---|
+| 85 | `Arc<String>` for file content in `open_files` | Low | Performance | [performance.md §5](todo/performance.md#5-arcstring-for-file-content-in-open_files) | ✅ Done |
+| 86 | `Arc<SymbolMap>` to avoid snapshot cloning | Low | Performance | [performance.md §6](todo/performance.md#6-arcsymbolmap-to-avoid-snapshot-cloning) | ✅ Done |
+| 95 | Parallel file processing | Medium | Indexing | [indexing.md §3](todo/indexing.md#phase-3-parallel-file-processing) | ✅ Done (initial) |
+| 14 | Signature help fires on function definition sites | Low | Bug Fix | [bugs.md §14](todo/bugs.md#14-signature-help-fires-on-function-definition-sites) | ✅ Done |
 
-**After Sprint 2.5:** Workspace-wide operations run across multiple
-cores with priority-aware scheduling. Interactive requests (completion,
-hover, go-to-definition) preempt batch work. File content and symbol
-maps are shared by reference instead of deep-cloned.
+**After Sprint 2.5:** `ensure_workspace_indexed` parses files across
+multiple cores using `std::thread::scope`. File content and symbol
+maps are shared by reference instead of deep-cloned. Transient entry
+eviction after GTI and find references has been removed; parsed files
+stay cached for faster repeat queries. Priority-aware scheduling
+(preempting batch work for interactive requests) is deferred.
 
 ---
 

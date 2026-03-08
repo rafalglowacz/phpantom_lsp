@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Parallel workspace indexing.** Find References and other workspace-wide operations now parse files across multiple CPU cores using `std::thread::scope`. On a project with hundreds of PHP files, the first find-references call completes significantly faster.
 - **Self-generated classmap.** PHPantom now works without running `composer dump-autoload -o`. When the Composer classmap is missing or incomplete, PHPantom scans the project's autoload directories itself to build a class index. Non-Composer projects are also supported by scanning all PHP files in the workspace. The strategy is configurable via `[indexing] strategy` in `.phpantom.toml` (`"composer"`, `"self"`, `"full"`, or `"none"`).
 - **Pipe operator (PHP 8.5).** `$input |> trim(...) |> createDate(...)` resolves through the chain, returning the last callable's return type. Completion works after assigning the pipe result to a variable.
 - **Pass-by-reference parameter type inference.** After calling a function that accepts a typed `&$var` parameter (e.g. `function foo(Baz &$bar)`), the variable acquires the parameter's type for subsequent completion.
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Signature help on function definitions.** Signature help no longer fires when the cursor is inside a function or method definition's parameter list (e.g. `function foo(int $a, |)`). Previously it could incorrectly show the signature of a same-named global function.
 - **Elseif chain narrowing.** In `if/elseif/else` chains, the else branch now strips types from all preceding conditions. For example, `if (is_string($x)) {} elseif (is_int($x)) {} else { $x-> }` correctly narrows `$x` by excluding both `string` and `int`.
 - **Variadic `@param` template bindings.** `@param class-string<T> ...$items` now correctly binds the template parameter. Previously the `...` prefix prevented the parameter name from being recognized, so generic return types were not substituted.
 - **Laravel relationship classification.** Relationship return types that are fully-qualified to a non-Eloquent namespace (e.g. a custom `App\Relations\HasMany`) are no longer misclassified as Eloquent relationships. Only types under `Illuminate\Database\Eloquent\Relations\` or unqualified short names are recognized.
@@ -58,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Reduced memory pressure on workspace-wide operations.** File content and symbol maps are now reference-counted (`Arc<String>`, `Arc<SymbolMap>`). Cross-file scans (find references, diagnostics) share data by reference instead of deep-cloning file contents and symbol tables for every file visited. Parsed files from workspace indexing and go-to-implementation scans stay cached instead of being evicted after each operation.
 - **Faster class resolution.** Fully-resolved classes (inheritance + virtual members) are now cached and reused across completion, hover, and go-to-definition within each request cycle. The cache is automatically cleared whenever a file changes, so results are never stale.
 - **Resolution engine rewritten on AST.** Variable type inference, subject dispatch, call return type resolution, member-access detection, and go-to-definition lookups all run through the AST walker now. The text-based scanner and its line-by-line fallbacks have been removed entirely. This fixes a class of edge-case bugs with null-safe chains, parenthesized `new` expressions, chained method calls, and complex array access patterns.
 - **Go-to-definition and go-to-implementation use only the symbol map.** The text-based fallbacks (`extract_word_at_position`, `extract_member_access_context`, `resolve_type_hint_at_variable_text`) have been removed from both features. Cursor context detection now relies exclusively on the precomputed symbol map.

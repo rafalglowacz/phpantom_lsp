@@ -12,6 +12,7 @@
 /// expressions, etc.) live in [`crate::subject_extraction`].
 use std::panic::{self, AssertUnwindSafe, UnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
@@ -660,8 +661,8 @@ impl Backend {
     /// `Url::to_file_path` + `std::fs::read_to_string`.  Three call sites
     /// in the definition modules used this exact sequence.
     pub(crate) fn get_file_content(&self, uri: &str) -> Option<String> {
-        if let Some(content) = self.open_files.read().get(uri).cloned() {
-            return Some(content);
+        if let Some(content) = self.open_files.read().get(uri) {
+            return Some(String::clone(content));
         }
 
         // Embedded class stubs live under synthetic `phpantom-stub://`
@@ -683,6 +684,39 @@ impl Backend {
 
         let path = Url::parse(uri).ok()?.to_file_path().ok()?;
         std::fs::read_to_string(path).ok()
+    }
+
+    /// Retrieve file content as a cheap `Arc<String>` reference when the
+    /// file is in `open_files`.  Falls back to reading from disk (which
+    /// wraps the result in a new `Arc`).
+    ///
+    /// Prefer this over [`get_file_content`] in hot paths where the
+    /// content will be shared across tasks or stored for the duration
+    /// of a request, since it avoids deep-cloning the file string.
+    pub(crate) fn get_file_content_arc(&self, uri: &str) -> Option<Arc<String>> {
+        if let Some(content) = self.open_files.read().get(uri) {
+            return Some(Arc::clone(content));
+        }
+
+        // Embedded class stubs live under synthetic `phpantom-stub://`
+        // URIs and have no on-disk file.
+        if let Some(class_name) = uri.strip_prefix("phpantom-stub://") {
+            return self
+                .stub_index
+                .get(class_name)
+                .map(|s| Arc::new(s.to_string()));
+        }
+
+        // Embedded function stubs use `phpantom-stub-fn://` URIs.
+        if let Some(func_name) = uri.strip_prefix("phpantom-stub-fn://") {
+            return self
+                .stub_function_index
+                .get(func_name)
+                .map(|s| Arc::new(s.to_string()));
+        }
+
+        let path = Url::parse(uri).ok()?.to_file_path().ok()?;
+        std::fs::read_to_string(path).ok().map(Arc::new)
     }
 
     /// Public helper for tests: get the ast_map for a given URI.
@@ -727,80 +761,6 @@ impl Backend {
         self.class_index
             .write()
             .retain(|_, file_uri| file_uri != uri);
-    }
-
-    /// Evict `ast_map` (and associated map) entries that were added
-    /// during a transient scan (go-to-implementation, find references).
-    ///
-    /// `pre_scan_uris` is the set of URIs that were already in `ast_map`
-    /// before the scan started.  Any URI that is now in `ast_map` but was
-    /// not in `pre_scan_uris` — and is not currently open in the editor —
-    /// is removed from `ast_map`, `symbol_maps`, `use_map`, and
-    /// `namespace_map`.  This prevents memory bloat from files that were
-    /// parsed only to check whether they contain a matching symbol.
-    ///
-    /// Use [`evict_transient_ast_entries`](Self::evict_transient_ast_entries)
-    /// instead when `symbol_maps` should be preserved (e.g. after
-    /// `ensure_workspace_indexed`, where the symbol maps are the whole
-    /// point of the scan).
-    pub(crate) fn evict_transient_entries(
-        &self,
-        pre_scan_uris: &std::collections::HashSet<String>,
-    ) {
-        self.evict_transient_inner(pre_scan_uris, true);
-    }
-
-    /// Like [`evict_transient_entries`](Self::evict_transient_entries)
-    /// but preserves `symbol_maps`.
-    ///
-    /// `ensure_workspace_indexed` builds symbol maps so that find
-    /// references can scan them.  The `ast_map`, `use_map`, and
-    /// `namespace_map` entries for those files are no longer needed
-    /// after indexing and can be evicted to save memory.
-    pub(crate) fn evict_transient_ast_entries(
-        &self,
-        pre_scan_uris: &std::collections::HashSet<String>,
-    ) {
-        self.evict_transient_inner(pre_scan_uris, false);
-    }
-
-    /// Shared implementation for transient entry eviction.
-    ///
-    /// When `evict_symbol_maps` is true, `symbol_maps` entries are
-    /// removed alongside `ast_map`, `use_map`, and `namespace_map`.
-    fn evict_transient_inner(
-        &self,
-        pre_scan_uris: &std::collections::HashSet<String>,
-        evict_symbol_maps: bool,
-    ) {
-        // Collect URIs that were added during the scan.
-        let new_uris: Vec<String> = {
-            let map = self.ast_map.read();
-            map.keys()
-                .filter(|uri| !pre_scan_uris.contains(*uri))
-                .cloned()
-                .collect()
-        };
-
-        if new_uris.is_empty() {
-            return;
-        }
-
-        // Never evict files that are currently open in the editor.
-        let open: std::collections::HashSet<String> =
-            self.open_files.read().keys().cloned().collect();
-
-        for uri in &new_uris {
-            if open.contains(uri) {
-                continue;
-            }
-            self.ast_map.write().remove(uri);
-            if evict_symbol_maps {
-                self.symbol_maps.write().remove(uri);
-            }
-            self.use_map.write().remove(uri);
-            self.namespace_map.write().remove(uri);
-        }
     }
 
     pub(crate) async fn log(&self, typ: MessageType, message: String) {

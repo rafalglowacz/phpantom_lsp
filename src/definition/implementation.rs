@@ -48,29 +48,6 @@ impl Backend {
         content: &str,
         position: Position,
     ) -> Option<Vec<Location>> {
-        // Snapshot ast_map keys before the scan so we can evict
-        // transiently-loaded entries afterwards (see §13 in bugs.md).
-        let pre_scan_uris: HashSet<String> = self.ast_map.read().keys().cloned().collect();
-
-        let result = self.resolve_implementation_inner(uri, content, position);
-
-        // Evict ast_map entries that were added during scanning
-        // (Phases 3 and 5 of find_implementors) but are not open in
-        // the editor.  This must happen after locate_class_declaration
-        // has read the cached content.
-        self.evict_transient_entries(&pre_scan_uris);
-
-        result
-    }
-
-    /// Inner implementation of [`resolve_implementation`] that performs
-    /// the actual symbol resolution without eviction concerns.
-    fn resolve_implementation_inner(
-        &self,
-        uri: &str,
-        content: &str,
-        position: Position,
-    ) -> Option<Vec<Location>> {
         // ── 1. Extract the word under the cursor ────────────────────────
         // Primary path: consult the precomputed symbol map.
         let offset = position_to_offset(content, position);

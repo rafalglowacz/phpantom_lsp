@@ -81,6 +81,17 @@ fn detect_call_site_text_fallback(content: &str, position: Position) -> Option<C
     // after a comma or the open paren with no identifier typed yet.
     let open_paren = find_enclosing_open_paren(&chars, cursor)?;
 
+    // Suppress signature help when the cursor is inside the parameter
+    // list of a function/method *definition* rather than a call.
+    // Method definitions are already suppressed because
+    // `extract_call_expression` returns a bare method name that
+    // doesn't resolve as a callable.  Standalone function definitions
+    // (`function foo(`) *do* resolve when a global function with the
+    // same name exists, so we need an explicit check.
+    if is_function_definition_paren(&chars, open_paren) {
+        return None;
+    }
+
     // Extract the call expression before `(`.
     let call_expr = extract_call_expression(&chars, open_paren)?;
     if call_expr.is_empty() {
@@ -507,6 +518,70 @@ fn clamp_active_param(active: u32, params: &[ParameterInfo]) -> u32 {
     }
     let last = (params.len() - 1) as u32;
     active.min(last)
+}
+
+// ─── Definition-site suppression ────────────────────────────────────────────
+
+/// Check whether the open parenthesis at `paren_pos` belongs to a
+/// function or method *definition* rather than a call expression.
+///
+/// Walks backward from `(` through the function name (if any), then
+/// through whitespace, looking for the `function` or `fn` keyword.
+/// Returns `true` for `function foo(`, `function (`, `fn(`, and
+/// `public function bar(`.
+fn is_function_definition_paren(chars: &[char], paren_pos: usize) -> bool {
+    let mut i = paren_pos;
+
+    // Skip whitespace before `(`
+    while i > 0 && chars[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+
+    // Walk backward through the identifier (function name, which may be
+    // empty for anonymous functions / closures).
+    let name_end = i;
+    while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        i -= 1;
+    }
+
+    let name: String = chars[i..name_end].iter().collect();
+
+    // Anonymous `function(` or arrow `fn(` — the name *is* the keyword.
+    if name == "function" || name == "fn" {
+        return true;
+    }
+
+    // Named function / method: skip whitespace before the name and check
+    // for the `function` or `fn` keyword.
+    let mut j = i;
+    while j > 0 && chars[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+
+    if ends_with_keyword(chars, j, "function") || ends_with_keyword(chars, j, "fn") {
+        return true;
+    }
+
+    false
+}
+
+/// Check whether the text ending at `pos` (exclusive) ends with `keyword`
+/// on a word boundary.
+fn ends_with_keyword(chars: &[char], pos: usize, keyword: &str) -> bool {
+    let kw_len = keyword.len();
+    if pos < kw_len {
+        return false;
+    }
+    let start = pos - kw_len;
+    let candidate: String = chars[start..pos].iter().collect();
+    if candidate != keyword {
+        return false;
+    }
+    // Ensure word boundary before the keyword.
+    if start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+        return false;
+    }
+    true
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

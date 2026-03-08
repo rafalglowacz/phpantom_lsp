@@ -111,26 +111,40 @@ error message.
 ---
 
 ## 13. Evict transiently-loaded files from ast_map after GTI and Find References
-**Impact: Low · Effort: Low (fixed)**
+**Impact: Low · Effort: Low (fixed → superseded)**
 
-**Status:** Fixed. `find_implementors` snapshots `ast_map` keys before
-scanning and calls `evict_transient_entries` afterwards, removing any
+**Status:** Superseded. The original fix added post-scan eviction
+(`evict_transient_entries`, `evict_transient_ast_entries`) to remove
 `ast_map`, `symbol_maps`, `use_map`, and `namespace_map` entries that
-were added during the scan and are not in `open_files`.
-`ensure_workspace_indexed` does the same via
-`evict_transient_ast_entries`, which preserves `symbol_maps` (since
-those are the purpose of the indexing scan) but evicts the other maps.
+were added during GTI and find-references scans.
+
+The eviction has since been removed. With `Arc<SymbolMap>` and
+`Arc<String>` reducing per-entry memory cost, keeping parsed files
+cached is a better trade-off: subsequent operations (a second
+find-references call, go-to-definition on a cross-file symbol)
+benefit from the work already done without re-parsing. The eviction
+functions (`evict_transient_entries`, `evict_transient_ast_entries`,
+`evict_transient_inner`) and their `pre_scan_uris` snapshots have
+been removed.
 
 ---
 
 ## 14. Signature help fires on function definition sites
-**Impact: Low · Effort: Low**
+**Impact: Low · Effort: Low (fixed)**
 
-Signature help triggers when the cursor is inside the parameter list of
-a function *definition* (e.g. `function unionDemo(string|int $value, ?User $maybe)`).
-Method definitions already suppress this, but standalone function
-definitions do not receive the same treatment.
+**Status:** Fixed. `detect_call_site_text_fallback` now calls
+`is_function_definition_paren` before extracting a call expression.
+The check walks backward from the open parenthesis through the
+function name (if any) and whitespace, looking for the `function` or
+`fn` keyword. This suppresses signature help for named functions
+(`function foo(`), anonymous functions (`function (`), arrow functions
+(`fn(`), and method definitions (`public function bar(`).
 
-The fix should mirror the method-definition suppression: detect that the
-cursor is inside a function declaration's parameter list and return
-`None` before attempting signature help resolution.
+The AST-based detection path was already safe because `CallSite`
+entries are only emitted for actual call expressions, never for
+function/method definitions.
+
+Tested with `suppressed_on_named_function_definition`,
+`suppressed_on_anonymous_function`, `suppressed_on_arrow_function`,
+`suppressed_on_method_definition`, and
+`not_suppressed_on_actual_function_call` in `signature_help_tests.rs`.

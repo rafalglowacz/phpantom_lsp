@@ -140,7 +140,7 @@ pub use virtual_members::resolve_class_fully;
 pub struct Backend {
     pub(crate) name: String,
     pub(crate) version: String,
-    pub(crate) open_files: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) open_files: Arc<RwLock<HashMap<String, Arc<String>>>>,
     /// Maps a file URI to a list of ClassInfo extracted from that file.
     pub(crate) ast_map: Arc<RwLock<HashMap<String, Vec<ClassInfo>>>>,
     /// Per-file precomputed symbol location maps for O(log n) lookup.
@@ -149,7 +149,7 @@ pub struct Backend {
     /// navigable symbol occurrence (class references, member accesses,
     /// variables, function calls, etc.).  Consulted by `resolve_definition`
     /// to replace character-level backward-walking with a binary search.
-    pub(crate) symbol_maps: Arc<RwLock<HashMap<String, symbol_map::SymbolMap>>>,
+    pub(crate) symbol_maps: Arc<RwLock<HashMap<String, Arc<symbol_map::SymbolMap>>>>,
     pub(crate) client: Option<Client>,
     /// The root directory of the workspace (set during `initialize`).
     pub(crate) workspace_root: Arc<RwLock<Option<PathBuf>>>,

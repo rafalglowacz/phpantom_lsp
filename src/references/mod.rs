@@ -17,6 +17,8 @@
 //! file.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
@@ -352,7 +354,7 @@ impl Backend {
     /// snapshot of every symbol map whose URI does not fall under the
     /// vendor directory or the internal stub scheme.  All four cross-file
     /// reference scanners use this to restrict results to user code.
-    fn user_file_symbol_maps(&self) -> Vec<(String, SymbolMap)> {
+    fn user_file_symbol_maps(&self) -> Vec<(String, Arc<SymbolMap>)> {
         self.ensure_workspace_indexed();
 
         let vendor_prefix = self.vendor_uri_prefix.lock().clone();
@@ -364,7 +366,7 @@ impl Backend {
                     && !uri.starts_with("phpantom-stub-fn://")
                     && (vendor_prefix.is_empty() || !uri.starts_with(vendor_prefix.as_str()))
             })
-            .map(|(uri, map)| (uri.clone(), map.clone()))
+            .map(|(uri, map)| (uri.clone(), Arc::clone(map)))
             .collect()
     }
 
@@ -397,7 +399,7 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let content = match self.get_file_content(file_uri) {
+            let content = match self.get_file_content_arc(file_uri) {
                 Some(c) => c,
                 None => continue,
             };
@@ -505,7 +507,7 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let content = match self.get_file_content(file_uri) {
+            let content = match self.get_file_content_arc(file_uri) {
                 Some(c) => c,
                 None => continue,
             };
@@ -594,7 +596,7 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let content = match self.get_file_content(file_uri) {
+            let content = match self.get_file_content_arc(file_uri) {
                 Some(c) => c,
                 None => continue,
             };
@@ -663,7 +665,7 @@ impl Backend {
                 Err(_) => continue,
             };
 
-            let content = match self.get_file_content(file_uri) {
+            let content = match self.get_file_content_arc(file_uri) {
                 Some(c) => c,
                 None => continue,
             };
@@ -740,10 +742,6 @@ impl Backend {
     /// `composer.json` `config.vendor-dir`, defaulting to `vendor`) is
     /// skipped during the filesystem walk.
     fn ensure_workspace_indexed(&self) {
-        // Snapshot ast_map keys before scanning so we can evict
-        // transiently-loaded entries afterwards (see §13 in bugs.md).
-        let pre_scan_uris: HashSet<String> = self.ast_map.read().keys().cloned().collect();
-
         // Collect URIs that already have symbol maps.
         let existing_uris: HashSet<String> = self.symbol_maps.read().keys().cloned().collect();
 
@@ -756,22 +754,30 @@ impl Backend {
         // These are files we already know about from update_ast calls,
         // ensuring their symbol maps are populated.  Vendor files are
         // skipped — find references only reports user code.
+        //
+        // File content is read and parsed in parallel using
+        // `std::thread::scope`.  Each thread reads one file from disk
+        // and calls `update_ast` which acquires write locks briefly to
+        // store the results.  The expensive parsing step runs without
+        // any locks held.
         let index_uris: Vec<String> = self.class_index.read().values().cloned().collect();
 
-        for uri in &index_uris {
-            if existing_uris.contains(uri) {
-                continue;
-            }
-            if !vendor_prefix.is_empty() && uri.starts_with(vendor_prefix.as_str()) {
-                continue;
-            }
-            if uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://") {
-                continue;
-            }
-            if let Some(content) = self.get_file_content(uri) {
-                self.update_ast(uri, &content);
-            }
-        }
+        let phase1_uris: Vec<&String> = index_uris
+            .iter()
+            .filter(|uri| {
+                !existing_uris.contains(*uri)
+                    && (vendor_prefix.is_empty() || !uri.starts_with(vendor_prefix.as_str()))
+                    && !uri.starts_with("phpantom-stub://")
+                    && !uri.starts_with("phpantom-stub-fn://")
+            })
+            .collect();
+
+        self.parse_files_parallel(
+            phase1_uris
+                .iter()
+                .map(|uri| (uri.as_str(), None::<&str>))
+                .collect(),
+        );
 
         // ── Phase 2: workspace directory scan ───────────────────────────
         // Recursively discover PHP files in the workspace root that are
@@ -790,23 +796,116 @@ impl Backend {
             let existing_uris: HashSet<String> = self.symbol_maps.read().keys().cloned().collect();
 
             let php_files = collect_php_files_gitignore(&root, &vendor_dir_name);
-            for path in &php_files {
-                let uri = format!("file://{}", path.display());
-                if existing_uris.contains(&uri) {
-                    continue;
-                }
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    self.update_ast(&uri, &content);
-                }
-            }
+
+            let phase2_work: Vec<(String, PathBuf)> = php_files
+                .into_iter()
+                .filter_map(|path| {
+                    let uri = format!("file://{}", path.display());
+                    if existing_uris.contains(&uri) {
+                        None
+                    } else {
+                        Some((uri, path))
+                    }
+                })
+                .collect();
+
+            self.parse_paths_parallel(&phase2_work);
+        }
+    }
+
+    /// Parse a batch of files in parallel using OS threads.
+    ///
+    /// Each entry is `(uri, optional_content)`.  When `content` is `None`,
+    /// the file is loaded via [`get_file_content`].  The expensive parsing
+    /// step runs without any locks held; only the brief map insertions at
+    /// the end of [`update_ast`] acquire write locks.
+    ///
+    /// Uses [`std::thread::scope`] for structured concurrency so that all
+    /// spawned threads are guaranteed to finish before this method returns.
+    /// The thread count is capped at the number of available CPU cores.
+    fn parse_files_parallel(&self, files: Vec<(&str, Option<&str>)>) {
+        if files.is_empty() {
+            return;
         }
 
-        // ── Evict transient ast_map entries ─────────────────────────────
-        // The scan above may have added files to ast_map, use_map, and
-        // namespace_map that are not open in the editor.  Symbol maps are
-        // preserved (they are the whole point of this scan), but the other
-        // maps can be evicted to save memory.
-        self.evict_transient_ast_entries(&pre_scan_uris);
+        // For very small batches, avoid thread overhead.
+        if files.len() <= 2 {
+            for (uri, content) in &files {
+                if let Some(c) = content {
+                    self.update_ast(uri, c);
+                } else if let Some(c) = self.get_file_content(uri) {
+                    self.update_ast(uri, &c);
+                }
+            }
+            return;
+        }
+
+        let n_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(files.len());
+
+        let chunks: Vec<Vec<(&str, Option<&str>)>> = {
+            let chunk_size = files.len().div_ceil(n_threads);
+            files.chunks(chunk_size).map(|c| c.to_vec()).collect()
+        };
+
+        std::thread::scope(|s| {
+            for chunk in &chunks {
+                s.spawn(move || {
+                    for (uri, content) in chunk {
+                        if let Some(c) = content {
+                            self.update_ast(uri, c);
+                        } else if let Some(c) = self.get_file_content(uri) {
+                            self.update_ast(uri, &c);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// Parse a batch of files from disk paths in parallel.
+    ///
+    /// Each entry is `(uri, path)`.  The file is read from disk and
+    /// parsed in a worker thread.  Uses [`std::thread::scope`] for
+    /// structured concurrency.
+    fn parse_paths_parallel(&self, files: &[(String, PathBuf)]) {
+        if files.is_empty() {
+            return;
+        }
+
+        // For very small batches, avoid thread overhead.
+        if files.len() <= 2 {
+            for (uri, path) in files {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    self.update_ast(uri, &content);
+                }
+            }
+            return;
+        }
+
+        let n_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(files.len());
+
+        let chunks: Vec<&[(String, PathBuf)]> = {
+            let chunk_size = files.len().div_ceil(n_threads);
+            files.chunks(chunk_size).collect()
+        };
+
+        std::thread::scope(|s| {
+            for chunk in &chunks {
+                s.spawn(move || {
+                    for (uri, path) in *chunk {
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            self.update_ast(uri, &content);
+                        }
+                    }
+                });
+            }
+        });
     }
 }
 

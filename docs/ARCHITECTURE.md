@@ -637,9 +637,13 @@ Before scanning, `ensure_workspace_indexed` ensures all user files have symbol m
 1. **Phase 1: class_index files (user only)** — files already known from `update_ast` calls. Vendor and stub URIs are skipped.
 2. **Phase 2: `.gitignore`-aware workspace walk** — uses the `ignore` crate's `WalkBuilder` to recursively discover PHP files under the workspace root, respecting `.gitignore` rules (including nested and global gitignore files). This automatically skips generated/cached directories like `storage/framework/views/` (Laravel blade cache), `var/cache/` (Symfony), and `node_modules/`. The vendor directory is always skipped regardless of `.gitignore` content. Hidden directories are skipped by default.
 
+Both phases parse files in parallel using `std::thread::scope`. The work is split into chunks (one per CPU core) and each thread reads a file from disk and calls `update_ast`, which acquires write locks briefly to store results while the expensive parsing step runs without any locks held. Batches of 2 or fewer files skip threading overhead.
+
+Parsed files stay cached in `ast_map`, `symbol_maps`, `use_map`, and `namespace_map` after the scan completes. There is no post-scan eviction; keeping the entries means subsequent operations (a second find-references call, go-to-definition on a cross-file symbol) benefit from the work already done.
+
 ### Cross-file scanning
 
-The `user_file_symbol_maps()` helper snapshots all symbol maps whose URI does not fall under the vendor directory or the internal stub scheme. Four scanners use this snapshot:
+The `user_file_symbol_maps()` helper snapshots all symbol maps whose URI does not fall under the vendor directory or the internal stub scheme. With `Arc<SymbolMap>`, the snapshot is a vector of cheap reference-count increments rather than deep clones. Four scanners use this snapshot:
 
 - `find_class_references` — matches `ClassReference` spans by resolved FQN
 - `find_member_references` — matches `MemberAccess` and `MemberDeclaration` spans by member name

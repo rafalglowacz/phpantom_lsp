@@ -194,57 +194,29 @@ lookup, not per-member-per-level.
 ---
 
 ## 5. `Arc<String>` for file content in `open_files`
-**Impact: Low-Medium · Effort: Low**
+**Impact: Low-Medium · Effort: Low (fixed)**
 
-`open_files` stores `HashMap<String, String>`. Every call to
-`get_file_content` clones the entire file content:
-
-```rust
-files.get(uri).cloned()  // clones a 50-200 KB String
-```
-
-Every completion, hover, go-to-definition, and diagnostic request
-clones the full file content. For a 200 KB PHP file, that is a
-200 KB allocation per request.
-
-### Fix
-
-Change `open_files` to `HashMap<String, Arc<String>>`. Retrieval
-becomes a reference-count increment. The `did_open` and `did_change`
-handlers construct the `Arc<String>` once on insertion.
-
-### Callers
-
-All callers receive `Arc<String>` instead of `String`. Most pass
-the content by reference (`&str` via `Arc::as_str()` or `&*content`),
-so the change propagates minimally. A few places that consume the
-string (e.g. storing it in a local variable for the duration of a
-request) just hold the `Arc` instead.
+**Status:** Fixed. `open_files` now stores `HashMap<String, Arc<String>>`.
+`did_open` and `did_change` wrap the file text in `Arc::new()` once on
+insertion. `get_file_content` (which returns an owned `String`) still
+deep-clones for callers that need it, but the new `get_file_content_arc`
+returns a cheap `Arc::clone` for hot paths like cross-file reference
+scanning. The diagnostic worker's snapshot (`files.get(&uri).clone()`)
+is now an atomic increment instead of a full string copy.
 
 ---
 
 ## 6. `Arc<SymbolMap>` to avoid snapshot cloning
-**Impact: Low-Medium · Effort: Low**
+**Impact: Low-Medium · Effort: Low (fixed)**
 
-`user_file_symbol_maps()` clones every user-file `SymbolMap` into a
-`Vec<(String, SymbolMap)>` snapshot. Each `SymbolMap` contains a
-sorted vec of `SymbolSpan`s (100-400 per file), variable definition
-sites, and call sites. For a workspace with 500 PHP files, this
-clones all 500 symbol maps, allocating potentially megabytes of data.
-
-### Fix
-
-Store `Arc<SymbolMap>` in `symbol_maps` instead of owned `SymbolMap`.
-The snapshot becomes `Vec<(String, Arc<SymbolMap>)>` where each entry
-is a cheap `Arc::clone`.
-
-### Alternative
-
-If §3 (`RwLock`) lands first, `user_file_symbol_maps` could hold a
-read lock for the duration of the scan instead of cloning. This
-avoids even the `Arc` overhead but holds the lock longer. For Find
-References (which can take seconds), the `Arc` snapshot approach is
-safer because it releases the lock immediately.
+**Status:** Fixed. `symbol_maps` now stores
+`HashMap<String, Arc<SymbolMap>>`. `update_ast_inner` wraps the
+extracted symbol map in `Arc::new()` before insertion.
+`user_file_symbol_maps` returns `Vec<(String, Arc<SymbolMap>)>` where
+each entry is a cheap `Arc::clone`. All read sites (diagnostics,
+code actions, completion, hover, definition, highlight) that previously
+deep-cloned a `SymbolMap` now clone the `Arc` instead, and access
+fields through `Deref`.
 
 ---
 

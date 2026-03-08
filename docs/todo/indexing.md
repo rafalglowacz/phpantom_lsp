@@ -335,21 +335,45 @@ parallel with priority awareness.
 
 **Prerequisites (from [performance.md](performance.md)):**
 
-- **§3 `RwLock` for read-heavy maps.** Parallel `spawn_blocking` tasks
-  need concurrent read access to `ast_map`, `symbol_maps`, `use_map`,
-  and `namespace_map`. With `Mutex`, every reader serializes against
-  every other reader, defeating the purpose of parallelism regardless
-  of how clever the priority scheduling is. `RwLock` lets all readers
-  proceed concurrently; only writes (which happen on `did_change` and
-  on-demand file loading) take an exclusive lock.
-- **§5 `Arc<String>` for file content.** Parallel tasks that need file
-  content should share references rather than each cloning the full
-  string out of `open_files`.
-- **§6 `Arc<SymbolMap>` to avoid snapshot cloning.** Find References
-  snapshots all user-file symbol maps before scanning. With owned
-  `SymbolMap` values, this deep-clones hundreds of maps. With
-  `Arc<SymbolMap>`, the snapshot is cheap and the lock is released
-  immediately.
+- **§3 `RwLock` for read-heavy maps.** ✅ Fixed.
+- **§5 `Arc<String>` for file content.** ✅ Fixed.
+- **§6 `Arc<SymbolMap>` to avoid snapshot cloning.** ✅ Fixed.
+
+### Current state (partial)
+
+`ensure_workspace_indexed` (used by find references) now parses files
+in parallel via two helpers in `references/mod.rs`:
+
+- **`parse_files_parallel`** — takes `(uri, Option<content>)` pairs,
+  loads content via `get_file_content` when not provided, splits work
+  into chunks, and parses each chunk in a separate OS thread.
+- **`parse_paths_parallel`** — takes `(uri, PathBuf)` pairs, reads
+  files from disk and parses them in parallel.
+
+Both use `std::thread::scope` for structured concurrency (all threads
+join before the function returns). The thread count is capped at
+`std::thread::available_parallelism()` (typically the number of CPU
+cores). Batches of 2 or fewer files skip threading overhead.
+
+Transient entry eviction after GTI and find references has been
+removed. Parsed files stay cached in `ast_map`, `symbol_maps`,
+`use_map`, and `namespace_map` so that subsequent operations benefit
+from the work already done. This trades a small amount of memory for
+faster repeat queries and simpler code.
+
+### Remaining work
+
+The following are deferred to a later sprint:
+
+- **Priority-aware scheduling.** Interactive requests (completion,
+  hover, go-to-definition) should preempt batch work. Currently all
+  threads run at equal priority.
+- **Parallel classmap scanning in `find_implementors`.** Phase 3 of
+  `find_implementors` reads and parses many classmap files
+  sequentially. Parallelizing this requires care because it
+  interleaves reads and writes through `class_loader` callbacks.
+- **`memmap2` for file reads.** Avoids copying file contents into
+  userspace when the OS page cache already has them.
 
 ### Why not rayon?
 
@@ -369,38 +393,6 @@ completion is a minor subset of what users actually trigger. This
 means classmap generation can run at normal priority without blocking
 the user. They can start writing code immediately while the classmap
 builds in the background.
-
-### Architecture
-
-A single `tokio::spawn_blocking` pool with priority-aware scheduling.
-All file processing goes through one system:
-
-- **High:** Files needed for an active LSP request (completion, hover,
-  go-to-definition). The user is typing. Serve immediately.
-- **Normal:** Classmap generation, find-references, go-to-
-  implementation scans. Important but can wait.
-- **Low:** Full background indexing (Phase 5) and diagnostics. Runs
-  when nothing else needs attention.
-
-When nothing is queued at High, Normal runs at full speed. When
-nothing is at Normal, Low gets all resources. The moment a completion
-request arrives, Low pauses, High is served, Low resumes. No idle
-waste, no starvation.
-
-Implementation: a priority channel or a simple check-before-spawn
-pattern. Before spawning the next Low task, check whether any High or
-Normal work is pending. This keeps us in one thread pool, one
-scheduling model, no contention between separate runtimes.
-
-### Quick wins before full parallelism
-
-- Pre-filter files before reading them. For find-references looking
-  for class `Foo`, use the classmap to find which files define `Foo`,
-  then only scan files that contain the string "Foo". This is what
-  we already do for GTI but could be applied more broadly.
-- Use `memmap2` for reading files instead of `read_to_string` when
-  scanning large directories. Avoids copying file contents into
-  userspace when the OS page cache already has them.
 
 ---
 

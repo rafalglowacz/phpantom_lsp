@@ -868,3 +868,113 @@ fn map_third_parameter() {
     assert_eq!(site.call_expression, "foo");
     assert_eq!(site.active_parameter, 2);
 }
+
+// ── Function-definition suppression ─────────────────────────────
+
+#[test]
+fn suppressed_on_named_function_definition() {
+    // `function foo(` — cursor inside definition param list, not a call.
+    let content = "<?php\nfunction foo(int $a, string $b) {}";
+    let pos = Position {
+        line: 1,
+        character: 13,
+    };
+    assert!(detect_call_site_text_fallback(content, pos).is_none());
+}
+
+#[test]
+fn suppressed_on_anonymous_function() {
+    // `function (` — anonymous function definition.
+    let content = "<?php\n$f = function (int $x) {};";
+    let pos = Position {
+        line: 1,
+        character: 15,
+    };
+    assert!(detect_call_site_text_fallback(content, pos).is_none());
+}
+
+#[test]
+fn suppressed_on_arrow_function() {
+    // `fn(` — arrow function definition.
+    let content = "<?php\n$f = fn(int $x) => $x;";
+    let pos = Position {
+        line: 1,
+        character: 8,
+    };
+    assert!(detect_call_site_text_fallback(content, pos).is_none());
+}
+
+#[test]
+fn suppressed_on_method_definition() {
+    // `public function bar(` — method definition.
+    let content = "<?php\nclass A {\n    public function bar(int $a) {}\n}";
+    let pos = Position {
+        line: 2,
+        character: 25,
+    };
+    assert!(detect_call_site_text_fallback(content, pos).is_none());
+}
+
+#[test]
+fn not_suppressed_on_actual_function_call() {
+    // `foo(` — a regular function call should still work.
+    let content = "<?php\nfoo($a);";
+    let pos = Position {
+        line: 1,
+        character: 4,
+    };
+    let site = detect_call_site_text_fallback(content, pos).unwrap();
+    assert_eq!(site.call_expression, "foo");
+}
+
+// ── is_function_definition_paren unit tests ─────────────────────
+
+#[test]
+fn defn_paren_named_function() {
+    let chars: Vec<char> = "function foo(".chars().collect();
+    // paren_pos = index of `(`
+    assert!(is_function_definition_paren(&chars, 12));
+}
+
+#[test]
+fn defn_paren_anonymous_function() {
+    let chars: Vec<char> = "$f = function (".chars().collect();
+    assert!(is_function_definition_paren(&chars, 14));
+}
+
+#[test]
+fn defn_paren_arrow_fn() {
+    let chars: Vec<char> = "$f = fn(".chars().collect();
+    assert!(is_function_definition_paren(&chars, 7));
+}
+
+#[test]
+fn defn_paren_method() {
+    let chars: Vec<char> = "    public function bar(".chars().collect();
+    assert!(is_function_definition_paren(&chars, 23));
+}
+
+#[test]
+fn defn_paren_not_a_call() {
+    let chars: Vec<char> = "foo(".chars().collect();
+    assert!(!is_function_definition_paren(&chars, 3));
+}
+
+#[test]
+fn defn_paren_not_new() {
+    let chars: Vec<char> = "new Foo(".chars().collect();
+    assert!(!is_function_definition_paren(&chars, 7));
+}
+
+#[test]
+fn defn_paren_not_method_call() {
+    let chars: Vec<char> = "$obj->method(".chars().collect();
+    assert!(!is_function_definition_paren(&chars, 12));
+}
+
+#[test]
+fn defn_paren_suffix_not_keyword() {
+    // `myfunction(` — "function" is a suffix of the identifier, not a keyword.
+    let chars: Vec<char> = "myfunction(".chars().collect();
+    assert!(!is_function_definition_paren(&chars, 10));
+}

@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tower_lsp::LanguageServer;
 use tower_lsp::jsonrpc::Result;
@@ -307,10 +308,12 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let doc = params.text_document;
         let uri = doc.uri.to_string();
-        let text = doc.text;
+        let text = Arc::new(doc.text);
 
         // Store file content
-        self.open_files.write().insert(uri.clone(), text.clone());
+        self.open_files
+            .write()
+            .insert(uri.clone(), Arc::clone(&text));
 
         // Parse and update AST map, use map, and namespace map
         self.update_ast(&uri, &text);
@@ -329,13 +332,15 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri.to_string();
 
         if let Some(change) = params.content_changes.first() {
-            let text = &change.text;
+            let text = Arc::new(change.text.clone());
 
             // Update stored content
-            self.open_files.write().insert(uri.clone(), text.clone());
+            self.open_files
+                .write()
+                .insert(uri.clone(), Arc::clone(&text));
 
             // Re-parse and update AST map, use map, and namespace map
-            self.update_ast(&uri, text);
+            self.update_ast(&uri, &text);
 
             // Schedule diagnostics in a background task with debouncing.
             // This returns immediately so that completion, hover, and
