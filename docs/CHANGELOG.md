@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Go-to-definition for variables captured via `use`.** Clicking a `$var` inside a closure body now jumps to the `use ($var)` clause. Clicking `$var` in the `use` clause itself jumps to the outer assignment. Previously captured variables had no GTD support inside the closure body.
+- **Closure parameter inference inside namespaces.** When code is wrapped in a `namespace Foo\Bar { … }` block or follows a `namespace Foo\Bar;` declaration, closure parameter types inferred from callable signatures (e.g. `@param (\Closure(static): mixed)` on Laravel's `where()`) now resolve correctly. Previously the namespace boundary made variable assignments and closure calls invisible to the type resolver.
+- **Closure parameter inference across files.** When the receiver class is loaded from a different file (e.g. Laravel's Eloquent Builder from vendor), `static` and `$this` in callable parameter types are now replaced with the fully-qualified class name. Previously the short class name was used, which failed to resolve cross-file.
+- **Signature help no longer fires inside closure and arrow function bodies.** When a closure is passed as an argument (e.g. `$query->where(function ($q) { … })`), signature help for the outer call now stops at the opening brace. Inside the closure body you see signature help only for calls you write there, not for the enclosing call whose argument list you have already moved past.
+- **Signature help parameter type display with parenthesized callable unions.** The opening parenthesis in types like `(\Closure(static): mixed)|string|array` was stripped in the signature help tooltip. The full type now displays correctly.
+
 - **`__invoke()` return type resolution.** Calling `$f()` where `$f` holds an object with an `__invoke()` method now resolves the return type correctly. Completion, chaining, foreach iteration, and parenthesized expression invocations like `($this->factory)()` all work.
 - **Enum `from()` and `tryFrom()` chaining.** `MyEnum::from('value')->method()` now resolves through the enum type.
 - **Nested closures with reused parameter names no longer crash.** The callable parameter inference now caps its recursion depth to break cycles.

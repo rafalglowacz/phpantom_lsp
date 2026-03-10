@@ -675,6 +675,12 @@ pub(in crate::completion) fn walk_statements_for_assignments<'b>(
                     }
                 }
             }
+            // Recurse into namespace blocks so that assignments and
+            // closures inside `namespace Foo { … }` or after
+            // `namespace Foo;` are visible to the walker.
+            Statement::Namespace(ns) => {
+                walk_statements_for_assignments(ns.statements().iter(), ctx, results, conditional);
+            }
             _ => {}
         }
     }

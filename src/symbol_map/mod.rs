@@ -211,6 +211,7 @@ pub(crate) enum VarDefKind {
     GlobalDecl,
     ArrayDestructuring,
     ListDestructuring,
+    ClosureCapture,
 }
 
 /// Per-file symbol location index.
@@ -229,6 +230,20 @@ pub(crate) struct SymbolMap {
     /// methods, closures, and arrow functions.  Used by
     /// `find_enclosing_scope` to determine which scope the cursor is in.
     pub scopes: Vec<(u32, u32)>,
+    /// Body boundaries `(body_start_offset, body_end_offset)` for
+    /// closures and arrow functions only.
+    ///
+    /// For closures, `body_start` is the opening `{` offset (same as
+    /// the scope start).  For arrow functions, `body_start` is the
+    /// `=>` token offset, which is later than the scope start (the
+    /// `fn` keyword).
+    ///
+    /// Used by signature help to suppress the outer call's popup once
+    /// the cursor has entered a closure or arrow function body that is
+    /// itself an argument to the call.  Separate from `scopes` because
+    /// variable resolution needs the full `fn`..`end` range for arrow
+    /// function parameter lookups.
+    pub body_scopes: Vec<(u32, u32)>,
     /// Template parameter definition sites from `@template` docblock tags,
     /// sorted by `name_offset`.  Used to resolve template parameter names
     /// (e.g. `TKey`, `TModel`) that appear in docblock types but are not
@@ -351,6 +366,26 @@ impl SymbolMap {
             .iter()
             .rev()
             .find(|cs| offset >= cs.args_start && offset <= cs.args_end)
+    }
+
+    /// Check whether `offset` is inside a closure or arrow-function body
+    /// that is nested within a call's argument list.
+    ///
+    /// Returns `true` when there is a scope (closure/arrow-fn) whose
+    /// opening boundary falls inside (`args_start`..`args_end`) and
+    /// whose range contains `offset`.  In that case the cursor is
+    /// writing code *inside* the closure body, not filling in arguments
+    /// to the outer call.
+    ///
+    /// Used by signature help to suppress the outer call's popup once
+    /// the user has entered a closure or arrow function body argument.
+    pub fn is_inside_nested_scope_of_call(&self, offset: u32, call: &CallSite) -> bool {
+        self.body_scopes.iter().any(|&(body_start, body_end)| {
+            body_start > call.args_start
+                && body_start < call.args_end
+                && offset >= body_start
+                && offset <= body_end
+        })
     }
 }
 

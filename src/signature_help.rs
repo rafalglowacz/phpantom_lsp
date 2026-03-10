@@ -215,7 +215,7 @@ fn shorten_type(ty: &str) -> String {
     let mut result = String::with_capacity(ty.len());
     let mut segment_start = 0;
     for (i, ch) in ty.char_indices() {
-        if matches!(ch, '|' | '<' | '>' | ',' | ' ') {
+        if matches!(ch, '|' | '<' | '>' | ',' | ' ' | '(' | ')') {
             if i > segment_start {
                 let seg = &ty[segment_start..i];
                 result.push_str(crate::util::short_name(seg));
@@ -359,9 +359,25 @@ impl Backend {
     ) -> Option<SignatureHelp> {
         let ctx = self.file_context(uri);
 
-        // ── Primary path: AST-based detection via symbol map ────────
+        // ── Early bail-out: cursor inside a closure/arrow-fn body ───
+        // When the cursor is inside a closure or arrow function body
+        // that is itself an argument to a call, suppress signature help
+        // for that outer call.  The user is writing code *inside* the
+        // closure, not filling in arguments to the outer call.
+        //
+        // This check runs once, before both detection paths, so it
+        // covers the AST-based path and the text-based fallback alike.
         let symbol_map = self.symbol_maps.read().get(uri).cloned();
+        if let Some(ref sm) = symbol_map {
+            let cursor_offset = position_to_offset(content, position);
+            if let Some(call) = sm.find_enclosing_call_site(cursor_offset)
+                && sm.is_inside_nested_scope_of_call(cursor_offset, call)
+            {
+                return None;
+            }
+        }
 
+        // ── Primary path: AST-based detection via symbol map ────────
         if let Some(ref sm) = symbol_map
             && let Some(site) = detect_call_site_from_map(sm, content, position)
             && let Some(result) = self.resolve_signature(&site, content, position, &ctx)

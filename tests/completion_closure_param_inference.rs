@@ -1,6 +1,6 @@
 mod common;
 
-use common::create_test_backend;
+use common::{create_psr4_workspace, create_test_backend};
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -678,6 +678,110 @@ fn test_extract_callable_param_types_parenthesized_no_union() {
 }
 
 #[test]
+fn test_extract_callable_param_types_static_void_vs_mixed() {
+    use phpantom_lsp::docblock::extract_callable_param_types;
+
+    // `: void` — this is the pattern used in the passing test
+    assert_eq!(
+        extract_callable_param_types("callable(static): void"),
+        Some(vec!["static".to_string()]),
+        "callable(static): void should extract [\"static\"]",
+    );
+
+    // `: mixed` — this is the pattern that fails in integration tests
+    assert_eq!(
+        extract_callable_param_types("callable(static): mixed"),
+        Some(vec!["static".to_string()]),
+        "callable(static): mixed should extract [\"static\"]",
+    );
+
+    // `Closure(static): mixed`
+    assert_eq!(
+        extract_callable_param_types("Closure(static): mixed"),
+        Some(vec!["static".to_string()]),
+        "Closure(static): mixed should extract [\"static\"]",
+    );
+
+    // `Closure(static): void`
+    assert_eq!(
+        extract_callable_param_types("Closure(static): void"),
+        Some(vec!["static".to_string()]),
+        "Closure(static): void should extract [\"static\"]",
+    );
+}
+
+#[test]
+fn test_extract_callable_param_types_parenthesized_closure_static_union() {
+    use phpantom_lsp::docblock::extract_callable_param_types;
+
+    // `(\Closure(static): mixed)|string|array` — the exact Laravel `where()` pattern
+    assert_eq!(
+        extract_callable_param_types("(\\Closure(static): mixed)|string|array"),
+        Some(vec!["static".to_string()]),
+    );
+
+    // Without leading backslash
+    assert_eq!(
+        extract_callable_param_types("(Closure(static): mixed)|string|array"),
+        Some(vec!["static".to_string()]),
+    );
+}
+
+#[test]
+fn test_extract_param_raw_type_laravel_where_docblock() {
+    use phpantom_lsp::docblock::extract_param_raw_type;
+
+    // Exact docblock from Laravel's Illuminate\Database\Query\Builder::where()
+    // Note: double spaces after @param and before $column — this is how it
+    // appears in the real Laravel source.
+    let docblock = concat!(
+        "/**\n",
+        " * Add a basic where clause to the query.\n",
+        " *\n",
+        " * @param  (\\Closure(static): mixed)|string|array|\\Illuminate\\Contracts\\Database\\Query\\Expression  $column\n",
+        " * @param  mixed  $operator\n",
+        " * @param  mixed  $value\n",
+        " * @param  string  $boolean\n",
+        " * @return $this\n",
+        " */",
+    );
+
+    let result = extract_param_raw_type(docblock, "$column");
+    assert_eq!(
+        result,
+        Some("(\\Closure(static): mixed)|string|array|\\Illuminate\\Contracts\\Database\\Query\\Expression".to_string()),
+        "extract_param_raw_type should extract the full callable union type from Laravel's where() docblock",
+    );
+}
+
+#[test]
+fn test_extract_callable_param_types_laravel_where_exact() {
+    use phpantom_lsp::docblock::extract_callable_param_types;
+
+    // Exact type string from Laravel's Query\Builder::where() @param tag
+    let laravel_type = "(\\Closure(static): mixed)|string|array|\\Illuminate\\Contracts\\Database\\Query\\Expression";
+    assert_eq!(
+        extract_callable_param_types(laravel_type),
+        Some(vec!["static".to_string()]),
+        "Laravel where() exact @param type should extract [\"static\"]",
+    );
+
+    // Simpler variant without the Expression union member
+    assert_eq!(
+        extract_callable_param_types("(\\Closure(static): mixed)|string|array"),
+        Some(vec!["static".to_string()]),
+        "(\\Closure(static): mixed)|string|array should extract [\"static\"]",
+    );
+
+    // Without leading backslash on Closure
+    assert_eq!(
+        extract_callable_param_types("(Closure(static): mixed)|string|array"),
+        Some(vec!["static".to_string()]),
+        "(Closure(static): mixed)|string|array should extract [\"static\"]",
+    );
+}
+
+#[test]
 fn test_extract_callable_param_types_union_non_callable_parts() {
     use phpantom_lsp::docblock::extract_callable_param_types;
 
@@ -775,6 +879,53 @@ async fn test_static_in_callable_param_resolves_to_receiver() {
     assert!(
         names.contains(&"through"),
         "Expected 'through' from Pipeline (receiver), got: {:?}",
+        names,
+    );
+}
+
+/// Same as `test_static_in_callable_param_resolves_to_receiver` but uses the
+/// exact Laravel `where()` param type: `(\Closure(static): mixed)|string|array`.
+///
+/// This is a parenthesized `Closure(…)` (not bare `callable(…)`) in a union
+/// with non-callable types and the callable return type is `mixed` (not `void`).
+/// The native PHP type hint is absent (just `$column` with no type).
+#[tokio::test]
+async fn test_laravel_where_closure_param_resolves_to_receiver() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_laravel_where.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class Builder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "}\n",
+        "class SomeService {\n",
+        "    public function run(): void {\n",
+        "        $builder = new Builder();\n",
+        "        $builder->where(function ($q) {\n",
+        "            $q->\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Line 14: `            $q->`  cursor after `->`
+    let items = complete_at(&backend, &uri, src, 14, 17).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from Builder via (\\Closure(static): mixed)|string|array, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from Builder via (\\Closure(static): mixed)|string|array, got: {:?}",
         names,
     );
 }
@@ -1361,6 +1512,904 @@ async fn test_example_php_exact_layout_chunk_foreach() {
     assert!(
         names.contains(&"getName"),
         "Expected 'getName' from BlogAuthor (demo in separate class, bare Collection hint), got: {:?}",
+        names,
+    );
+}
+
+// ─── Namespace breaks closure param inference ───────────────────────────────
+
+/// Closure param inference works in top-level code without a namespace.
+/// This is the baseline that passes.
+#[tokio::test]
+async fn test_closure_param_inference_toplevel_no_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_toplevel_no_ns.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class QueryBuilder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    public function orderBy(string $col, string $dir = 'asc'): static { return $this; }\n",
+        "}\n",
+        "$query = QueryBuilder::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    // Line 13: `    $q->` — $q inferred from (\Closure(static): mixed)
+    let items = complete_at(&backend, &uri, src, 13, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from QueryBuilder (no namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from QueryBuilder (no namespace), got: {:?}",
+        names,
+    );
+}
+
+// ─── Chained static call with closure argument (the actual ProductFilter pattern) ──
+
+/// The real-world Laravel pattern chains the closure directly onto a static
+/// call result: `ProductFilter::orderBy('name')->where(function ($query) { $query-> })`.
+///
+/// This is subtly different from assigning to `$query` first and then calling
+/// `$query->where(...)` because the receiver text for `infer_callable_params_from_receiver`
+/// is the entire chain `ProductFilter::orderBy('name')` rather than a simple `$query` variable.
+#[tokio::test]
+async fn test_chained_static_call_closure_param_inference_no_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/chained_static_closure_no_ns.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  class Model {
+    // Line 2:      /**
+    // Line 3:       * @param (\Closure(static): mixed)|string|array $column
+    // Line 4:       * @return static
+    // Line 5:       */
+    // Line 6:      public function where($column, $operator = null, $value = null): static { return $this; }
+    // Line 7:      public function whereNotIn(string $col, array $vals): static { return $this; }
+    // Line 8:      public function orWhere(string $col, mixed $val = null): static { return $this; }
+    // Line 9:      /** @return static */
+    // Line 10:     public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }
+    // Line 11: }
+    // Line 12: final class ProductFilter extends Model {}
+    // Line 13: $productFilters = ProductFilter::orderBy('name')
+    // Line 14:     ->where(function ($query) use ($page): void {
+    // Line 15:         $query->
+    // Line 16:     });
+    let src = concat!(
+        "<?php\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+        "final class ProductFilter extends Model {}\n",
+        "$page = new \\stdClass();\n",
+        "$productFilters = ProductFilter::orderBy('name')\n",
+        "    ->where(function ($query) use ($page): void {\n",
+        "        $query->\n",
+        "    });\n",
+    );
+
+    // Line 16: `        $query->` — $query is closure param inferred from
+    // `where(@param (\Closure(static): mixed)|…)` on the parent Model class
+    let items = complete_at(&backend, &uri, src, 16, 17).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' via chained static call closure param (no namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' via chained static call closure param (no namespace), got: {:?}",
+        names,
+    );
+}
+
+/// Same chained pattern but inside a namespace — the exact pattern from the bug report.
+#[tokio::test]
+async fn test_chained_static_call_closure_param_inference_with_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/chained_static_closure_ns.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  namespace Luxplus\Core\Database\Model\Products\Filters;
+    // Line 2:  class Model {
+    // ...
+    // Line 12: }
+    // Line 13: final class ProductFilter extends Model {}
+    // Line 14: $page = new \stdClass();
+    // Line 15: $productFilters = ProductFilter::orderBy('name')
+    // Line 16:     ->where(function ($query) use ($page): void {
+    // Line 17:         $query->
+    // Line 18:     });
+    let src = concat!(
+        "<?php\n",
+        "namespace Luxplus\\Core\\Database\\Model\\Products\\Filters;\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+        "final class ProductFilter extends Model {}\n",
+        "$page = new \\stdClass();\n",
+        "$productFilters = ProductFilter::orderBy('name')\n",
+        "    ->where(function ($query) use ($page): void {\n",
+        "        $query->\n",
+        "    });\n",
+    );
+
+    // Line 17: `        $query->` — $query is closure param inferred from
+    // `where(@param (\Closure(static): mixed)|…)` on the parent Model class
+    let items = complete_at(&backend, &uri, src, 17, 17).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' via chained static call closure param (with namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' via chained static call closure param (with namespace), got: {:?}",
+        names,
+    );
+}
+
+/// The chain split across two statements: first assign, then call ->where().
+/// This is the simpler variant that the user confirmed works.
+#[tokio::test]
+async fn test_split_chain_closure_param_inference_with_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/split_chain_closure_ns.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "namespace Luxplus\\Core\\Database\\Model;\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+        "final class EmailGenerator extends Model {}\n",
+        "$query = EmailGenerator::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    // Line 16: `    $q->` — $q inferred from (\Closure(static): mixed)
+    let items = complete_at(&backend, &uri, src, 16, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' via split chain (namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' via split chain (namespace), got: {:?}",
+        names,
+    );
+}
+
+/// Same code as above but wrapped in a `namespace` declaration.
+/// This reproduces the real-world Laravel bug where the namespace causes
+/// closure parameter inference to fail.
+#[tokio::test]
+async fn test_closure_param_inference_toplevel_with_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_toplevel_with_ns.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "namespace App\\Models;\n",
+        "class QueryBuilder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    public function orderBy(string $col, string $dir = 'asc'): static { return $this; }\n",
+        "}\n",
+        "$query = QueryBuilder::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    // Line 14: `    $q->` — $q inferred from (\Closure(static): mixed)
+    let items = complete_at(&backend, &uri, src, 14, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from QueryBuilder (with namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from QueryBuilder (with namespace), got: {:?}",
+        names,
+    );
+}
+
+/// Closure param inference inside a class method with a namespace.
+/// The method-body path goes through `resolve_variable_in_members`, which
+/// is a different code path from top-level code.
+#[tokio::test]
+async fn test_closure_param_inference_in_method_with_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_method_with_ns.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "namespace App\\Models;\n",
+        "class QueryBuilder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    public function orderBy(string $col, string $dir = 'asc'): static { return $this; }\n",
+        "}\n",
+        "class Service {\n",
+        "    public function run(): void {\n",
+        "        $query = QueryBuilder::orderBy('id');\n",
+        "        $query->where(function ($q): void {\n",
+        "            $q->\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Line 16: `            $q->` — $q inferred from (\Closure(static): mixed)
+    let items = complete_at(&backend, &uri, src, 16, 17).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from QueryBuilder (method + namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from QueryBuilder (method + namespace), got: {:?}",
+        names,
+    );
+}
+
+/// Exact reproduction of the real-world Laravel pattern:
+///   - A model class extends a parent that owns `orderBy` and `where`
+///   - Top-level code in a namespace calls `Model::orderBy()->where(fn($q) => ...)`
+///   - The closure param `$q` should resolve via `(\Closure(static): mixed)`
+///
+/// The user reported this works without the `namespace` line.  The child
+/// class does NOT define `where`/`orderBy` itself — they come from the parent.
+#[tokio::test]
+async fn test_closure_param_inference_child_class_static_chain_with_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_child_static_ns.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  namespace Luxplus\Core\Database\Model;
+    // Line 2:  class Model {
+    // Line 3:      /**
+    // Line 4:       * @param (\Closure(static): mixed)|string|array $column
+    // Line 5:       * @return static
+    // Line 6:       */
+    // Line 7:      public function where($column, $operator = null, $value = null): static { return $this; }
+    // Line 8:      public function whereNotIn(string $col, array $vals): static { return $this; }
+    // Line 9:      public function orWhere(string $col, mixed $val = null): static { return $this; }
+    // Line 10:     /** @return static */
+    // Line 11:     public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }
+    // Line 12: }
+    // Line 13: final class EmailGenerator extends Model {
+    // Line 14: }
+    // Line 15: $query = EmailGenerator::orderBy('id');
+    // Line 16: $query->where(function ($q): void {
+    // Line 17:     $q->
+    // Line 18: });
+    let src = concat!(
+        "<?php\n",
+        "namespace Luxplus\\Core\\Database\\Model;\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+        "final class EmailGenerator extends Model {\n",
+        "}\n",
+        "$query = EmailGenerator::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    // Line 17: `    $q->` — $q is closure param inferred from
+    // `where(@param (\Closure(static): mixed)|…)` on the parent Model class
+    let items = complete_at(&backend, &uri, src, 17, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from Model via child static chain + namespace, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from Model via child static chain + namespace, got: {:?}",
+        names,
+    );
+}
+
+/// Same as above but WITHOUT the namespace — confirms this path works
+/// and isolates the namespace as the cause.
+#[tokio::test]
+async fn test_closure_param_inference_child_class_static_chain_no_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_child_static_no_ns.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+        "final class EmailGenerator extends Model {\n",
+        "}\n",
+        "$query = EmailGenerator::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    // Line 16: `    $q->` — same test without namespace
+    let items = complete_at(&backend, &uri, src, 16, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from Model via child static chain (no namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from Model via child static chain (no namespace), got: {:?}",
+        names,
+    );
+}
+
+// ─── Closure with `use ($var)` — does the use-clause break inference? ───────
+
+/// The real-world Laravel pattern uses `function ($query) use ($page): void`.
+/// The `use ($page)` clause might cause the parser to produce a different AST
+/// node structure that the closure-param inference code doesn't handle.
+#[tokio::test]
+async fn test_closure_param_inference_with_use_clause() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_use_clause.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  class QueryBuilder {
+    // Line 2:      /**
+    // Line 3:       * @param (\Closure(static): mixed)|string|array $column
+    // Line 4:       * @return static
+    // Line 5:       */
+    // Line 6:      public function where($column, $operator = null, $value = null): static { return $this; }
+    // Line 7:      public function whereNotIn(string $col, array $vals): static { return $this; }
+    // Line 8:      public function orWhere(string $col, mixed $val = null): static { return $this; }
+    // Line 9:      public function orderBy(string $col, string $dir = 'asc'): static { return $this; }
+    // Line 10: }
+    // Line 11: $page = new \stdClass();
+    // Line 12: $query = QueryBuilder::orderBy('id');
+    // Line 13: $query->where(function ($q) use ($page): void {
+    // Line 14:     $q->
+    // Line 15: });
+    let src = concat!(
+        "<?php\n",
+        "class QueryBuilder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    public function orderBy(string $col, string $dir = 'asc'): static { return $this; }\n",
+        "}\n",
+        "$page = new \\stdClass();\n",
+        "$query = QueryBuilder::orderBy('id');\n",
+        "$query->where(function ($q) use ($page): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    let items = complete_at(&backend, &uri, src, 14, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from QueryBuilder via closure with use() clause, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from QueryBuilder via closure with use() clause, got: {:?}",
+        names,
+    );
+}
+
+/// Same as above but with a namespace wrapping everything.
+#[tokio::test]
+async fn test_closure_param_inference_with_use_clause_and_namespace() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_use_clause_ns.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  namespace App\Models;
+    // Line 2:  class QueryBuilder {
+    // ...
+    // Line 11: }
+    // Line 12: $page = new \stdClass();
+    // Line 13: $query = QueryBuilder::orderBy('id');
+    // Line 14: $query->where(function ($q) use ($page): void {
+    // Line 15:     $q->
+    // Line 16: });
+    let src = concat!(
+        "<?php\n",
+        "namespace App\\Models;\n",
+        "class QueryBuilder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    public function orderBy(string $col, string $dir = 'asc'): static { return $this; }\n",
+        "}\n",
+        "$page = new \\stdClass();\n",
+        "$query = QueryBuilder::orderBy('id');\n",
+        "$query->where(function ($q) use ($page): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    let items = complete_at(&backend, &uri, src, 15, 8).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from QueryBuilder via closure with use() + namespace, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from QueryBuilder via closure with use() + namespace, got: {:?}",
+        names,
+    );
+}
+
+// ─── Cross-file PSR-4: closure param inference with namespace ───────────────
+
+/// Cross-file reproduction of the real-world Laravel pattern.
+///
+/// The `where` method lives on a parent `Model` class in a separate file.
+/// `EmailGenerator extends Model` in another file.  Top-level code in a
+/// namespace calls `EmailGenerator::orderBy('id')->where(function ($q) { $q-> })`.
+///
+/// The `$q` closure param should be inferred from
+/// `@param (\Closure(static): mixed)|string|array $column` on the parent.
+#[tokio::test]
+async fn test_cross_file_closure_param_inference_with_namespace() {
+    let composer = r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#;
+
+    let model_file = concat!(
+        "<?php\n",
+        "namespace App\\Database;\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+    );
+
+    let generator_file = concat!(
+        "<?php\n",
+        "namespace App\\Models;\n",
+        "use App\\Database\\Model;\n",
+        "final class EmailGenerator extends Model {\n",
+        "}\n",
+    );
+
+    // Line 0: <?php
+    // Line 1: namespace App\Script;
+    // Line 2: use App\Models\EmailGenerator;
+    // Line 3: $query = EmailGenerator::orderBy('id');
+    // Line 4: $query->where(function ($q): void {
+    // Line 5:     $q->
+    // Line 6: });
+    let script_file = concat!(
+        "<?php\n",
+        "namespace App\\Script;\n",
+        "use App\\Models\\EmailGenerator;\n",
+        "$query = EmailGenerator::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    let (backend, dir) = create_psr4_workspace(
+        composer,
+        &[
+            ("src/Database/Model.php", model_file),
+            ("src/Models/EmailGenerator.php", generator_file),
+            ("src/Script/run.php", script_file),
+        ],
+    );
+
+    let uri = Url::from_file_path(dir.path().join("src/Script/run.php")).unwrap();
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: script_file.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 5,
+                character: 8,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let items = match backend.completion(completion_params).await.unwrap() {
+        Some(CompletionResponse::Array(items)) => items,
+        Some(CompletionResponse::List(list)) => list.items,
+        None => vec![],
+    };
+
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from Model via cross-file closure param inference, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from Model via cross-file closure param inference, got: {:?}",
+        names,
+    );
+}
+
+/// Same cross-file layout but WITHOUT the namespace in the script file.
+/// Confirms that removing the namespace makes it work (matching the user's report).
+#[tokio::test]
+async fn test_cross_file_closure_param_inference_without_namespace() {
+    let composer = r#"{"autoload": {"psr-4": {"App\\": "src/"}}}"#;
+
+    let model_file = concat!(
+        "<?php\n",
+        "namespace App\\Database;\n",
+        "class Model {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function whereNotIn(string $col, array $vals): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "    /** @return static */\n",
+        "    public static function orderBy(string $col, string $dir = 'asc'): static { return new static(); }\n",
+        "}\n",
+    );
+
+    let generator_file = concat!(
+        "<?php\n",
+        "namespace App\\Models;\n",
+        "use App\\Database\\Model;\n",
+        "final class EmailGenerator extends Model {\n",
+        "}\n",
+    );
+
+    // No namespace — uses FQN in the `use` import
+    // Line 0: <?php
+    // Line 1: use App\Models\EmailGenerator;
+    // Line 2: $query = EmailGenerator::orderBy('id');
+    // Line 3: $query->where(function ($q): void {
+    // Line 4:     $q->
+    // Line 5: });
+    let script_file = concat!(
+        "<?php\n",
+        "use App\\Models\\EmailGenerator;\n",
+        "$query = EmailGenerator::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    let (backend, dir) = create_psr4_workspace(
+        composer,
+        &[
+            ("src/Database/Model.php", model_file),
+            ("src/Models/EmailGenerator.php", generator_file),
+            ("src/Script/run.php", script_file),
+        ],
+    );
+
+    let uri = Url::from_file_path(dir.path().join("src/Script/run.php")).unwrap();
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: script_file.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 4,
+                character: 8,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let items = match backend.completion(completion_params).await.unwrap() {
+        Some(CompletionResponse::Array(items)) => items,
+        Some(CompletionResponse::List(list)) => list.items,
+        None => vec![],
+    };
+
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"whereNotIn"),
+        "Expected 'whereNotIn' from Model via cross-file (no namespace), got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' from Model via cross-file (no namespace), got: {:?}",
+        names,
+    );
+}
+
+// ─── Cross-file with real Laravel-like Eloquent Builder vendor structure ─────
+
+/// Simulates the real-world Laravel stack where `where()` lives on
+/// `Illuminate\Database\Eloquent\Builder` (loaded from vendor), the model
+/// extends `Illuminate\Database\Eloquent\Model`, and the closure param
+/// should be inferred through the builder-as-static forwarding mechanism.
+///
+/// This is the exact scenario from the bug report:
+///
+/// ```php
+/// namespace App\Http\Controllers;
+/// use Luxplus\Core\Database\Model\EmailGenerator;
+/// $query = EmailGenerator::orderBy('id');
+/// $query->where(function ($q): void {
+///     $q->where('domain', 'like', '%b%');  // $q should resolve
+/// });
+/// ```
+///
+/// The key difference from simpler tests is that `where()` and `orderBy()`
+/// are NOT defined directly on the user's model class. They come from the
+/// Eloquent Builder which is loaded from vendor and forwarded onto the model
+/// as static virtual methods by the LaravelModelProvider.
+#[tokio::test]
+async fn test_cross_file_laravel_eloquent_builder_closure_param_inference() {
+    let composer = r#"{
+        "autoload": {
+            "psr-4": {
+                "App\\": "src/",
+                "Luxplus\\Core\\Database\\Model\\": "src/Models/",
+                "Illuminate\\Database\\Eloquent\\": "vendor/laravel/framework/src/Illuminate/Database/Eloquent/",
+                "Illuminate\\Database\\Query\\": "vendor/laravel/framework/src/Illuminate/Database/Query/"
+            }
+        }
+    }"#;
+
+    // Minimal Eloquent Builder with the exact @param from real Laravel
+    let eloquent_builder_file = concat!(
+        "<?php\n",
+        "namespace Illuminate\\Database\\Eloquent;\n",
+        "\n",
+        "/**\n",
+        " * @template TModel of Model\n",
+        " * @mixin \\Illuminate\\Database\\Query\\Builder\n",
+        " */\n",
+        "class Builder {\n",
+        "    /**\n",
+        "     * @param  (\\Closure(static): mixed)|string|array  $column\n",
+        "     * @return $this\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null, $boolean = 'and') { return $this; }\n",
+        "\n",
+        "    /** @return $this */\n",
+        "    public function orWhere($column, $operator = null, $value = null) { return $this; }\n",
+        "\n",
+        "    /** @return $this */\n",
+        "    public function whereNotIn(string $column, array $values) { return $this; }\n",
+        "\n",
+        "    /** @return $this */\n",
+        "    public function orderBy(string $column, string $direction = 'asc') { return $this; }\n",
+        "}\n",
+    );
+
+    // Minimal Query Builder (the @mixin target)
+    let query_builder_file = concat!(
+        "<?php\n",
+        "namespace Illuminate\\Database\\Query;\n",
+        "\n",
+        "class Builder {\n",
+        "    /** @return $this */\n",
+        "    public function groupBy(...$groups) { return $this; }\n",
+        "}\n",
+    );
+
+    // Minimal Eloquent Model
+    let model_file = concat!(
+        "<?php\n",
+        "namespace Illuminate\\Database\\Eloquent;\n",
+        "\n",
+        "abstract class Model {\n",
+        "}\n",
+    );
+
+    // User's model class
+    let email_generator_file = concat!(
+        "<?php\n",
+        "namespace Luxplus\\Core\\Database\\Model;\n",
+        "\n",
+        "use Illuminate\\Database\\Eloquent\\Model;\n",
+        "\n",
+        "final class EmailGenerator extends Model {\n",
+        "}\n",
+    );
+
+    // The script file — exact pattern from the bug report
+    // Line 0: <?php
+    // Line 1: namespace App\Http\Controllers;
+    // Line 2: use Luxplus\Core\Database\Model\EmailGenerator;
+    // Line 3: $query = EmailGenerator::orderBy('id');
+    // Line 4: $query->where(function ($q): void {
+    // Line 5:     $q->
+    // Line 6: });
+    let script_file = concat!(
+        "<?php\n",
+        "namespace App\\Http\\Controllers;\n",
+        "use Luxplus\\Core\\Database\\Model\\EmailGenerator;\n",
+        "$query = EmailGenerator::orderBy('id');\n",
+        "$query->where(function ($q): void {\n",
+        "    $q->\n",
+        "});\n",
+    );
+
+    let (backend, dir) = create_psr4_workspace(
+        composer,
+        &[
+            (
+                "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Builder.php",
+                eloquent_builder_file,
+            ),
+            (
+                "vendor/laravel/framework/src/Illuminate/Database/Query/Builder.php",
+                query_builder_file,
+            ),
+            (
+                "vendor/laravel/framework/src/Illuminate/Database/Eloquent/Model.php",
+                model_file,
+            ),
+            ("src/Models/EmailGenerator.php", email_generator_file),
+            ("src/Http/Controllers/script.php", script_file),
+        ],
+    );
+
+    let uri = Url::from_file_path(dir.path().join("src/Http/Controllers/script.php")).unwrap();
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: script_file.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 5,
+                character: 8,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let items = match backend.completion(completion_params).await.unwrap() {
+        Some(CompletionResponse::Array(items)) => items,
+        Some(CompletionResponse::List(list)) => list.items,
+        None => vec![],
+    };
+
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"where"),
+        "Expected 'where' on $q via Eloquent Builder closure param inference, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"orWhere"),
+        "Expected 'orWhere' on $q via Eloquent Builder closure param inference, got: {:?}",
         names,
     );
 }

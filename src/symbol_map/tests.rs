@@ -2801,3 +2801,41 @@ fn docblock_array_shape_nested_generic_value() {
         panic!("Expected ClassReference for Item");
     }
 }
+
+#[test]
+fn arrow_fn_body_scope_suppresses_outer_call_site() {
+    let src = concat!(
+        "<?php\n",
+        "class Collection {\n",
+        "    /** @param callable(mixed): mixed $callback */\n",
+        "    public function each(callable $callback): static { return $this; }\n",
+        "}\n",
+        "class ReviewModel {\n",
+        "    public float $percentage = 0.0;\n",
+        "    public int $count = 0;\n",
+        "}\n",
+        "$ratings = new Collection();\n",
+        "$total = 10;\n",
+        "$ratings->each(fn(ReviewModel $model): float => $model->percentage = $total > 0 ? ($model->count / $total) * 100 : 0.0);\n",
+    );
+    let sm = parse_and_extract(src);
+
+    // Find the `each(` call site.
+    let each_cs = sm
+        .call_sites
+        .iter()
+        .find(|cs| cs.call_expression.contains("each"))
+        .expect("should have a call site for each()");
+
+    // The cursor at col 60 on line 11 is inside the arrow fn body.
+    // Compute a byte offset in the arrow fn body region (past `=>`).
+    let arrow_body_marker = src.find("$model->percentage").unwrap() as u32;
+
+    // There should be a body scope (arrow fn `=>`) starting inside each()'s args.
+    let has_nested = sm.is_inside_nested_scope_of_call(arrow_body_marker, each_cs);
+    assert!(
+        has_nested,
+        "Cursor at offset {} should be inside a nested body scope of each() call (args {}..{}), body_scopes: {:?}",
+        arrow_body_marker, each_cs.args_start, each_cs.args_end, sm.body_scopes,
+    );
+}

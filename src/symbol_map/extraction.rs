@@ -33,6 +33,10 @@ struct ExtractionCtx<'a> {
     var_defs: Vec<VarDefSite>,
     /// Scope ranges `(start, end)` for functions, methods, closures, etc.
     scopes: Vec<(u32, u32)>,
+    /// Body boundaries `(body_start, body_end)` for closures and arrow fns.
+    /// For closures the body start is the `{` offset; for arrow functions
+    /// it is the `=>` token offset.  Used by signature help suppression.
+    body_scopes: Vec<(u32, u32)>,
     /// `@template` parameter definitions with their scoping ranges.
     template_defs: Vec<TemplateParamDef>,
     /// Call-site records for signature help and conditional return types.
@@ -54,6 +58,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
         spans: Vec::new(),
         var_defs: Vec::new(),
         scopes: Vec::new(),
+        body_scopes: Vec::new(),
         template_defs: Vec::new(),
         call_sites: Vec::new(),
         trivias: program.trivia.as_slice(),
@@ -91,6 +96,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
         spans: ctx.spans,
         var_defs: ctx.var_defs,
         scopes: ctx.scopes,
+        body_scopes: ctx.body_scopes,
         template_defs: ctx.template_defs,
         call_sites: ctx.call_sites,
     }
@@ -1491,6 +1497,8 @@ fn extract_from_expression<'a>(
             let closure_scope_start = closure.body.left_brace.start.offset;
             let closure_scope_end = closure.body.right_brace.end.offset;
             ctx.scopes.push((closure_scope_start, closure_scope_end));
+            ctx.body_scopes
+                .push((closure_scope_start, closure_scope_end));
 
             for param in closure.parameter_list.parameters.iter() {
                 if let Some(ref hint) = param.hint {
@@ -1531,7 +1539,18 @@ fn extract_from_expression<'a>(
                     ctx.spans.push(SymbolSpan {
                         start: var.variable.span.start.offset,
                         end: var.variable.span.end.offset,
-                        kind: SymbolKind::Variable { name },
+                        kind: SymbolKind::Variable { name: name.clone() },
+                    });
+                    // Emit VarDefSite so that GTD inside the closure body
+                    // can find the captured variable.  The definition is
+                    // scoped to the closure body and immediately visible.
+                    let use_var_offset = var.variable.span.start.offset;
+                    ctx.var_defs.push(VarDefSite {
+                        offset: use_var_offset,
+                        name,
+                        kind: VarDefKind::ClosureCapture,
+                        scope_start: closure_scope_start,
+                        effective_from: use_var_offset,
                     });
                 }
             }
@@ -1548,6 +1567,9 @@ fn extract_from_expression<'a>(
             let arrow_scope_start = arrow.span().start.offset;
             let arrow_scope_end = arrow.span().end.offset;
             ctx.scopes.push((arrow_scope_start, arrow_scope_end));
+            // Body scope starts at `=>` for signature help suppression.
+            ctx.body_scopes
+                .push((arrow.arrow.start.offset, arrow_scope_end));
 
             for param in arrow.parameter_list.parameters.iter() {
                 if let Some(ref hint) = param.hint {

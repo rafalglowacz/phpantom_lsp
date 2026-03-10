@@ -144,6 +144,18 @@ pub(in crate::completion) fn try_resolve_in_closure_stmt<'b>(
             }
         },
         Statement::DoWhile(dw) => try_resolve_in_closure_stmt(dw.statement, ctx, results),
+        Statement::Namespace(ns) => {
+            for inner in ns.statements().iter() {
+                let s = inner.span();
+                if ctx.cursor_offset >= s.start.offset
+                    && ctx.cursor_offset <= s.end.offset
+                    && try_resolve_in_closure_stmt(inner, ctx, results)
+                {
+                    return true;
+                }
+            }
+            false
+        }
         Statement::Try(try_stmt) => {
             for inner in try_stmt.block.statements.iter() {
                 let s = inner.span();
@@ -739,9 +751,10 @@ fn infer_callable_params_from_receiver(
     // so that `resolve_closure_params_with_inferred` resolves them
     // against the declaring class rather than the user's current class.
     let result = if let Some(receiver) = receiver_classes.first() {
+        let receiver_fqn = receiver.fqn();
         params
             .into_iter()
-            .map(|ty| replace_self_in_type(&ty, &receiver.name))
+            .map(|ty| replace_self_in_type(&ty, &receiver_fqn))
             .collect()
     } else {
         params
@@ -780,9 +793,10 @@ fn infer_callable_params_from_static_receiver(
             ctx.resolved_class_cache,
         );
         let params = find_callable_params_on_method(&resolved, method_name, arg_idx, ctx);
+        let owner_fqn = cls.fqn();
         params
             .into_iter()
-            .map(|ty| replace_self_in_type(&ty, &cls.name))
+            .map(|ty| replace_self_in_type(&ty, &owner_fqn))
             .collect()
     } else {
         vec![]

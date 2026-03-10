@@ -165,18 +165,22 @@ impl Backend {
                 // for assignments the definition's `effective_from` is past
                 // the LHS token — the lookup would skip the definition and
                 // find an earlier one instead of recognising "at definition".
-                if self
-                    .lookup_var_def_kind_at(uri, name, cursor_offset)
-                    .is_some()
-                {
-                    // The cursor is on a variable at its definition site
-                    // (assignment LHS, parameter, foreach binding, catch
-                    // binding, etc.).  GTD should not trigger here — the
-                    // user is already at the definition.  Type hints next
-                    // to the variable (e.g. `Throwable` in `catch
-                    // (Throwable $it)`) are separate symbol spans that
-                    // the user can click directly.
-                    return None;
+                if let Some(def_kind) = self.lookup_var_def_kind_at(uri, name, cursor_offset) {
+                    // Closure captures (`use ($var)`) are not terminal
+                    // definition sites — the user wants to jump to the
+                    // outer assignment, so we fall through to the
+                    // outer-scope lookup.
+                    if def_kind != VarDefKind::ClosureCapture {
+                        // The cursor is on a variable at its definition
+                        // site (assignment LHS, parameter, foreach
+                        // binding, catch binding, etc.).  GTD should not
+                        // trigger here — the user is already at the
+                        // definition.  Type hints next to the variable
+                        // (e.g. `Throwable` in `catch (Throwable $it)`)
+                        // are separate symbol spans that the user can
+                        // click directly.
+                        return None;
+                    }
                 }
 
                 if let Some(var_def) = self.lookup_var_definition(uri, name, cursor_offset) {

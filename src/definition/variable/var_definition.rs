@@ -302,12 +302,45 @@ fn find_closure_in_expression(
             let body_start = closure.body.left_brace.start.offset;
             let body_end = closure.body.right_brace.end.offset;
             if cursor_offset >= body_start && cursor_offset <= body_end {
-                return Some(find_in_function_scope(
+                let result = find_in_function_scope(
                     &closure.parameter_list,
                     closure.body.statements.iter(),
                     var_name,
                     cursor_offset,
-                ));
+                );
+                if !matches!(result, VarDefSearchResult::NotFound) {
+                    return Some(result);
+                }
+                // Variable not found in the closure's own scope.
+                // Check the `use ($var)` clause — captured variables
+                // act as definitions visible inside the closure body.
+                if let Some(ref use_clause) = closure.use_clause {
+                    for use_var in use_clause.variables.iter() {
+                        if use_var.variable.name == var_name {
+                            let var_start = use_var.variable.span.start.offset;
+                            let var_end = use_var.variable.span.end.offset;
+                            return Some(VarDefSearchResult::FoundAt {
+                                offset: var_start,
+                                end_offset: var_end,
+                            });
+                        }
+                    }
+                }
+                return Some(VarDefSearchResult::NotFound);
+            }
+            // Check if the cursor is on a variable in the `use` clause
+            // itself — treat it as a definition site so the outer-scope
+            // lookup can take over.
+            if let Some(ref use_clause) = closure.use_clause {
+                for use_var in use_clause.variables.iter() {
+                    if use_var.variable.name == var_name {
+                        let var_start = use_var.variable.span.start.offset;
+                        let var_end = use_var.variable.span.end.offset;
+                        if cursor_offset >= var_start && cursor_offset < var_end {
+                            return Some(VarDefSearchResult::AtDefinition);
+                        }
+                    }
+                }
             }
             None
         }

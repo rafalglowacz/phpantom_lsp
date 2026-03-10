@@ -1575,3 +1575,278 @@ namespace App {
         label
     );
 }
+
+// ─── Signature help suppression inside closure bodies ───────────────────────
+
+/// Signature help for the outer `where()` call should NOT fire when the
+/// cursor is inside the closure body `{ ... }` that is an argument.
+///
+/// The closure signature is still useful while typing the closure's
+/// parameter list (before `{`), but once you are inside the braces you
+/// are writing code in the context of the closure, not `where()`.
+#[tokio::test]
+async fn no_help_inside_closure_body_argument() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/sig_closure_body.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  class Builder {
+    // Line 2:      /**
+    // Line 3:       * @param (\Closure(static): mixed)|string|array $column
+    // Line 4:       * @return static
+    // Line 5:       */
+    // Line 6:      public function where($column, $operator = null, $value = null): static { return $this; }
+    // Line 7:      public function orWhere(string $col, mixed $val = null): static { return $this; }
+    // Line 8:  }
+    // Line 9:  $b = new Builder();
+    // Line 10: $b->where(function ($q): void {
+    // Line 11:     $q->orWhere('domain', 'test');
+    // Line 12: });
+    let src = concat!(
+        "<?php\n",
+        "class Builder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "}\n",
+        "$b = new Builder();\n",
+        "$b->where(function ($q): void {\n",
+        "    $q->orWhere('domain', 'test');\n",
+        "});\n",
+    );
+
+    // Inside the closure body (line 11, within the statement) — should NOT
+    // show signature help for the outer `where()`.
+    let result = sig_help_at(&backend, &uri, src, 11, 4).await;
+    assert!(
+        result.is_none(),
+        "Expected no signature help inside closure body, got: {:?}",
+        result,
+    );
+}
+
+/// Signature help should still fire when the cursor is in the closure's
+/// parameter list (before `{`), because you are still filling in the
+/// argument to `where()` at that point.
+#[tokio::test]
+async fn help_still_fires_in_closure_param_list() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/sig_closure_params.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  class Builder {
+    // Line 2:      /**
+    // Line 3:       * @param (\Closure(static): mixed)|string|array $column
+    // Line 4:       * @return static
+    // Line 5:       */
+    // Line 6:      public function where($column, $operator = null): static { return $this; }
+    // Line 7:  }
+    // Line 8:  $b = new Builder();
+    // Line 9:  $b->where(function ($q): void {
+    // Line 10:     $q->where('x');
+    // Line 11: });
+    let src = concat!(
+        "<?php\n",
+        "class Builder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null): static { return $this; }\n",
+        "}\n",
+        "$b = new Builder();\n",
+        "$b->where(function ($q): void {\n",
+        "    $q->where('x');\n",
+        "});\n",
+    );
+
+    // Cursor right after `where(` on line 9, before `function` — still
+    // inside the call's argument list but NOT inside the closure body.
+    let result = sig_help_at(&backend, &uri, src, 9, 11).await;
+    assert!(
+        result.is_some(),
+        "Expected signature help for where() before the closure body starts",
+    );
+    let sh = result.unwrap();
+    assert!(
+        sig_label(&sh).contains("$column"),
+        "Expected where()'s $column param in label, got: {}",
+        sig_label(&sh),
+    );
+}
+
+/// When there is a nested call *inside* the closure body, signature help
+/// should fire for that inner call, not the outer one.
+#[tokio::test]
+async fn inner_call_inside_closure_body_shows_inner_sig() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/sig_closure_inner.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  class Builder {
+    // Line 2:      /**
+    // Line 3:       * @param (\Closure(static): mixed)|string|array $column
+    // Line 4:       * @return static
+    // Line 5:       */
+    // Line 6:      public function where($column, $operator = null, $value = null): static { return $this; }
+    // Line 7:      public function orWhere(string $col, mixed $val = null): static { return $this; }
+    // Line 8:  }
+    // Line 9:  $b = new Builder();
+    // Line 10: $b->where(function ($q): void {
+    // Line 11:     $q->orWhere('domain',
+    // Line 12: });
+    let src = concat!(
+        "<?php\n",
+        "class Builder {\n",
+        "    /**\n",
+        "     * @param (\\Closure(static): mixed)|string|array $column\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function where($column, $operator = null, $value = null): static { return $this; }\n",
+        "    public function orWhere(string $col, mixed $val = null): static { return $this; }\n",
+        "}\n",
+        "$b = new Builder();\n",
+        "$b->where(function ($q): void {\n",
+        "    $q->orWhere('domain', );\n",
+        "});\n",
+    );
+
+    // Cursor at line 11 col 26, after the comma in `orWhere('domain', )` —
+    // should show signature help for orWhere, not where.
+    let result = sig_help_at(&backend, &uri, src, 11, 26).await;
+    assert!(
+        result.is_some(),
+        "Expected signature help for inner orWhere() call inside closure body",
+    );
+    let sh = result.unwrap();
+    let label = sig_label(&sh);
+    assert!(
+        label.contains("$col") || label.contains("$val"),
+        "Expected orWhere()'s params in label (not where()'s), got: {}",
+        label,
+    );
+    // Make sure it's NOT showing where()'s signature.
+    assert!(
+        !label.contains("$column"),
+        "Should NOT show outer where()'s $column param, got: {}",
+        label,
+    );
+}
+
+/// Signature help suppression also works when the closure uses `use ($var)`.
+#[tokio::test]
+async fn no_help_inside_closure_body_with_use_clause() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/sig_closure_use.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class Builder {\n",
+        "    public function where($column, $operator = null): static { return $this; }\n",
+        "}\n",
+        "$search = 'test';\n",
+        "$b = new Builder();\n",
+        "$b->where(function ($q) use ($search): void {\n",
+        "    $q->where('domain', 'like', '%' . $search . '%');\n",
+        "});\n",
+    );
+
+    // Line 7: inside the closure body statement — no sig help for outer where().
+    let result = sig_help_at(&backend, &uri, src, 7, 8).await;
+    assert!(
+        result.is_none(),
+        "Expected no signature help inside closure body (with use clause), got: {:?}",
+        result,
+    );
+}
+
+/// Signature help suppression works inside arrow function bodies too.
+#[tokio::test]
+async fn no_help_inside_arrow_fn_body_argument() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/sig_arrow_fn_body.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  function array_map(callable $callback, array $array): array { return []; }
+    // Line 2:  function strtoupper(string $s): string { return $s; }
+    // Line 3:  $names = ['alice', 'bob'];
+    // Line 4:  array_map(fn($n) => strtoupper($n), $names);
+    let src = concat!(
+        "<?php\n",
+        "function array_map(callable $callback, array $array): array { return []; }\n",
+        "function strtoupper(string $s): string { return $s; }\n",
+        "$names = ['alice', 'bob'];\n",
+        "array_map(fn($n) => strtoupper($n), $names);\n",
+    );
+
+    // Cursor inside `strtoupper($n)` on line 4 — should show strtoupper's
+    // sig, not array_map's.
+    let result = sig_help_at(&backend, &uri, src, 4, 33).await;
+    // Either no result or the inner strtoupper result — NOT array_map's.
+    if let Some(sh) = result {
+        let label = sig_label(&sh);
+        assert!(
+            !label.contains("$callback"),
+            "Should NOT show outer array_map()'s $callback param inside arrow fn body, got: {}",
+            label,
+        );
+    }
+}
+
+/// Arrow function body with no inner call — the exact pattern from the
+/// real-world `$this->ratings->each(fn(Model $m): float => $m->percentage = ...)`.
+///
+/// Signature help for `each()` should NOT fire when the cursor is past
+/// the `=>` in the arrow function body.
+#[tokio::test]
+async fn no_help_inside_arrow_fn_body_no_inner_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/sig_arrow_fn_no_inner.php").unwrap();
+
+    // Line 0:  <?php
+    // Line 1:  class Collection {
+    // Line 2:      /** @param callable(mixed): mixed $callback */
+    // Line 3:      public function each(callable $callback): static { return $this; }
+    // Line 4:  }
+    // Line 5:  class ReviewModel {
+    // Line 6:      public float $percentage = 0.0;
+    // Line 7:      public int $count = 0;
+    // Line 8:  }
+    // Line 9:  $ratings = new Collection();
+    // Line 10: $total = 10;
+    // Line 11: $ratings->each(fn(ReviewModel $model): float => $model->percentage = $total > 0 ? ($model->count / $total) * 100 : 0.0);
+    let src = concat!(
+        "<?php\n",
+        "class Collection {\n",
+        "    /** @param callable(mixed): mixed $callback */\n",
+        "    public function each(callable $callback): static { return $this; }\n",
+        "}\n",
+        "class ReviewModel {\n",
+        "    public float $percentage = 0.0;\n",
+        "    public int $count = 0;\n",
+        "}\n",
+        "$ratings = new Collection();\n",
+        "$total = 10;\n",
+        "$ratings->each(fn(ReviewModel $model): float => $model->percentage = $total > 0 ? ($model->count / $total) * 100 : 0.0);\n",
+    );
+
+    // Cursor inside the arrow fn body, on `$model->percentage` (line 11, col 60).
+    // Should NOT show signature help for each().
+    let result = sig_help_at(&backend, &uri, src, 11, 60).await;
+    assert!(
+        result.is_none(),
+        "Expected no signature help inside arrow fn body (no inner call), got: {:?}",
+        result,
+    );
+
+    // Cursor right after `each(` but before `fn` (line 11, col 16) — should
+    // still show signature help for each().
+    let result = sig_help_at(&backend, &uri, src, 11, 16).await;
+    assert!(
+        result.is_some(),
+        "Expected signature help for each() before the arrow fn starts",
+    );
+}

@@ -2156,3 +2156,275 @@ async fn test_goto_definition_arrow_fn_untyped_param_rhs_jumps_to_param() {
         other => panic!("Expected Scalar location, got: {:?}", other),
     }
 }
+
+// ─── Closure use() clause GTD ───────────────────────────────────────────────
+
+/// Using `$search` inside a closure body should jump to the `$search`
+/// in the `use ($search)` clause.
+#[tokio::test]
+async fn test_goto_definition_closure_use_clause_body_to_use() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///var_closure_use.php").unwrap();
+
+    // Line 0: <?php
+    // Line 1: function demo(): void {
+    // Line 2:     $search = 'hi';
+    // Line 3:     $fn = function () use ($search): void {
+    // Line 4:         echo $search;
+    // Line 5:     };
+    // Line 6: }
+    let text = concat!(
+        "<?php\n",
+        "function demo(): void {\n",
+        "    $search = 'hi';\n",
+        "    $fn = function () use ($search): void {\n",
+        "        echo $search;\n",
+        "    };\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor on `$search` in `echo $search;` (line 4, col 13)
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 4,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should resolve $search inside closure body to the use() clause"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 3,
+                "$search should jump to the use() clause on line 3"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}
+
+/// Clicking `$search` in the `use ($search)` clause should jump to the
+/// outer assignment `$search = 'hi'`.
+#[tokio::test]
+async fn test_goto_definition_closure_use_clause_to_outer_assignment() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///var_closure_use_outer.php").unwrap();
+
+    // Line 0: <?php
+    // Line 1: function demo(): void {
+    // Line 2:     $search = 'hi';
+    // Line 3:     $fn = function () use ($search): void {
+    // Line 4:         echo $search;
+    // Line 5:     };
+    // Line 6: }
+    let text = concat!(
+        "<?php\n",
+        "function demo(): void {\n",
+        "    $search = 'hi';\n",
+        "    $fn = function () use ($search): void {\n",
+        "        echo $search;\n",
+        "    };\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor on `$search` in `use ($search)` (line 3, col 28)
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 3,
+                character: 28,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should resolve $search in use() clause to the outer assignment"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 2,
+                "$search in use() should jump to the assignment on line 2"
+            );
+            assert_eq!(
+                location.range.start.character, 4,
+                "$search assignment starts at column 4"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}
+
+/// Multiple captured variables: each resolves independently.
+#[tokio::test]
+async fn test_goto_definition_closure_use_clause_multiple_captures() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///var_closure_use_multi.php").unwrap();
+
+    // Line 0: <?php
+    // Line 1: function demo(): void {
+    // Line 2:     $a = 1;
+    // Line 3:     $b = 2;
+    // Line 4:     $fn = function () use ($a, $b): void {
+    // Line 5:         echo $a;
+    // Line 6:         echo $b;
+    // Line 7:     };
+    // Line 8: }
+    let text = concat!(
+        "<?php\n",
+        "function demo(): void {\n",
+        "    $a = 1;\n",
+        "    $b = 2;\n",
+        "    $fn = function () use ($a, $b): void {\n",
+        "        echo $a;\n",
+        "        echo $b;\n",
+        "    };\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // $b inside the closure body (line 6, col 13) should jump to
+    // $b in the use() clause on line 4.
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 6,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should resolve $b inside closure body to the use() clause"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 4,
+                "$b should jump to the use() clause on line 4"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}
+
+/// A captured variable reassigned inside the closure body should jump
+/// to the reassignment, not the use() clause.
+#[tokio::test]
+async fn test_goto_definition_closure_use_clause_reassigned_inside() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///var_closure_use_reassign.php").unwrap();
+
+    // Line 0: <?php
+    // Line 1: function demo(): void {
+    // Line 2:     $x = 'outer';
+    // Line 3:     $fn = function () use ($x): void {
+    // Line 4:         $x = 'inner';
+    // Line 5:         echo $x;
+    // Line 6:     };
+    // Line 7: }
+    let text = concat!(
+        "<?php\n",
+        "function demo(): void {\n",
+        "    $x = 'outer';\n",
+        "    $fn = function () use ($x): void {\n",
+        "        $x = 'inner';\n",
+        "        echo $x;\n",
+        "    };\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // $x on line 5 should jump to the reassignment on line 4, not the use() clause.
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position: Position {
+                line: 5,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+    };
+
+    let result = backend.goto_definition(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should resolve $x to the reassignment inside the closure"
+    );
+
+    match result.unwrap() {
+        GotoDefinitionResponse::Scalar(location) => {
+            assert_eq!(location.uri, uri);
+            assert_eq!(
+                location.range.start.line, 4,
+                "$x should jump to the inner reassignment on line 4"
+            );
+        }
+        other => panic!("Expected Scalar location, got: {:?}", other),
+    }
+}
