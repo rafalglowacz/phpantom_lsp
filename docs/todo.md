@@ -17,7 +17,7 @@ with each step.
 |---|---|
 | [Type Inference](todo/type-inference.md) | Generic resolution, conditional return types, type narrowing, stub attribute handling |
 | [Completion](todo/completion.md) | Completion-specific improvements (enum return types, array shapes, expected values) |
-| [Diagnostics](todo/diagnostics.md) | `@deprecated` warnings, resolution-failure diagnostics, unused `use` dimming, suppression intelligence |
+| [Diagnostics](todo/diagnostics.md) | Scalar member access errors, chain/return member diagnostics, unknown function errors, duplicate suppression, chain error propagation, deprecated rendering, unresolved PHPDoc types, suppression intelligence, composer warnings |
 | [Code Actions](todo/actions.md) | Import class, remove unused imports, implement missing methods, null coalescing simplification, extract function, inline variable, extract variable, inline function/method, switch→match |
 | [LSP Features](todo/lsp-features.md) | Find references, document highlighting, document/workspace symbols, rename, code lens, inlay hints, PHPDoc generation, partial result streaming |
 | [Signature Help](todo/signature-help.md) | Parameter descriptions, signature-level docs, default values, attribute/closure support |
@@ -93,8 +93,8 @@ deepens that lead and rounds out the remaining feature surface.
 | 31 | `key-of<T>` and `value-of<T>` resolution | Medium | Type Inference | [type-inference.md §16](todo/type-inference.md#16-key-oft-and-value-oft-resolution) |
 | 32 | Code Lens: jump to prototype method | Low | LSP Features | [lsp-features.md §8](todo/lsp-features.md#8-code-lens-jump-to-prototype-method) |
 | 34 | Document Links (`textDocument/documentLink`) | Low | LSP Features | [lsp-features.md §15](todo/lsp-features.md#15-document-links-textdocumentdocumentlink) |
-| 35 | Resolution-failure diagnostics (unresolved function, unresolved PHPDoc type) | Medium | Diagnostics | [diagnostics.md §2](todo/diagnostics.md#2-resolution-failure-diagnostics) |
-| 36 | Warn when composer.json is missing or classmap not optimized | Medium | Diagnostics | [diagnostics.md §5](todo/diagnostics.md#5-warn-when-composerjson-is-missing-or-classmap-is-not-optimized) |
+| 35 | Resolution-failure diagnostics (unresolved function, unresolved PHPDoc type) | Medium | Diagnostics | [diagnostics.md §3, §7](todo/diagnostics.md#3-unresolved-function-diagnostic-new) |
+| 36 | Warn when composer.json is missing or classmap not optimized | Medium | Diagnostics | [diagnostics.md §9](todo/diagnostics.md#9-warn-when-composerjson-is-missing-or-classmap-is-not-optimized) |
 | 37 | File system watching for vendor and project changes | Medium | Type Inference | [type-inference.md §5](todo/type-inference.md#5-file-system-watching-for-vendor-and-project-changes) |
 | 38 | Property hooks (PHP 8.4) | Medium | Type Inference | [type-inference.md §6](todo/type-inference.md#6-property-hooks-php-84) |
 | 39 | Simplify with null coalescing / null-safe operator (code action) | Medium | Code Actions | [actions.md §2](todo/actions.md#2-simplify-with-null-coalescing--null-safe-operator) |
@@ -127,7 +127,7 @@ projects that care about types.
 | 52 | `class_alias()` support | Medium | Completion | [completion.md §8](todo/completion.md#8-class_alias-support) |
 | 53 | Attribute constructor signature help | Medium | Signature Help | [signature-help.md §4](todo/signature-help.md#4-attribute-constructor-signature-help) |
 | 54 | Closure/arrow function parameter signature help | Medium | Signature Help | [signature-help.md §5](todo/signature-help.md#5-closure--arrow-function-parameter-signature-help) |
-| 55 | Diagnostic suppression intelligence | Medium | Diagnostics | [diagnostics.md §3](todo/diagnostics.md#3-diagnostic-suppression-intelligence) |
+| 55 | Diagnostic suppression intelligence | Medium | Diagnostics | [diagnostics.md §8](todo/diagnostics.md#8-diagnostic-suppression-intelligence) |
 | 56 | Partial result streaming via `$/progress` | Medium-High | LSP Features | [lsp-features.md §6](todo/lsp-features.md#6-partial-result-streaming-via-progress) |
 
 **Note:** Item 51 (Type Hierarchy) depends on the go-to-implementation

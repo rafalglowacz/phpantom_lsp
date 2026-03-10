@@ -24,7 +24,11 @@ use super::DocblockCtx;
 impl Backend {
     /// Update the ast_map, use_map, and namespace_map for a given file URI
     /// by parsing its content.
-    pub fn update_ast(&self, uri: &str, content: &str) {
+    ///
+    /// Returns `true` when at least one class signature in this file
+    /// changed (or a class was added/removed), meaning other open files
+    /// that reference those classes may have stale diagnostics.
+    pub fn update_ast(&self, uri: &str, content: &str) -> bool {
         // The mago-syntax parser contains `unreachable!()` and `.expect()`
         // calls that can panic on malformed PHP (e.g. partially-written
         // heredocs/nowdocs, which are common while editing).  Wrap the
@@ -38,14 +42,17 @@ impl Backend {
         let uri_owned = uri.to_string();
 
         crate::util::catch_panic_unwind_safe("parse", uri, None, || {
-            self.update_ast_inner(&uri_owned, &content_owned);
-        });
+            self.update_ast_inner(&uri_owned, &content_owned)
+        })
+        .unwrap_or(false)
     }
 
     /// Inner implementation of [`update_ast`] that performs the actual
     /// parsing and map updates.  Separated so that [`update_ast`] can
     /// wrap the call in [`std::panic::catch_unwind`].
-    fn update_ast_inner(&self, uri: &str, content: &str) {
+    ///
+    /// Returns `true` when at least one class signature changed.
+    fn update_ast_inner(&self, uri: &str, content: &str) -> bool {
         let arena = Bump::new();
         let file_id = mago_database::file::FileId::new("input.php");
         let program = parse_file_content(&arena, file_id, content);
@@ -363,6 +370,7 @@ impl Backend {
         // `evict_fqn` transitively evicts dependents (classes that
         // extend/use/implement/mixin the changed class) so that
         // cached child classes don't serve stale inherited members.
+        let mut any_signature_changed = false;
         {
             let mut cache = self.resolved_class_cache.lock();
             // Collect new FQNs from the classes we just parsed.
@@ -411,6 +419,7 @@ impl Backend {
                     _ => {
                         // Signature changed or class was removed — evict.
                         crate::virtual_members::evict_fqn(&mut cache, fqn);
+                        any_signature_changed = true;
                     }
                 }
             }
@@ -419,9 +428,12 @@ impl Backend {
             for fqn in &new_fqns {
                 if !old_fqns.contains(fqn) {
                     crate::virtual_members::evict_fqn(&mut cache, fqn);
+                    any_signature_changed = true;
                 }
             }
         }
+
+        any_signature_changed
     }
 
     /// Resolve `parent_class` short names in a list of `ClassInfo` to

@@ -201,7 +201,7 @@ impl Backend {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /// A byte range `[start, end)` representing a line in the source.
-type ByteRange = (usize, usize);
+pub(crate) type ByteRange = (usize, usize);
 
 /// Compute the byte ranges of all top-level `use` statement lines.
 ///
@@ -209,7 +209,7 @@ type ByteRange = (usize, usize);
 /// Only matches lines whose trimmed content starts with `use ` and contains
 /// a `;` — this excludes trait `use` statements inside class bodies because
 /// those are indented and always occur after a `{`.
-fn compute_use_line_ranges(content: &str) -> Vec<ByteRange> {
+pub(crate) fn compute_use_line_ranges(content: &str) -> Vec<ByteRange> {
     let mut ranges = Vec::new();
     let mut offset: usize = 0;
 
@@ -225,7 +225,7 @@ fn compute_use_line_ranges(content: &str) -> Vec<ByteRange> {
 }
 
 /// Check whether a byte offset falls within any of the given ranges.
-fn is_offset_in_ranges(offset: u32, ranges: &[ByteRange]) -> bool {
+pub(crate) fn is_offset_in_ranges(offset: u32, ranges: &[ByteRange]) -> bool {
     let offset = offset as usize;
     ranges
         .iter()

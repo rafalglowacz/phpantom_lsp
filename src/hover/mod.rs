@@ -9,7 +9,7 @@
 //! powers completion.
 
 mod formatting;
-mod variable_type;
+pub(crate) mod variable_type;
 
 use tower_lsp::lsp_types::*;
 
@@ -430,7 +430,7 @@ impl Backend {
                 None
             }
 
-            SymbolKind::FunctionCall { name } => {
+            SymbolKind::FunctionCall { name, .. } => {
                 self.hover_function_call(name, &ctx, &function_loader)
             }
 

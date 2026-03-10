@@ -248,7 +248,7 @@ impl Backend {
                 None
             }
 
-            SymbolKind::FunctionCall { name } => {
+            SymbolKind::FunctionCall { name, .. } => {
                 // Build FQN candidates: the resolved name, the raw name,
                 // and (if namespaced) the namespace-qualified version.
                 let ctx = self.file_context(uri);

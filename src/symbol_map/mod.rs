@@ -82,7 +82,14 @@ pub(crate) enum SymbolKind {
     },
 
     /// Standalone function call name (not a method call).
-    FunctionCall { name: String },
+    ///
+    /// When `is_definition` is `true`, the span covers the function name
+    /// at its *declaration* site (`function foo() {}`).  When `false`, it
+    /// covers a call site (`foo()`).  The distinction is needed by the
+    /// unknown-function diagnostic (which must skip definitions) and by
+    /// find-references / document-highlight (which may want to include
+    /// both).
+    FunctionCall { name: String, is_definition: bool },
 
     /// `self`, `static`, or `parent` keyword in a navigable context.
     SelfStaticParent { keyword: String },

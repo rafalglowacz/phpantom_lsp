@@ -208,7 +208,7 @@ impl Backend {
             SymbolKind::ClassDeclaration { name } => Some((name.clone(), range)),
             SymbolKind::MemberAccess { member_name, .. } => Some((member_name.clone(), range)),
             SymbolKind::MemberDeclaration { name, .. } => Some((name.clone(), range)),
-            SymbolKind::FunctionCall { name } => Some((name.clone(), range)),
+            SymbolKind::FunctionCall { name, .. } => Some((name.clone(), range)),
             SymbolKind::ConstantReference { name } => Some((name.clone(), range)),
             SymbolKind::SelfStaticParent { .. } => None,
         }

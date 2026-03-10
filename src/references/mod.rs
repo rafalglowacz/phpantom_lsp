@@ -130,7 +130,7 @@ impl Backend {
                 is_static,
                 ..
             } => self.find_member_references(member_name, *is_static, include_declaration),
-            SymbolKind::FunctionCall { name } => {
+            SymbolKind::FunctionCall { name, .. } => {
                 let ctx = self.file_context(uri);
                 let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
                 self.find_function_references(&fqn, name, include_declaration)
@@ -602,7 +602,7 @@ impl Backend {
             };
 
             for span in &symbol_map.spans {
-                if let SymbolKind::FunctionCall { name } = &span.kind {
+                if let SymbolKind::FunctionCall { name, .. } = &span.kind {
                     // Resolve the function call name to its FQN in the
                     // context of the file where it appears.
                     let resolved = Self::resolve_to_fqn(name, &file_use_map, &file_namespace);

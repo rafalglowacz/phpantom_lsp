@@ -27,16 +27,28 @@ use std::collections::HashMap;
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
-use crate::completion::variable::resolution::resolve_variable_types;
+use crate::completion::resolver::{
+    ResolutionCtx, resolve_target_classes, resolve_target_classes_expr,
+};
+use crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type;
+use crate::docblock::type_strings::is_scalar;
+use crate::hover::variable_type::resolve_variable_type_string;
+use crate::inheritance::resolve_property_type_hint;
+use crate::subject_expr::SubjectExpr;
 use crate::symbol_map::SymbolKind;
-use crate::types::ClassInfo;
-use crate::virtual_members::resolve_class_fully_cached;
+use crate::types::{AccessKind, ClassInfo};
+use crate::virtual_members::{resolve_class_fully_cached, resolve_class_fully_maybe_cached};
 
 use super::offset_range_to_lsp_range;
 
 /// Diagnostic code used for unknown-member diagnostics so that code
 /// actions can match on it.
 pub(crate) const UNKNOWN_MEMBER_CODE: &str = "unknown_member";
+
+/// Diagnostic code used when member access is attempted on a scalar
+/// type (int, string, bool, float, null, void, never, array).  This
+/// is always a runtime crash, so the severity is `Error`.
+pub(crate) const SCALAR_MEMBER_ACCESS_CODE: &str = "scalar_member_access";
 
 impl Backend {
     /// Collect unknown-member diagnostics for a single file.
@@ -87,25 +99,164 @@ impl Backend {
                 continue;
             }
 
-            // ── Resolve the subject to one or more ClassInfo values ─────
-            // For union types (e.g. `Lamp|Faucet`) we get multiple entries.
-            // The member only needs to exist on ANY branch to suppress the
-            // diagnostic — flagging branch-specific members is PHPStan's
-            // job, not ours.
-            let resolve_ctx = SubjectResolutionCtx {
-                file_use_map: &file_use_map,
-                file_namespace: &file_namespace,
-                local_classes: &local_classes,
-                backend: self,
-                content,
-                class_loader: &class_loader,
-                function_loader: &function_loader,
+            // ── Resolve the subject using the full completion pipeline ───
+            // This handles bare variables, property chains, method call
+            // return types, static access, and all other subject forms
+            // identically to completion and go-to-definition.
+            let access_kind = if is_static {
+                AccessKind::DoubleColon
+            } else {
+                AccessKind::Arrow
             };
-            let base_classes: Vec<ClassInfo> =
-                resolve_subject_to_classes(subject_text, is_static, span.start, &resolve_ctx);
 
-            // Can't resolve subject at all — skip (no false positives).
+            let current_class = find_innermost_enclosing_class(&local_classes, span.start);
+
+            let rctx = ResolutionCtx {
+                current_class,
+                all_classes: &local_classes,
+                content,
+                cursor_offset: span.start,
+                class_loader: &class_loader,
+                resolved_class_cache: Some(cache),
+                function_loader: Some(&function_loader),
+            };
+
+            let base_classes: Vec<ClassInfo> =
+                resolve_target_classes(subject_text, access_kind, &rctx);
+
+            // ── Subject did not resolve to any class ────────────────────
+            // Three possibilities:
+            //
+            //   a) The subject is a bare untyped variable with no type
+            //      info at all (`$x` where we have no annotations or
+            //      assignments to infer from).  Skip — the opt-in
+            //      `unresolved-member-access` diagnostic covers this.
+            //
+            //   b) The subject is a chain (`$obj->prop`, `$obj->m()`)
+            //      or a typed parameter/variable whose type resolved to
+            //      a scalar or an unknown class.  The developer clearly
+            //      expects a class type here.  Emit a diagnostic.
+            //
+            //   c) The subject has a scalar type we can name (bool, int,
+            //      string, …).  Give a specific message.
             if base_classes.is_empty() {
+                let expr = SubjectExpr::parse(subject_text);
+
+                // Try to find a specific scalar type name.  This covers
+                // bare variables (`$number = 1`), property chains
+                // (`$user->age`), and call expressions (`getInt()`,
+                // `$user->getAge()`).
+                let scalar_type = resolve_scalar_subject_type(
+                    &expr,
+                    access_kind,
+                    &rctx,
+                    &class_loader,
+                    &function_loader,
+                    cache,
+                );
+
+                if let Some(ref scalar) = scalar_type {
+                    // Scalar member access — always a runtime crash.
+                    let range = match offset_range_to_lsp_range(
+                        content,
+                        span.start as usize,
+                        span.end as usize,
+                    ) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let kind_label = if is_method_call { "method" } else { "property" };
+                    let message = format!(
+                        "Cannot access {} '{}' on type '{}'",
+                        kind_label, member_name, scalar,
+                    );
+                    out.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: Some(NumberOrString::String(
+                            SCALAR_MEMBER_ACCESS_CODE.to_string(),
+                        )),
+                        code_description: None,
+                        source: Some("phpantom".to_string()),
+                        message,
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    continue;
+                }
+
+                // Not scalar — check if the subject is a variable whose
+                // raw type is a class name that can't be resolved.  This
+                // covers `@param NoteReal $value` where NoteReal doesn't
+                // exist, and `$bad = unknownReturnFn()` where the return
+                // type names an unknown class.
+                if let Some(unresolved_class) = resolve_unresolvable_class_subject(
+                    &expr,
+                    &rctx,
+                    &class_loader,
+                    &function_loader,
+                ) {
+                    let range = match offset_range_to_lsp_range(
+                        content,
+                        span.start as usize,
+                        span.end as usize,
+                    ) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let kind_label = if is_method_call { "method" } else { "property" };
+                    let message = format!(
+                        "Cannot verify {} '{}' — subject type '{}' could not be resolved",
+                        kind_label, member_name, unresolved_class,
+                    );
+                    out.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: Some(NumberOrString::String(UNKNOWN_MEMBER_CODE.to_string())),
+                        code_description: None,
+                        source: Some("phpantom".to_string()),
+                        message,
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    continue;
+                }
+
+                // Not scalar, not unknown-class — check if the subject is
+                // a chain or call expression where the type simply couldn't
+                // be resolved.
+                let is_chain = matches!(
+                    expr,
+                    SubjectExpr::PropertyChain { .. } | SubjectExpr::CallExpr { .. }
+                );
+                if is_chain {
+                    let range = match offset_range_to_lsp_range(
+                        content,
+                        span.start as usize,
+                        span.end as usize,
+                    ) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let kind_label = if is_method_call { "method" } else { "property" };
+                    let message = format!(
+                        "Cannot verify {} '{}' — subject type could not be resolved",
+                        kind_label, member_name,
+                    );
+                    out.push(Diagnostic {
+                        range,
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        code: Some(NumberOrString::String(UNKNOWN_MEMBER_CODE.to_string())),
+                        code_description: None,
+                        source: Some("phpantom".to_string()),
+                        message,
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                }
                 continue;
             }
 
@@ -278,108 +429,133 @@ fn has_magic_method_for_access(class: &ClassInfo, is_static: bool, is_method_cal
     false
 }
 
-/// Context for subject resolution, bundling the per-file state that
-/// would otherwise require many function arguments.
-struct SubjectResolutionCtx<'a> {
-    file_use_map: &'a HashMap<String, String>,
-    file_namespace: &'a Option<String>,
-    local_classes: &'a [ClassInfo],
-    backend: &'a Backend,
-    content: &'a str,
-    class_loader: &'a dyn Fn(&str) -> Option<ClassInfo>,
-    function_loader: &'a dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
-}
-
-/// Resolve a member access subject to all possible `ClassInfo` values.
+/// When `resolve_target_classes` returns empty for a chain subject, check
+/// whether the terminal type is a known scalar (bool, int, string, etc.).
 ///
-/// For non-variable subjects (`self`, `static`, `parent`, `ClassName`)
-/// this returns zero or one entries.  For `$variable` subjects it returns
-/// all branches of the union type (e.g. `Lamp|Faucet` → two entries).
-fn resolve_subject_to_classes(
-    subject_text: &str,
-    is_static: bool,
-    access_offset: u32,
-    ctx: &SubjectResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
-    let trimmed = subject_text.trim();
-
-    match trimmed {
-        "self" | "static" | "$this" => {
-            resolve_enclosing_class(ctx.local_classes, ctx.file_namespace, access_offset, ctx)
-        }
-        "parent" => {
-            // Find the innermost enclosing class that has a parent.
-            let cls =
-                find_innermost_enclosing_class(ctx.local_classes, access_offset).or_else(|| {
-                    ctx.local_classes
-                        .iter()
-                        .find(|c| !c.name.starts_with("__anonymous@"))
-                });
-            let parent_name = match cls.and_then(|c| c.parent_class.as_ref()) {
-                Some(p) => p,
-                None => return Vec::new(),
-            };
-            let fqn = resolve_to_fqn(parent_name, ctx.file_use_map, ctx.file_namespace);
-            ctx.backend.find_or_load_class(&fqn).into_iter().collect()
-        }
-        _ if is_static && !trimmed.starts_with('$') => {
-            let fqn = resolve_to_fqn(trimmed, ctx.file_use_map, ctx.file_namespace);
-            ctx.backend.find_or_load_class(&fqn).into_iter().collect()
-        }
-        _ if trimmed.starts_with('$') => {
-            // Variable subject — resolve to ALL union branches.
-            resolve_variable_subjects(
-                subject_text,
-                access_offset,
-                ctx.content,
-                ctx.local_classes,
-                ctx.class_loader,
-                ctx.function_loader,
-            )
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Resolve a `$variable` subject to all possible `ClassInfo` values
-/// using the full variable type resolution pipeline.
-///
-/// Returns all branches of the union type rather than just the first,
-/// so that diagnostics can check the member against every possibility.
-fn resolve_variable_subjects(
-    subject_text: &str,
-    access_offset: u32,
-    content: &str,
-    local_classes: &[ClassInfo],
+/// Returns `Some(type_name)` when the intermediate base resolves but the
+/// terminal property/return type is scalar.  Returns `None` when the
+/// subject is truly unresolvable.
+fn resolve_scalar_subject_type(
+    expr: &SubjectExpr,
+    access_kind: AccessKind,
+    rctx: &ResolutionCtx<'_>,
     class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
     function_loader: &dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
-) -> Vec<ClassInfo> {
-    let var_name = subject_text.trim();
+    cache: &crate::virtual_members::ResolvedClassCache,
+) -> Option<String> {
+    match expr {
+        // ── Bare variable: $number = 1; $number->foo() ──────────
+        SubjectExpr::Variable(var_name) => {
+            let raw_type = resolve_variable_assignment_raw_type(
+                var_name,
+                rctx.content,
+                rctx.cursor_offset,
+                rctx.current_class,
+                rctx.all_classes,
+                class_loader,
+                rctx.function_loader,
+            )?;
+            let cleaned = crate::docblock::types::clean_type(&raw_type);
+            if is_scalar(&cleaned) {
+                Some(cleaned)
+            } else {
+                None
+            }
+        }
 
-    // Find the innermost enclosing class based on offset ranges.
-    // Include anonymous classes so that `$var` inside `new class { … }`
-    // resolves against the anonymous class, not the outer named class.
-    let enclosing_class = find_innermost_enclosing_class(local_classes, access_offset)
-        .cloned()
-        .unwrap_or_default();
+        // ── Property chain: $user->age->value ───────────────────
+        SubjectExpr::PropertyChain { base, property } => {
+            // Resolve the base to classes, then look up the property's
+            // type hint on the resolved class.
+            let base_classes = resolve_target_classes_expr(base, access_kind, rctx);
+            for cls in &base_classes {
+                let resolved = resolve_class_fully_maybe_cached(cls, class_loader, Some(cache));
+                if let Some(hint) = resolve_property_type_hint(&resolved, property, class_loader) {
+                    // Check each union branch — if ALL branches are scalar, the
+                    // type is scalar.  If any branch is a class, resolve_target_classes
+                    // would have returned it, so we wouldn't be here.
+                    let cleaned = crate::docblock::types::clean_type(&hint);
+                    if is_scalar(&cleaned) {
+                        return Some(cleaned);
+                    }
+                    // Non-scalar, non-class type (e.g. a type alias we can't
+                    // resolve) — treat as unresolvable.
+                    return None;
+                }
+            }
+            None
+        }
 
-    resolve_variable_types(
-        var_name,
-        &enclosing_class,
-        local_classes,
-        content,
-        access_offset,
-        class_loader,
-        Some(function_loader),
-    )
+        // ── Call expression: getInt()->value, $obj->getAge()->value ──
+        SubjectExpr::CallExpr { callee, args_text } => {
+            // Resolve the call return type.  If it's a scalar, report it.
+            let return_classes = Backend::resolve_call_return_types_expr(callee, args_text, rctx);
+            if return_classes.is_empty() {
+                // Try to get the raw return type hint from the callable.
+                match callee.as_ref() {
+                    // Instance method call: $obj->getAge()
+                    SubjectExpr::MethodCall { base, method } => {
+                        let base_classes = resolve_target_classes_expr(base, access_kind, rctx);
+                        for cls in &base_classes {
+                            let resolved =
+                                resolve_class_fully_maybe_cached(cls, class_loader, Some(cache));
+                            if let Some(m) = resolved
+                                .methods
+                                .iter()
+                                .find(|m| m.name.eq_ignore_ascii_case(method))
+                                && let Some(ref hint) = m.return_type
+                            {
+                                let cleaned = crate::docblock::types::clean_type(hint);
+                                if is_scalar(&cleaned) {
+                                    return Some(cleaned);
+                                }
+                            }
+                        }
+                    }
+                    // Standalone function call: getInt()
+                    SubjectExpr::FunctionCall(fn_name) => {
+                        if let Some(func_info) = function_loader(fn_name)
+                            && let Some(ref hint) = func_info.return_type
+                        {
+                            let cleaned = crate::docblock::types::clean_type(hint);
+                            if is_scalar(&cleaned) {
+                                return Some(cleaned);
+                            }
+                        }
+                    }
+                    // Static method call: Foo::getInt()
+                    SubjectExpr::StaticMethodCall { class, method } => {
+                        let cls = class_loader(class);
+                        if let Some(cls) = cls {
+                            let resolved =
+                                resolve_class_fully_maybe_cached(&cls, class_loader, Some(cache));
+                            if let Some(m) = resolved
+                                .methods
+                                .iter()
+                                .find(|m| m.name.eq_ignore_ascii_case(method))
+                                && let Some(ref hint) = m.return_type
+                            {
+                                let cleaned = crate::docblock::types::clean_type(hint);
+                                if is_scalar(&cleaned) {
+                                    return Some(cleaned);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Find the innermost class whose body span contains `offset`.
 ///
 /// Returns a reference to the `ClassInfo` with the smallest span that
-/// encloses `offset`, including anonymous classes.  This is the single
-/// source of truth for "which class body am I in?" used by both
-/// `$this`/`self`/`static` resolution and variable subject resolution.
+/// encloses `offset`, including anonymous classes.  Used for
+/// `$this`/`self`/`static` resolution inside the completion resolver.
 fn find_innermost_enclosing_class(local_classes: &[ClassInfo], offset: u32) -> Option<&ClassInfo> {
     local_classes
         .iter()
@@ -387,79 +563,91 @@ fn find_innermost_enclosing_class(local_classes: &[ClassInfo], offset: u32) -> O
         .min_by_key(|c| c.end_offset.saturating_sub(c.start_offset))
 }
 
-/// Resolve `$this` / `self` / `static` to the enclosing class.
-///
-/// For anonymous classes the `ClassInfo` is returned directly from
-/// `local_classes` (they are never stored in the cross-file index).
-/// For named classes the FQN is constructed and loaded via
-/// `find_or_load_class` so that cross-file inheritance is resolved.
-fn resolve_enclosing_class(
-    local_classes: &[ClassInfo],
-    file_namespace: &Option<String>,
-    offset: u32,
-    ctx: &SubjectResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
-    let cls = match find_innermost_enclosing_class(local_classes, offset)
-        // Fallback: first non-anonymous class (top-level code).
-        .or_else(|| {
-            local_classes
-                .iter()
-                .find(|c| !c.name.starts_with("__anonymous@"))
-        }) {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-
-    // Anonymous classes are file-local — return the local ClassInfo
-    // directly since they are not registered in the cross-file index.
-    if cls.name.starts_with("__anonymous@") {
-        return vec![cls.clone()];
-    }
-
-    let fqn = if let Some(ns) = file_namespace {
-        format!("{}\\{}", ns, cls.name)
-    } else {
-        cls.name.clone()
-    };
-    ctx.backend.find_or_load_class(&fqn).into_iter().collect()
-}
-
-/// Resolve an unqualified/qualified class name to a fully-qualified name
-/// using the use map and namespace context.
-fn resolve_to_fqn(
-    name: &str,
-    use_map: &HashMap<String, String>,
-    namespace: &Option<String>,
-) -> String {
-    if let Some(stripped) = name.strip_prefix('\\') {
-        return stripped.to_string();
-    }
-
-    if !name.contains('\\') {
-        if let Some(fqn) = use_map.get(name) {
-            return fqn.clone();
-        }
-        if let Some(ns) = namespace {
-            return format!("{}\\{}", ns, name);
-        }
-        return name.to_string();
-    }
-
-    let first_segment = name.split('\\').next().unwrap_or(name);
-    if let Some(fqn_prefix) = use_map.get(first_segment) {
-        let rest = &name[first_segment.len()..];
-        return format!("{}{}", fqn_prefix, rest);
-    }
-    if let Some(ns) = namespace {
-        return format!("{}\\{}", ns, name);
-    }
-    name.to_string()
-}
-
 /// Return a user-friendly display name for a class.
 ///
 /// Prefers the short name for readability. For anonymous classes, returns
 /// the full internal name.
+/// When the subject is a variable (or a call whose return type names a
+/// class), check whether the raw type is a non-scalar, non-mixed class
+/// name that cannot be resolved.  Returns `Some(class_name)` when the
+/// subject type is an unresolvable class, `None` otherwise.
+///
+/// This lets us emit a warning-level "subject type 'X' could not be
+/// resolved" instead of silently dropping the diagnostic or emitting a
+/// hint-level unresolved-member-access.
+fn resolve_unresolvable_class_subject(
+    expr: &SubjectExpr,
+    rctx: &ResolutionCtx<'_>,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    function_loader: &dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
+) -> Option<String> {
+    let raw_type = match expr {
+        SubjectExpr::Variable(var_name) => {
+            // Try assignment-based raw type first (covers `$x = new Foo`
+            // and native parameter type hints like `int $x`).
+            let assignment_type = resolve_variable_assignment_raw_type(
+                var_name,
+                rctx.content,
+                rctx.cursor_offset,
+                rctx.current_class,
+                rctx.all_classes,
+                class_loader,
+                rctx.function_loader,
+            );
+            // Fall back to the hover variable type resolver which also
+            // checks PHPDoc `@param` annotations and foreach bindings.
+            assignment_type.or_else(|| {
+                resolve_variable_type_string(
+                    var_name,
+                    rctx.content,
+                    rctx.cursor_offset,
+                    rctx.current_class,
+                    rctx.all_classes,
+                    class_loader,
+                    rctx.function_loader,
+                )
+            })
+        }
+        SubjectExpr::CallExpr { callee, .. } => match callee.as_ref() {
+            SubjectExpr::FunctionCall(fn_name) => {
+                let fi = function_loader(fn_name)?;
+                fi.return_type.clone()
+            }
+            _ => None,
+        },
+        _ => None,
+    }?;
+
+    let cleaned = crate::docblock::types::clean_type(&raw_type);
+
+    // Skip scalars, mixed, void, never, array, callable, object, null,
+    // resource, iterable — these are not class names.
+    if is_scalar(&cleaned)
+        || matches!(
+            cleaned.as_str(),
+            "mixed"
+                | "void"
+                | "never"
+                | "array"
+                | "callable"
+                | "object"
+                | "null"
+                | "resource"
+                | "iterable"
+        )
+    {
+        return None;
+    }
+
+    // The cleaned type looks like a class name.  If we can't resolve it,
+    // the subject type is an unknown class.
+    if class_loader(&cleaned).is_none() {
+        Some(cleaned)
+    } else {
+        None
+    }
+}
+
 fn display_class_name(class: &ClassInfo) -> String {
     if class.name.starts_with("__anonymous@") {
         return "anonymous class".to_string();
@@ -476,6 +664,7 @@ fn display_class_name(class: &ClassInfo) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::SCALAR_MEMBER_ACCESS_CODE;
     use super::*;
 
     fn collect(backend: &Backend, uri: &str, content: &str) -> Vec<Diagnostic> {
@@ -1841,6 +2030,642 @@ function runTest(): void {
             diags.is_empty(),
             "No diagnostics expected for @property/@method after instanceof narrowing, got: {:?}",
             diags
+        );
+    }
+
+    /// When accessing a member on a property chain like `$obj->prop->member`,
+    /// the diagnostic should resolve the intermediate property type and
+    /// flag unknown members on it.  Previously the ad-hoc subject resolver
+    /// could not handle chains and silently skipped the diagnostic.
+    #[test]
+    fn flags_unknown_member_on_property_chain() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Inner {
+    public string $valid = '';
+}
+class Outer {
+    public Inner $inner;
+}
+function test(): void {
+    $obj = new Outer();
+    $obj->inner->valid;
+    $obj->inner->bogus;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("bogus"),
+            "Diagnostic should mention 'bogus', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("Inner"),
+            "Diagnostic should mention 'Inner', got: {}",
+            diags[0].message,
+        );
+    }
+
+    /// No diagnostic when the chained member actually exists.
+    #[test]
+    fn no_diagnostic_for_valid_property_chain() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Inner {
+    public string $value = '';
+    public function greet(): string { return ''; }
+}
+class Outer {
+    public Inner $inner;
+}
+function test(): void {
+    $obj = new Outer();
+    $obj->inner->value;
+    $obj->inner->greet();
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.is_empty(),
+            "No diagnostics expected for valid property chain, got: {:?}",
+            diags,
+        );
+    }
+
+    /// Unknown member on a method call return chain: `$obj->getInner()->bogus`.
+    #[test]
+    fn flags_unknown_member_on_method_return_chain() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Inner {
+    public string $value = '';
+}
+class Outer {
+    public function getInner(): Inner { return new Inner(); }
+}
+function test(): void {
+    $obj = new Outer();
+    $obj->getInner()->value;
+    $obj->getInner()->nope;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("nope"),
+            "Diagnostic should mention 'nope', got: {}",
+            diags[0].message,
+        );
+    }
+
+    /// No diagnostic when method return chain member exists.
+    #[test]
+    fn no_diagnostic_for_valid_method_return_chain() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Inner {
+    public string $value = '';
+}
+class Outer {
+    public function getInner(): Inner { return new Inner(); }
+}
+function test(): void {
+    $obj = new Outer();
+    $obj->getInner()->value;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.is_empty(),
+            "No diagnostics expected for valid method return chain, got: {:?}",
+            diags,
+        );
+    }
+
+    /// Property chain with a virtual (@property) member as the
+    /// intermediate step — the resolved type of the virtual property
+    /// should be used to check the final member.
+    #[test]
+    fn flags_unknown_member_on_virtual_property_chain() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Related {
+    public string $name = '';
+}
+/**
+ * @property Related $relation
+ */
+class Model {
+    public function __get(string $name): mixed { return null; }
+}
+function test(): void {
+    $m = new Model();
+    $m->relation->name;
+    $m->relation->nonexistent;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("nonexistent"),
+            "Diagnostic should mention 'nonexistent', got: {}",
+            diags[0].message,
+        );
+    }
+
+    /// When an intermediate property has a scalar type (bool), accessing
+    /// a member on it should produce a diagnostic.  This is the exact
+    /// pattern from the bug report: `$brandTranslation->lang_code->value`
+    /// where `lang_code` has type `bool`.
+    #[test]
+    fn flags_member_access_on_scalar_property_type() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class BrandTranslation {
+    /** @var bool */
+    public $lang_code;
+}
+function test(): void {
+    $bt = new BrandTranslation();
+    $bt->lang_code->value;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("value"),
+            "Diagnostic should mention 'value', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("bool"),
+            "Diagnostic should mention 'bool', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(
+                SCALAR_MEMBER_ACCESS_CODE.to_string()
+            )),
+            "Scalar member access should use scalar_member_access code",
+        );
+    }
+
+    /// Member access on a string property should also produce a diagnostic.
+    #[test]
+    fn flags_member_access_on_string_property_type() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class User {
+    public string $name = '';
+}
+function test(): void {
+    $u = new User();
+    $u->name->length;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("length"),
+            "Diagnostic should mention 'length', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("string"),
+            "Diagnostic should mention 'string', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(
+                SCALAR_MEMBER_ACCESS_CODE.to_string()
+            )),
+            "Scalar member access should use scalar_member_access code",
+        );
+    }
+
+    /// Member access on a scalar return type from a method call chain
+    /// should produce a diagnostic: `$obj->getInt()->value`.
+    #[test]
+    fn flags_member_access_on_scalar_method_return() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Counter {
+    public function getCount(): int { return 0; }
+}
+function test(): void {
+    $c = new Counter();
+    $c->getCount()->value;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("value"),
+            "Diagnostic should mention 'value', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("int"),
+            "Diagnostic should mention 'int', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(
+                SCALAR_MEMBER_ACCESS_CODE.to_string()
+            )),
+            "Scalar member access should use scalar_member_access code",
+        );
+    }
+
+    /// Member access on a virtual (@property) scalar type should also
+    /// produce a diagnostic.
+    #[test]
+    fn flags_member_access_on_virtual_scalar_property() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+/**
+ * @property bool $active
+ */
+class Model {
+    public function __get(string $name): mixed { return null; }
+}
+function test(): void {
+    $m = new Model();
+    $m->active->something;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("something"),
+            "Diagnostic should mention 'something', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("bool"),
+            "Diagnostic should mention 'bool', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(
+                SCALAR_MEMBER_ACCESS_CODE.to_string()
+            )),
+            "Scalar member access should use scalar_member_access code",
+        );
+    }
+
+    /// No diagnostic when a scalar property is accessed without chaining
+    /// into a member (the scalar property access itself is valid).
+    #[test]
+    fn no_diagnostic_for_scalar_property_access_itself() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class BrandTranslation {
+    /** @var bool */
+    public $lang_code;
+}
+function test(): void {
+    $bt = new BrandTranslation();
+    $bt->lang_code;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.is_empty(),
+            "No diagnostics expected for accessing a scalar property itself, got: {:?}",
+            diags,
+        );
+    }
+
+    // ── Bare variable scalar member access ──────────────────────────────
+
+    /// `$number = 1; $number->callHome()` — int has no members, this
+    /// is always a runtime crash.
+    #[test]
+    fn flags_member_access_on_bare_int_variable() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+function test(): void {
+    $number = 1;
+    $number->callHome();
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("callHome"),
+            "Diagnostic should mention 'callHome', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("int"),
+            "Diagnostic should mention 'int', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(
+                SCALAR_MEMBER_ACCESS_CODE.to_string()
+            )),
+            "Scalar member access should use scalar_member_access code",
+        );
+    }
+
+    /// `$text = 'hello'; $text->length` — string property access.
+    #[test]
+    fn flags_property_access_on_bare_string_variable() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+function test(): void {
+    $text = 'hello';
+    $text->length;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("length"),
+            "Diagnostic should mention 'length', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("string"),
+            "Diagnostic should mention 'string', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+    }
+
+    /// `$flag = true; $flag->isSet()` — bool method access.
+    #[test]
+    fn flags_method_access_on_bare_bool_variable() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+function test(): void {
+    $flag = true;
+    $flag->isSet();
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("isSet"),
+            "Diagnostic should mention 'isSet', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("bool"),
+            "Diagnostic should mention 'bool', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+    }
+
+    // ── Function-return scalar member access ────────────────────────────
+
+    /// `getInt()->value` — standalone function returning a scalar.
+    #[test]
+    fn flags_member_access_on_scalar_function_return() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+/** @return int */
+function getInt(): int { return 1; }
+function test(): void {
+    getInt()->value;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("value"),
+            "Diagnostic should mention 'value', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("int"),
+            "Diagnostic should mention 'int', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(
+                SCALAR_MEMBER_ACCESS_CODE.to_string()
+            )),
+            "Scalar member access should use scalar_member_access code",
+        );
+    }
+
+    /// `$count->getCount()->value` — method call chain ending in scalar
+    /// return, then member access on that scalar.
+    #[test]
+    fn flags_member_access_on_scalar_method_return_via_variable() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+class Counter {
+    public function getCount(): int { return 0; }
+}
+function test(): void {
+    $count = new Counter();
+    $count->getCount()->value;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("value"),
+            "Diagnostic should mention 'value', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("int"),
+            "Diagnostic should mention 'int', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+    }
+
+    /// No false positive: `$number = 1; $number` used without member
+    /// access should produce zero diagnostics.
+    #[test]
+    fn no_diagnostic_for_bare_scalar_variable_without_member_access() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+function test(): int {
+    $number = 1;
+    return $number;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.is_empty(),
+            "No diagnostics expected for scalar variable without member access, got: {:?}",
+            diags,
+        );
+    }
+
+    /// Scalar via typed parameter: `function f(int $x) { $x->foo(); }`
+    #[test]
+    fn flags_member_access_on_scalar_typed_parameter() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+function test(int $x): void {
+    $x->foo();
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("foo"),
+            "Diagnostic should mention 'foo', got: {}",
+            diags[0].message,
+        );
+        assert!(
+            diags[0].message.contains("int"),
+            "Diagnostic should mention 'int', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::ERROR),
+            "Scalar member access should be ERROR severity",
+        );
+    }
+
+    // ── Unknown-class subject diagnostics ───────────────────────────────
+
+    /// `@param NoteReal $value` where NoteReal doesn't exist — member
+    /// access on `$value` should produce a warning mentioning the
+    /// unresolvable class name.
+    #[test]
+    fn flags_member_access_on_unknown_class_parameter() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+/** @param NoteReal $value */
+function helper($value): void {
+    $value->something;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert_eq!(diags.len(), 1, "Expected 1 diagnostic, got: {:?}", diags);
+        assert!(
+            diags[0].message.contains("NoteReal"),
+            "Diagnostic should mention 'NoteReal', got: {}",
+            diags[0].message,
+        );
+        assert_eq!(
+            diags[0].severity,
+            Some(DiagnosticSeverity::WARNING),
+            "Unknown-class subject should be WARNING severity",
+        );
+        assert_eq!(
+            diags[0].code,
+            Some(NumberOrString::String(UNKNOWN_MEMBER_CODE.to_string())),
+            "Unknown-class subject should use unknown_member code",
+        );
+    }
+
+    /// Function whose return type is an unknown class — member access
+    /// on the result should produce a warning.
+    #[test]
+    fn flags_member_access_on_unknown_return_type_function() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+/** @return Nope */
+function getUnknown(): Nope {}
+function test(): void {
+    getUnknown()->doStuff();
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.iter().any(|d| d.message.contains("Nope")),
+            "Expected a diagnostic mentioning 'Nope', got: {:?}",
+            diags,
+        );
+    }
+
+    /// When the parameter type is `mixed`, no unknown-class diagnostic
+    /// should fire (mixed is not a class name).
+    #[test]
+    fn no_unknown_class_diagnostic_for_mixed_parameter() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+function helper(mixed $value): void {
+    $value->something;
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.is_empty(),
+            "No diagnostics expected for mixed parameter member access, got: {:?}",
+            diags,
         );
     }
 }

@@ -105,7 +105,7 @@ impl Backend {
                     }
                 }
 
-                SymbolKind::FunctionCall { name } => {
+                SymbolKind::FunctionCall { name, .. } => {
                     // In rare cases a use alias might match a function call
                     // pattern (e.g. `use function` — but we don't track those
                     // in the use_map currently).  Still check the first segment.

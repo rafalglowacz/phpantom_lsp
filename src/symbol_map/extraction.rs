@@ -905,7 +905,10 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
     ctx.spans.push(SymbolSpan {
         start: func.name.span.start.offset,
         end: func.name.span.end.offset,
-        kind: SymbolKind::FunctionCall { name },
+        kind: SymbolKind::FunctionCall {
+            name,
+            is_definition: true,
+        },
     });
 
     // Docblock.
@@ -1225,7 +1228,10 @@ fn extract_from_expression<'a>(
                         ctx.spans.push(SymbolSpan {
                             start: ident.span().start.offset,
                             end: ident.span().end.offset,
-                            kind: SymbolKind::FunctionCall { name: name_clean },
+                            kind: SymbolKind::FunctionCall {
+                                name: name_clean,
+                                is_definition: false,
+                            },
                         });
                     }
                     _ => {
@@ -1804,7 +1810,10 @@ fn extract_from_expression<'a>(
                     ctx.spans.push(SymbolSpan {
                         start: ident.span().start.offset,
                         end: ident.span().end.offset,
-                        kind: SymbolKind::FunctionCall { name: name_clean },
+                        kind: SymbolKind::FunctionCall {
+                            name: name_clean,
+                            is_definition: false,
+                        },
                     });
                 }
                 _ => {

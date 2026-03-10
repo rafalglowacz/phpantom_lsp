@@ -225,12 +225,20 @@ impl LanguageServer for Backend {
                 .insert(uri.clone(), Arc::clone(&text));
 
             // Re-parse and update AST map, use map, and namespace map
-            self.update_ast(&uri, &text);
+            let signature_changed = self.update_ast(&uri, &text);
 
             // Schedule diagnostics in a background task with debouncing.
             // This returns immediately so that completion, hover, and
             // signature help are never blocked by diagnostic computation.
-            self.schedule_diagnostics(uri);
+            self.schedule_diagnostics(uri.clone());
+
+            // When a class signature changed (method/property added,
+            // removed, or modified; class renamed; parent changed; etc.)
+            // other open files may have stale diagnostics that reference
+            // the affected classes.  Queue them all for a re-check.
+            if signature_changed {
+                self.schedule_diagnostics_for_open_files(&uri);
+            }
         }
     }
 

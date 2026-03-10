@@ -327,7 +327,7 @@ impl Backend {
     /// [`SubjectExpr::StaticMethodCall`], [`SubjectExpr::FunctionCall`],
     /// [`SubjectExpr::Variable`], or [`SubjectExpr::NewExpr`].
     /// Any other variant falls through to `resolve_target_classes_expr`.
-    pub(super) fn resolve_call_return_types_expr(
+    pub(crate) fn resolve_call_return_types_expr(
         callee: &SubjectExpr,
         text_args: &str,
         ctx: &ResolutionCtx<'_>,

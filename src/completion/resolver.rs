@@ -165,7 +165,7 @@ pub(crate) fn resolve_target_classes(
 
 /// Core dispatch for [`resolve_target_classes`], operating on a
 /// pre-parsed [`SubjectExpr`].
-pub(in crate::completion) fn resolve_target_classes_expr(
+pub(crate) fn resolve_target_classes_expr(
     expr: &SubjectExpr,
     access_kind: AccessKind,
     ctx: &ResolutionCtx<'_>,

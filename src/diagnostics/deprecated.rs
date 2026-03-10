@@ -225,7 +225,7 @@ impl Backend {
                 }
 
                 // ── Standalone function calls ────────────────────────────
-                SymbolKind::FunctionCall { name } => {
+                SymbolKind::FunctionCall { name, .. } => {
                     if let Some(func_info) =
                         self.resolve_function_name(name, &file_use_map, &file_namespace)
                         && let Some(msg) = &func_info.deprecation_message

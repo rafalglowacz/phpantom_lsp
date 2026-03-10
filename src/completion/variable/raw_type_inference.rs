@@ -296,6 +296,15 @@ fn find_variable_assignment_raw_type<'b>(
                 let body_start = func.body.left_brace.start.offset;
                 let body_end = func.body.right_brace.end.offset;
                 if ctx.cursor_offset >= body_start && ctx.cursor_offset <= body_end {
+                    // Check parameter type hints first — `function f(int $x)`
+                    // means `$x` has raw type `int` even without an assignment.
+                    for param in func.parameter_list.parameters.iter() {
+                        if param.variable.name == ctx.var_name
+                            && let Some(ref hint) = param.hint
+                        {
+                            return Some(crate::parser::extract_hint_string(hint));
+                        }
+                    }
                     return scan_statements_for_assignment_raw_type(
                         func.body.statements.iter(),
                         ctx,
@@ -764,6 +773,12 @@ fn accumulate_if_branch_at_cursor(
 /// property access, delegates to [`extract_rhs_iterable_raw_type`].
 fn resolve_rhs_raw_type<'b>(rhs: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>) -> Option<String> {
     match rhs {
+        // ── Scalar literals: `1`, `'hello'`, `true`, `null` ──
+        Expression::Literal(Literal::Integer(_)) => Some("int".to_string()),
+        Expression::Literal(Literal::Float(_)) => Some("float".to_string()),
+        Expression::Literal(Literal::String(_)) => Some("string".to_string()),
+        Expression::Literal(Literal::True(_) | Literal::False(_)) => Some("bool".to_string()),
+        Expression::Literal(Literal::Null(_)) => Some("null".to_string()),
         // ── Array literal: `[new Foo(), new Bar()]` → `list<Foo|Bar>` ──
         Expression::Array(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx),
         Expression::LegacyArray(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx),

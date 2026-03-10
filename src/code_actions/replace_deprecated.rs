@@ -77,7 +77,7 @@ impl Backend {
             }
 
             match &span.kind {
-                SymbolKind::FunctionCall { name } => {
+                SymbolKind::FunctionCall { name, .. } => {
                     let func_info =
                         match self.resolve_function_name(name, &file_use_map, &file_namespace) {
                             Some(f) => f,

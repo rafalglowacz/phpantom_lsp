@@ -227,7 +227,7 @@ fn function_call_produces_function_call_span() {
     let offset = php.find("strlen").unwrap() as u32;
     let hit = map.lookup(offset);
     assert!(hit.is_some());
-    if let SymbolKind::FunctionCall { ref name } = hit.unwrap().kind {
+    if let SymbolKind::FunctionCall { ref name, .. } = hit.unwrap().kind {
         assert_eq!(name, "strlen");
     } else {
         panic!("Expected FunctionCall, got {:?}", hit.unwrap().kind);
@@ -2542,7 +2542,7 @@ fn first_class_callable_function_produces_function_call() {
     let strlen_offset = php.find("strlen").unwrap() as u32;
     let hit = map.lookup(strlen_offset);
     assert!(hit.is_some(), "Should find strlen in first-class callable");
-    if let SymbolKind::FunctionCall { ref name } = hit.unwrap().kind {
+    if let SymbolKind::FunctionCall { ref name, .. } = hit.unwrap().kind {
         assert_eq!(name, "strlen");
     } else {
         panic!(

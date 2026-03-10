@@ -288,7 +288,7 @@ pub struct Backend {
     /// during `initialized` (which receives `&self`, not `&mut self`).
     pub(crate) php_version: Mutex<types::PhpVersion>,
     // NOTE: php_version, vendor_uri_prefixes, vendor_dir_paths, config,
-    // and diag_pending_uri use parking_lot::Mutex (not RwLock) because
+    // and diag_pending_uris use parking_lot::Mutex (not RwLock) because
     // they are rarely accessed or always written.
     /// `file://` URI prefixes for all known vendor directories, used to
     /// skip diagnostics, find references, and rename for vendor files.
@@ -323,14 +323,15 @@ pub struct Backend {
     /// `notify_one()` after bumping `diag_version`; the worker awaits
     /// `notified()` in its main loop.
     pub(crate) diag_notify: Arc<tokio::sync::Notify>,
-    /// The file URI that needs a diagnostic pass, set by
+    /// File URIs that need a diagnostic pass, set by
     /// [`schedule_diagnostics`](Self::schedule_diagnostics) and consumed
-    /// by the diagnostic worker.  Only the most recent URI is kept;
-    /// earlier requests are superseded.
+    /// by the diagnostic worker.  When a class signature changes, all
+    /// open files are queued so that cross-file diagnostics (unknown
+    /// member, unknown class, deprecated usage) are refreshed.
     ///
     /// Wrapped in `Arc` so the diagnostic worker task (spawned during
     /// `initialized`) shares the same slot as the main `Backend`.
-    pub(crate) diag_pending_uri: Arc<Mutex<Option<String>>>,
+    pub(crate) diag_pending_uris: Arc<Mutex<Vec<String>>>,
     // NOTE: resolved_class_cache uses parking_lot::Mutex because it is
     // frequently written (cache stores) and RwLock read→write upgrades
     // are error-prone.
@@ -379,7 +380,7 @@ impl Backend {
             php_version: Mutex::new(types::PhpVersion::default()),
             diag_version: Arc::new(AtomicU64::new(0)),
             diag_notify: Arc::new(tokio::sync::Notify::new()),
-            diag_pending_uri: Arc::new(Mutex::new(None)),
+            diag_pending_uris: Arc::new(Mutex::new(Vec::new())),
             config: Mutex::new(config::Config::default()),
         }
     }
@@ -550,7 +551,7 @@ impl Backend {
             vendor_dir_paths: Mutex::new(self.vendor_dir_paths.lock().clone()),
             diag_version: Arc::clone(&self.diag_version),
             diag_notify: Arc::clone(&self.diag_notify),
-            diag_pending_uri: Arc::clone(&self.diag_pending_uri),
+            diag_pending_uris: Arc::clone(&self.diag_pending_uris),
             config: Mutex::new(self.config.lock().clone()),
         }
     }

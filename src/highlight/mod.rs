@@ -82,7 +82,9 @@ impl Backend {
             SymbolKind::MemberDeclaration { name, .. } => {
                 self.highlight_member_name(symbol_map, content, name)
             }
-            SymbolKind::FunctionCall { name } => self.highlight_function(symbol_map, content, name),
+            SymbolKind::FunctionCall { name, .. } => {
+                self.highlight_function(symbol_map, content, name)
+            }
             SymbolKind::ConstantReference { name } => {
                 self.highlight_constant(symbol_map, content, name)
             }
@@ -300,7 +302,7 @@ impl Backend {
         let mut highlights = Vec::new();
 
         for span in &symbol_map.spans {
-            if let SymbolKind::FunctionCall { name } = &span.kind
+            if let SymbolKind::FunctionCall { name, .. } = &span.kind
                 && name == target_name
             {
                 highlights.push(DocumentHighlight {
