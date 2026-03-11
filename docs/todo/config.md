@@ -26,9 +26,6 @@ Per-project configuration file for user preferences and optional features like d
 # Generate a minimal composer.json when the project has none.
 # generate = true
 
-# Add "optimize-autoload": true to composer.json config.
-# optimize-autoload = true
-
 [stubs]
 # Install phpstorm-stubs into the project for projects without Composer.
 # install = true
@@ -67,10 +64,9 @@ When unset, PHPantom reads the PHP version from `composer.json` (`config.platfor
 
 These fields are written by PHPantom when the user responds to a prompt. They can also be set by hand.
 
-| Key                  | Type | Default | Description                                             |
-|----------------------|------|---------|---------------------------------------------------------|
-| `generate`           | bool | unset   | Whether to generate a minimal `composer.json` if missing |
-| `optimize-autoload`  | bool | unset   | Whether to add optimize-autoload to `composer.json`      |
+| Key        | Type | Default | Description                                             |
+|------------|------|---------|---------------------------------------------------------|
+| `generate` | bool | unset   | Whether to generate a minimal `composer.json` if missing |
 
 When a key is unset, PHPantom will prompt the user. Once the user answers, PHPantom writes the value so the prompt does not appear again.
 

@@ -232,6 +232,31 @@ regardless of how the change was received. The saving is purely in
 the data transferred over the IPC channel. For files under ~1000
 lines this is negligible.
 
+### User-visible impact
+
+Most editors (VS Code, Zed, Neovim) handle full sync gracefully and
+users will not notice a difference on typical files. The impact
+becomes noticeable in two scenarios:
+
+1. **Very large files (5000+ lines).** Legacy PHP files, generated
+   code, and test fixtures can exceed 200 KB. On every keystroke the
+   editor serializes the entire buffer and sends it over the IPC
+   channel. With incremental sync, only the changed range (typically
+   a few bytes) is sent.
+
+2. **Remote / high-latency connections.** When the editor and
+   language server communicate over a network (e.g. VS Code Remote,
+   SSH tunnels), the per-keystroke payload matters more. Full sync
+   sends orders of magnitude more data than incremental.
+
+For the common case (local editing, files under 2000 lines), full
+sync adds roughly 0.1–0.5 ms per keystroke of serialization overhead.
+This is well within the editor's debounce window and imperceptible.
+
+Intelephense uses incremental sync by default. Users switching from
+Intelephense are unlikely to notice the difference unless they
+regularly edit very large PHP files.
+
 This item is already tracked in [lsp-features.md §17](lsp-features.md#17-incremental-text-sync)
 and is included here for completeness. The effort and implementation
 plan are unchanged. It is the lowest-priority performance item

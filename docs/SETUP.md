@@ -26,9 +26,6 @@ cargo build --release
 
 PHPantom works with any PHP project. It reads `composer.json` when present to discover autoload directories and vendor packages, and falls back to scanning the workspace when not present.
 
-> [!TIP]
-> Running `composer dump-autoload -o` is optional but gives PHPantom a pre-built classmap, making startup almost instant.
-
 ## Configuration
 
 PHPantom supports an optional per-project configuration file for settings like PHP version overrides and diagnostic toggles.

@@ -284,8 +284,8 @@ find_or_load_class("Iterator")
 │   Direct hash lookup in the classmap parsed from
 │   vendor/composer/autoload_classmap.php.  More targeted than PSR-4
 │   and covers classes that don't follow PSR-4 conventions.  When the
-│   user runs `composer dump-autoload -o`, *all* classes (including
-│   vendor) end up in the classmap, giving complete coverage.
+│   classmap is complete, all classes (including vendor) are resolved
+│   here without further searching.
 │   ↓ miss
 │
 ├── Phase 2: PSR-4 resolution
@@ -634,7 +634,7 @@ find_implementors("Cacheable", "App\\Contracts\\Cacheable")
 │   Skips files already covered by the classmap (Phase 3) or ast_map.
 │   Reads raw source, applies the same string pre-filter.
 │   Matching files are parsed via parse_and_cache_file.
-│   Discovers classes in projects without `composer dump-autoload -o`.
+│   Discovers classes missing from the classmap.
 │   ↓ done
 │
 └── Vec<ClassInfo> (concrete implementors only)
@@ -644,7 +644,7 @@ find_implementors("Cacheable", "App\\Contracts\\Cacheable")
 
 Phase 5 walks PSR-4 roots from `composer.json` (`autoload` and `autoload-dev`). Since PSR-4 mappings are sourced exclusively from the project's own `composer.json` (vendor PSR-4 is not loaded), Phase 5 inherently only discovers classes in the user's own source directories (e.g. `src/`, `app/`, `tests/`). Vendor dependencies are fully covered by the classmap (Phase 3).
 
-Phase 5 exists to catch newly-created or not-yet-indexed user classes that are missing from the classmap (e.g. the user hasn't run `composer dump-autoload -o`).
+Phase 5 exists to catch newly-created or not-yet-indexed user classes that are missing from the classmap.
 
 Note: `collect_php_files` still receives the vendor dir name because a fallback mapping like `"" => "."` resolves to the workspace root, where the walk must skip the vendor directory (and hidden directories like `.git`).
 

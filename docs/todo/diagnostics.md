@@ -201,81 +201,7 @@ with suppression for our own diagnostics.
 
 ---
 
-## 7. Warn when composer.json is missing or classmap is not optimized
-**Impact: High · Effort: Medium**
-
-PHPantom relies on Composer artifacts (`vendor/composer/autoload_classmap.php`,
-`autoload_psr4.php`, `autoload_files.php`) for class discovery. When these
-are missing or incomplete, completions silently degrade. The user should be
-told what's wrong and offered help fixing it.
-
-### Detection (during `initialized`)
-
-| Condition | Severity | Message |
-|---|---|---|
-| No `composer.json` in workspace root | Warning | "No composer.json found. Class completions will be limited to open files and stubs." |
-| `composer.json` exists but `vendor/` directory is missing | Warning | "No vendor directory found. Run `composer install` to enable full completions." |
-| PSR-4 prefixes exist but no user classes in classmap | Info | "Composer classmap does not contain your project classes. Run `composer dump-autoload -o` for full class completions." |
-
-For the no-composer.json case, offer to generate a minimal one via
-`window/showMessageRequest`:
-
-1. **"Generate composer.json"** -- create a `composer.json` that maps
-   the entire project root as a classmap (`"autoload": {"classmap": ["./"]}`).
-   Then run `composer dump-autoload -o` to build the classmap. This
-   covers legacy projects and single-directory setups that don't follow
-   PSR-4 conventions.
-2. **"Dismiss"** -- do nothing.
-
-The third condition needs care. The classmap is rarely empty because
-vendor packages like PHPUnit use `classmap` autoloading (not PSR-4), so
-there will be vendor entries even without `-o`. The real signal is:
-the project's `composer.json` declares PSR-4 prefixes (e.g. `App\`,
-`Tests\`), but none of the classmap FQNs start with any of those
-project prefixes. This means the user's own classes were not dumped
-into the classmap, which is exactly what `-o` fixes.
-
-Detection logic:
-1. Collect non-vendor PSR-4 prefixes from `psr4_mappings` (already
-   tagged with `is_vendor`).
-2. After loading the classmap, check whether any classmap FQN starts
-   with one of those prefixes.
-3. If there are project PSR-4 prefixes but zero matching classmap
-   entries, the autoloader is not optimized.
-
-### Actions (via `window/showMessageRequest`)
-
-For the non-optimized classmap case, offer action buttons:
-
-1. **"Run composer dump-autoload -o"** -- spawn the command in the
-   workspace root, reload the classmap on success, show a progress
-   notification.
-2. **"Add to composer.json & run"** -- add
-   `"config": {"optimize-autoloader": true}` to `composer.json` so
-   future `composer install` / `composer update` always produce an
-   optimized classmap, then run `composer dump-autoload`.
-3. **"Dismiss"** -- do nothing.
-
-### UX guidelines
-
-- The no-composer.json and no-vendor warnings are safe to show via
-  `window/showMessage` (informational, no action taken).
-- The classmap warning should use `window/showMessageRequest` with
-  action buttons so the user explicitly opts in before we touch files
-  or run commands.
-- Only show once per session. Do not re-trigger on every `didOpen`.
-- Never modify `composer.json` or run commands without explicit user
-  confirmation via an action button.
-- If the spawned `composer` command fails (e.g. PHP not installed
-  locally, Docker-only setup), catch the error gracefully and show
-  "Composer command failed. You may need to run it manually."
-- Log the detection result to the output panel regardless (already done
-  for the "Loaded N classmap entries" message, just add context when
-  zero user classes are found).
-
----
-
-## 8. Argument count diagnostic
+## 7. Argument count diagnostic
 **Impact: Medium · Effort: Low**
 
 Flag function and method calls that pass too few or too many arguments.
@@ -329,7 +255,7 @@ making the diagnostic a cheap canary for resolution correctness.
 
 ---
 
-## 9. Unreachable code diagnostic
+## 8. Unreachable code diagnostic
 **Impact: Low-Medium · Effort: Low**
 
 Dim code that appears after unconditional control flow exits:
@@ -371,7 +297,7 @@ the call becomes visible, signalling the bug.
 
 ---
 
-## 10. Implementation error diagnostic
+## 9. Implementation error diagnostic
 **Impact: Medium · Effort: Medium**
 
 Flag concrete classes that fail to implement all required methods from

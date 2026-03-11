@@ -32,35 +32,43 @@ with each step.
 
 ---
 
-## Sprint 3 — Refactoring & deferred performance
+## Sprint 2 — Stabilise for 0.5.0 release
 
-Extract Function is the remaining refactoring pillar. Inline Variable,
-Extract Variable, and Inline Function/Method round out the core
-refactoring toolkit, sharing scope analysis infrastructure with Extract
-Function. Find References and Rename provide the variable/symbol usage
-tracking infrastructure they depend on, and both are now complete.
+All Sprint 2+ feature work is done. Before tagging 0.5.0, fix the
+remaining bugs that would embarrass us in front of new users. No new
+features, no refactors, no "while I'm here" detours. Ship what we
+have, ship it correct.
 
-The deferred performance items from Sprint 2.5 are included here. They
-improve lookup speed, reduce cloning overhead, and prepare the codebase
-for full background indexing (Phase 5), but are not prerequisites for
-parallel file processing.
+The common thread: our own diagnostics contradict our own demos in
+`example.php`. If PHPantom flags working code in its own showcase
+file, users will not trust any diagnostic it produces.
 
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
-| 17 | Extract Function refactoring | Very High | Code Actions | [actions.md §3](todo/actions.md#3-extract-function-refactoring) |
-| 76 | Inline Variable | Medium | Code Actions | [actions.md §7](todo/actions.md#7-inline-variable) |
-| 77 | Extract Variable | Medium | Code Actions | [actions.md §8](todo/actions.md#8-extract-variable) |
-| 78 | Inline Function/Method | High | Code Actions | [actions.md §9](todo/actions.md#9-inline-functionmethod) |
-| 87 | Reference-counted `ClassInfo` (`Arc<ClassInfo>`) | Medium | Performance | [performance.md §2](todo/performance.md#2-reference-counted-classinfo-arcclassinfo) |
-| 88 | Early-exit and `Cow` return in `apply_substitution` | Low | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
-| 95 | Canonicalize FQN representation | High | Refactoring | [refactor.md §1](todo/refactor.md#1-canonicalize-fqn-representation) |
+| 106 | Diagnostics fire on type alias array shape object values | Low | Bug Fixes | [bugs.md §1](todo/bugs.md#1-diagnostics-fire-on-type-alias-array-shape-object-values) |
+| 107 | Inline array-element function calls resolve to native return type in diagnostics | Low | Bug Fixes | [bugs.md §2](todo/bugs.md#2-inline-array-element-function-calls-resolve-to-native-return-type-in-diagnostics) |
+| 108 | Flaky `unknown_member` diagnostic on Eloquent Builder scope chains | Medium | Bug Fixes | [bugs.md §3](todo/bugs.md#3-flaky-unknown_member-diagnostic-on-eloquent-builder-scope-chains) |
+
+**Release gate:** `cargo test`, `cargo clippy -- -D warnings`,
+`cargo clippy --tests -- -D warnings`, `cargo fmt --check`,
+`php -l example.php`, and `php -d zend.assertions=1 example.php`
+all pass. Zero diagnostics on `example.php` from PHPantom itself.
+Tag 0.5.0, write release notes, publish.
 
 ---
 
-## Sprint 4 — Close the LSP feature gap
+## Sprint 3 — Quick wins: close the visible gaps
 
-These items close the most commonly expected LSP feature surface gaps.
-Each one removes a reason someone might look elsewhere.
+Every item here is Low or Low-Medium effort and directly removes
+something a Neovim/Zed/VS Code user would notice as missing on day
+one. Document Symbols alone eliminates the single most visible gap
+(empty outline, no breadcrumbs). Workspace Symbols gives
+keyboard-driven navigation back to Neovim users. The remaining
+items round out the feature matrix with minimal risk.
+
+The deferred performance items from Sprint 2.5 are included here
+because they are prerequisites for keeping everything fast as the
+feature surface grows.
 
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
@@ -69,20 +77,79 @@ Each one removes a reason someone might look elsewhere.
 | 21 | Folding Ranges (`textDocument/foldingRange`) | Low | LSP Features | [lsp-features.md §12](todo/lsp-features.md#12-folding-ranges-textdocumentfoldingrange) |
 | 22 | Selection Ranges (`textDocument/selectionRange`) | Low | LSP Features | [lsp-features.md §13](todo/lsp-features.md#13-selection-ranges-textdocumentselectionrange) |
 | 23 | Type Definition (`textDocument/typeDefinition`) | Low | LSP Features | [lsp-features.md §14](todo/lsp-features.md#14-type-definition-textdocumenttypedefinition) |
-| 24 | PHPDoc block generation on `/**` | Medium | LSP Features | [lsp-features.md §3](todo/lsp-features.md#3-phpdoc-block-generation-on-) |
 | 81 | Work-done progress for GTI and Find References | Low | LSP Features | [lsp-features.md §18](todo/lsp-features.md#18-work-done-progress-for-gti-and-find-references) |
-| 99 | File rename on class rename | Medium | LSP Features | [lsp-features.md §20](todo/lsp-features.md#20-file-rename-on-class-rename) |
+| 101 | Argument count diagnostic | Low | Diagnostics | [diagnostics.md §7](todo/diagnostics.md#7-argument-count-diagnostic) |
+| 105 | Merged classmap + self-scan | Low | Indexing | [indexing.md §1.5](todo/indexing.md#phase-15-merged-classmap--self-scan) |
+| 88 | Early-exit and `Cow` return in `apply_substitution` | Low | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
+| 87 | Reference-counted `ClassInfo` (`Arc<ClassInfo>`) | Medium | Performance | [performance.md §2](todo/performance.md#2-reference-counted-classinfo-arcclassinfo) |
 
-**After Sprint 4:** PHPantom covers every commonly expected LSP feature
-and surpasses the field on type intelligence, generics, Laravel, and
-performance. No feature gaps remain for typical day-to-day editing.
+**After Sprint 3:** PHPantom feels like a complete LSP to everyday
+users. Outline, breadcrumbs, workspace search, folding, and smart
+select all work. Argument count errors catch real bugs and serve as
+a canary for type engine correctness. No one says "it's missing X"
+for basic editing workflows.
 
 ---
 
-## Sprint 5 — Type intelligence depth & polish
+## Sprint 4 — Refactoring toolkit
+
+Extract Function is the #1 personal feature request and something
+that was available before the switch to PHPantom. Inline Variable,
+Extract Variable, and Inline Function/Method have been specifically
+requested by the Neovim tester. These share scope analysis
+infrastructure with Extract Function, so building them together is
+the most efficient path.
+
+The deferred FQN canonicalization refactor is included here as a
+gate check before Sprint 5 widens the feature surface further.
+
+| # | Item | Effort | Domain | Doc Link |
+|---|---|---|---|---|
+| 17 | Extract Function refactoring | Very High | Code Actions | [actions.md §3](todo/actions.md#3-extract-function-refactoring) |
+| 76 | Inline Variable | Medium | Code Actions | [actions.md §7](todo/actions.md#7-inline-variable) |
+| 77 | Extract Variable | Medium | Code Actions | [actions.md §8](todo/actions.md#8-extract-variable) |
+| 78 | Inline Function/Method | High | Code Actions | [actions.md §9](todo/actions.md#9-inline-functionmethod) |
+| 95 | Canonicalize FQN representation | High | Refactoring | [refactor.md §1](todo/refactor.md#1-canonicalize-fqn-representation) |
+
+**After Sprint 4:** The core refactoring toolkit is complete. The
+two most active testers have the features they specifically asked
+for. Scope analysis infrastructure built here benefits future code
+actions.
+
+---
+
+## Sprint 5 — Polish for office adoption
+
+These items close the gaps that PHPStorm and VS Code + Intelephense
+users at the office would notice. PHPDoc generation and formatting
+are the most common "where did that go?" moments. Inlay hints are
+high-visibility in VS Code. The implementation error diagnostic
+reuses existing code action logic and pairs with the quick-fix.
+File rename on class rename removes a friction point that
+Intelephense premium users expect.
+
+| # | Item | Effort | Domain | Doc Link |
+|---|---|---|---|---|
+| 24 | PHPDoc block generation on `/**` | Medium | LSP Features | [lsp-features.md §3](todo/lsp-features.md#3-phpdoc-block-generation-on-) |
+| 100 | Formatting proxy (php-cs-fixer / phpcbf) | Medium | LSP Features | [lsp-features.md §19](todo/lsp-features.md#19-formatting-proxy-textdocumentformatting-textdocumentrangeformatting) |
+| 40 | Inlay hints (`textDocument/inlayHint`) | Medium | LSP Features | [lsp-features.md §9](todo/lsp-features.md#9-inlay-hints-textdocumentinlayhint) |
+| 102 | Implementation error diagnostic | Medium | Diagnostics | [diagnostics.md §9](todo/diagnostics.md#9-implementation-error-diagnostic) |
+| 99 | File rename on class rename | Medium | LSP Features | [lsp-features.md §20](todo/lsp-features.md#20-file-rename-on-class-rename) |
+| 103 | Stub extension selection (`[stubs] extensions`) | Low | Configuration | [config.md §stubs](todo/config.md#extension-stub-selection) |
+
+**After Sprint 5:** PHPantom is ready for office colleagues. They
+get formatting, PHPDoc generation, inlay hints, and the diagnostics
+they're used to. Nobody switching from Intelephense (free or
+premium) feels like they lost more than they gained.
+
+---
+
+## Sprint 6 — Type intelligence depth
 
 Type intelligence depth is PHPantom's defining advantage. This sprint
-deepens that lead and rounds out the remaining feature surface.
+deepens that lead with features that benefit the PHPStan enthusiast
+and Laravel developer alike. File system watching eliminates the
+"restart the server after composer update" friction.
 
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
@@ -92,27 +159,32 @@ deepens that lead and rounds out the remaining feature surface.
 | 29 | Conditional return types `($param is T ? A : B)` | Medium | Type Inference | [type-inference.md §3](todo/type-inference.md#3-parse-and-resolve-param-is-t--a--b-return-types) |
 | 30 | `@param-closure-this` | Medium | Type Inference | [type-inference.md §15](todo/type-inference.md#15-param-closure-this) |
 | 31 | `key-of<T>` and `value-of<T>` resolution | Medium | Type Inference | [type-inference.md §16](todo/type-inference.md#16-key-oft-and-value-oft-resolution) |
-| 32 | Code Lens: jump to prototype method | Low | LSP Features | [lsp-features.md §8](todo/lsp-features.md#8-code-lens-jump-to-prototype-method) |
-| 34 | Document Links (`textDocument/documentLink`) | Low | LSP Features | [lsp-features.md §15](todo/lsp-features.md#15-document-links-textdocumentdocumentlink) |
-| 35 | Resolution-failure diagnostics (unresolved function, unresolved PHPDoc type) | Medium | Diagnostics | [diagnostics.md §3, §7](todo/diagnostics.md#3-unresolved-function-diagnostic-new) |
-| 36 | Warn when composer.json is missing or classmap not optimized | Medium | Diagnostics | [diagnostics.md §9](todo/diagnostics.md#9-warn-when-composerjson-is-missing-or-classmap-is-not-optimized) |
 | 37 | File system watching for vendor and project changes | Medium | Type Inference | [type-inference.md §5](todo/type-inference.md#5-file-system-watching-for-vendor-and-project-changes) |
 | 38 | Property hooks (PHP 8.4) | Medium | Type Inference | [type-inference.md §6](todo/type-inference.md#6-property-hooks-php-84) |
-| 39 | Simplify with null coalescing / null-safe operator (code action) | Medium | Code Actions | [actions.md §2](todo/actions.md#2-simplify-with-null-coalescing--null-safe-operator) |
-| 40 | Inlay hints (`textDocument/inlayHint`) | Medium | LSP Features | [lsp-features.md §9](todo/lsp-features.md#9-inlay-hints-textdocumentinlayhint) |
+| 35 | Resolution-failure diagnostics (unresolved function, unresolved PHPDoc type) | Medium | Diagnostics | [diagnostics.md §3, §7](todo/diagnostics.md#3-unresolved-function-diagnostic-new) |
 | 91 | GTD for built-in symbols via project-level phpstorm-stubs | Low | External Stubs | [external-stubs.md §1](todo/external-stubs.md#phase-1-project-level-phpstorm-stubs-for-gtd) |
-| 100 | Formatting proxy (php-cs-fixer / phpcbf) | Medium | LSP Features | [lsp-features.md §19](todo/lsp-features.md#19-formatting-proxy-textdocumentformatting-textdocumentrangeformatting) |
-| 101 | Argument count diagnostic | Low | Diagnostics | [diagnostics.md §8](todo/diagnostics.md#8-argument-count-diagnostic) |
-| 102 | Implementation error diagnostic | Medium | Diagnostics | [diagnostics.md §10](todo/diagnostics.md#10-implementation-error-diagnostic) |
-| 103 | Stub extension selection (`[stubs] extensions`) | Low | Configuration | [config.md §stubs](todo/config.md#extension-stub-selection) |
 
-**After Sprint 5:** PHPantom has a complete, polished LSP feature set.
-Users moving to Zed/Neovim/Helix lose nothing on the intelligence side
-and gain 1000× faster startup. The remaining gaps are Blade.
+**After Sprint 6:** PHPantom has the deepest type intelligence of
+any PHP language server. Conditional return types, `key-of`/`value-of`,
+property hooks, and inherited docblock types all work. The type
+engine advantage is unambiguous.
 
 ---
 
-## Sprint 6 — Deep type accuracy & Laravel excellence
+## Sprint 7 — Remaining LSP features & code actions
+
+Low-effort LSP features that didn't fit earlier sprints, plus
+code action polish.
+
+| # | Item | Effort | Domain | Doc Link |
+|---|---|---|---|---|
+| 32 | Code Lens: jump to prototype method | Low | LSP Features | [lsp-features.md §8](todo/lsp-features.md#8-code-lens-jump-to-prototype-method) |
+| 34 | Document Links (`textDocument/documentLink`) | Low | LSP Features | [lsp-features.md §15](todo/lsp-features.md#15-document-links-textdocumentdocumentlink) |
+| 39 | Simplify with null coalescing / null-safe operator (code action) | Medium | Code Actions | [actions.md §2](todo/actions.md#2-simplify-with-null-coalescing--null-safe-operator) |
+
+---
+
+## Sprint 8 — Deep type accuracy & Laravel excellence
 
 These items push type resolution accuracy beyond what any tool offers.
 They're the long tail that makes PHPantom the definitive choice for
@@ -131,7 +203,7 @@ projects that care about types.
 | 52 | `class_alias()` support | Medium | Completion | [completion.md §8](todo/completion.md#8-class_alias-support) |
 | 53 | Attribute constructor signature help | Medium | Signature Help | [signature-help.md §4](todo/signature-help.md#4-attribute-constructor-signature-help) |
 | 54 | Closure/arrow function parameter signature help | Medium | Signature Help | [signature-help.md §5](todo/signature-help.md#5-closure--arrow-function-parameter-signature-help) |
-| 55 | Diagnostic suppression intelligence | Medium | Diagnostics | [diagnostics.md §8](todo/diagnostics.md#8-diagnostic-suppression-intelligence) |
+| 55 | Diagnostic suppression intelligence | Medium | Diagnostics | [diagnostics.md §6](todo/diagnostics.md#6-diagnostic-suppression-intelligence) |
 | 56 | Partial result streaming via `$/progress` | Medium-High | LSP Features | [lsp-features.md §6](todo/lsp-features.md#6-partial-result-streaming-via-progress) |
 
 **Note:** Item 51 (Type Hierarchy) depends on the go-to-implementation
@@ -142,7 +214,7 @@ addresses the complementary inbound direction.
 
 ---
 
-## Sprint 7 — Blade support
+## Sprint 9 — Blade support
 
 Blade is a multi-phase project tracked in [todo/blade.md](todo/blade.md).
 Shipping Blade support makes PHPantom the first open-source PHP language
@@ -192,7 +264,7 @@ eventually but don't move the needle.
 |---|---|---|---|---|
 | 72 | Switch → match conversion | Medium | Code Actions | [actions.md §4](todo/actions.md#4-switch--match-conversion) |
 | 89 | Incremental text sync | Medium | Performance | [performance.md §8](todo/performance.md#8-incremental-text-sync) |
-| 104 | Unreachable code diagnostic | Low | Diagnostics | [diagnostics.md §9](todo/diagnostics.md#9-unreachable-code-diagnostic) |
+| 104 | Unreachable code diagnostic | Low | Diagnostics | [diagnostics.md §8](todo/diagnostics.md#8-unreachable-code-diagnostic) |
 
 ### Performance long-tail
 
