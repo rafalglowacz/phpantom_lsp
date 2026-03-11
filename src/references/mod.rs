@@ -15,6 +15,13 @@
 //! **Variable references** (including `$this`) are strictly scoped to
 //! the enclosing function / method / closure body within the current
 //! file.
+//!
+//! **Member references** (methods, properties, constants) are filtered
+//! by the class hierarchy of the target member.  When the user triggers
+//! "Find References" on `MyClass::save()`, only accesses where the
+//! subject resolves to a class in the same inheritance tree are returned.
+//! Accesses on unrelated classes that happen to have a member with the
+//! same name are excluded.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -24,7 +31,10 @@ use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use crate::Backend;
 use crate::symbol_map::{SymbolKind, SymbolMap};
-use crate::util::{collect_php_files_gitignore, offset_to_position, position_to_offset};
+use crate::types::{ClassInfo, MAX_INHERITANCE_DEPTH};
+use crate::util::{
+    collect_php_files_gitignore, find_class_at_offset, offset_to_position, position_to_offset,
+};
 
 impl Backend {
     /// Entry point for `textDocument/references`.
@@ -103,7 +113,15 @@ impl Backend {
                             let p_name = p.name.strip_prefix('$').unwrap_or(&p.name);
                             p_name == name && p.is_static
                         });
-                    return self.find_member_references(name, is_static, include_declaration);
+
+                    // Resolve the enclosing class to scope the search.
+                    let hierarchy = self.resolve_member_declaration_hierarchy(uri, span_start);
+                    return self.find_member_references(
+                        name,
+                        is_static,
+                        include_declaration,
+                        hierarchy.as_ref(),
+                    );
                 }
                 self.find_variable_references(uri, content, name, span_start, include_declaration)
             }
@@ -126,10 +144,22 @@ impl Backend {
                 self.find_class_references(&fqn, include_declaration)
             }
             SymbolKind::MemberAccess {
+                subject_text,
                 member_name,
                 is_static,
                 ..
-            } => self.find_member_references(member_name, *is_static, include_declaration),
+            } => {
+                // Resolve the subject to determine the class hierarchy
+                // so we only return references on related classes.
+                let hierarchy =
+                    self.resolve_member_access_hierarchy(uri, subject_text, *is_static, span_start);
+                self.find_member_references(
+                    member_name,
+                    *is_static,
+                    include_declaration,
+                    hierarchy.as_ref(),
+                )
+            }
             SymbolKind::FunctionCall { name, .. } => {
                 let ctx = self.file_context(uri);
                 let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
@@ -139,7 +169,14 @@ impl Backend {
                 self.find_constant_references(name, include_declaration)
             }
             SymbolKind::MemberDeclaration { name, is_static } => {
-                self.find_member_references(name, *is_static, include_declaration)
+                // Resolve the enclosing class to scope the search.
+                let hierarchy = self.resolve_member_declaration_hierarchy(uri, span_start);
+                self.find_member_references(
+                    name,
+                    *is_static,
+                    include_declaration,
+                    hierarchy.as_ref(),
+                )
             }
             SymbolKind::SelfStaticParent { keyword } => {
                 // `$this` is recorded as SelfStaticParent { keyword: "static" }.
@@ -200,10 +237,12 @@ impl Backend {
         let mut locations = Vec::new();
 
         let maps = self.symbol_maps.read();
-        let Some(symbol_map) = maps.get(uri) else {
-            return locations;
+        let symbol_map = match maps.get(uri) {
+            Some(m) => m,
+            None => return locations,
         };
 
+        // Determine the enclosing scope for the variable.
         let scope_start = symbol_map.find_enclosing_scope(cursor_offset);
 
         let parsed_uri = match Url::parse(uri) {
@@ -273,15 +312,14 @@ impl Backend {
         locations
     }
 
-    /// Find all references to `$this` within the enclosing class body
-    /// in the current file.
+    /// Find all references to `$this` within the enclosing class body.
     ///
-    /// `$this` is semantically a variable scoped to the enclosing class,
-    /// not a cross-file class reference.  We match every
-    /// `SelfStaticParent { keyword: "static" }` span whose source text
-    /// is `$this`, as well as `MemberAccess` spans whose `subject_text`
-    /// is `"$this"` (for the `$this` part of `$this->method()`), within
-    /// the same class body.
+    /// `$this` is scoped to the enclosing class — it must not match
+    /// `$this` in a different class or top-level function.  Unlike
+    /// regular variables, `$this` is **not** scoped to the enclosing
+    /// method: `$this` in method A and `$this` in method B inside the
+    /// same class both refer to the same object, so they should all
+    /// appear in the results.
     fn find_this_references(
         &self,
         uri: &str,
@@ -293,8 +331,9 @@ impl Backend {
         let mut locations = Vec::new();
 
         let maps = self.symbol_maps.read();
-        let Some(symbol_map) = maps.get(uri) else {
-            return locations;
+        let symbol_map = match maps.get(uri) {
+            Some(m) => m,
+            None => return locations,
         };
 
         // Determine the class body the cursor is in.
@@ -486,16 +525,23 @@ impl Backend {
         locations
     }
 
-    /// Find all references to a member (method or property) across all files.
+    /// Find all references to a member (method, property, or constant)
+    /// across all files.
     ///
-    /// For v1, matching is by member name and static-ness only (no subject
-    /// type resolution).  This may produce false positives when unrelated
-    /// classes have members with the same name, but it is simple and fast.
+    /// When `hierarchy` is `Some`, only references where the subject
+    /// resolves to a class in the given set of FQNs are returned.  When
+    /// the subject cannot be resolved (e.g. a complex expression or an
+    /// untyped variable), the reference is conservatively included.
+    ///
+    /// When `hierarchy` is `None`, all references with a matching member
+    /// name and static-ness are returned (the v1 behaviour, kept as a
+    /// fallback when the target class cannot be determined).
     fn find_member_references(
         &self,
         target_member: &str,
         target_is_static: bool,
         include_declaration: bool,
+        hierarchy: Option<&HashSet<String>>,
     ) -> Vec<Location> {
         let mut locations = Vec::new();
 
@@ -512,25 +558,72 @@ impl Backend {
                 None => continue,
             };
 
+            // Lazily resolved file context — only computed when we need
+            // to check a candidate's subject against the hierarchy.
+            let file_ctx_cell: std::cell::OnceCell<crate::types::FileContext> =
+                std::cell::OnceCell::new();
+
             for span in &symbol_map.spans {
-                let matches = match &span.kind {
+                match &span.kind {
                     SymbolKind::MemberAccess {
+                        subject_text,
                         member_name,
                         is_static,
                         ..
-                    } => member_name == target_member && *is_static == target_is_static,
-                    SymbolKind::MemberDeclaration { name, is_static } if include_declaration => {
-                        name == target_member && *is_static == target_is_static
+                    } if member_name == target_member && *is_static == target_is_static => {
+                        // Check if the subject belongs to the target hierarchy.
+                        if let Some(hier) = hierarchy {
+                            let ctx = file_ctx_cell.get_or_init(|| self.file_context(file_uri));
+                            let subject_fqns = self.resolve_subject_to_fqns(
+                                subject_text,
+                                *is_static,
+                                ctx,
+                                span.start,
+                                &content,
+                            );
+                            if !subject_fqns.is_empty()
+                                && !subject_fqns.iter().any(|fqn| hier.contains(fqn))
+                            {
+                                // Subject resolved but none of the resolved
+                                // classes are in the target hierarchy — skip.
+                                continue;
+                            }
+                            // If subject_fqns is empty, we couldn't resolve
+                            // the subject — include conservatively.
+                        }
+
+                        let start = offset_to_position(&content, span.start as usize);
+                        let end = offset_to_position(&content, span.end as usize);
+                        locations.push(Location {
+                            uri: parsed_uri.clone(),
+                            range: Range { start, end },
+                        });
                     }
-                    _ => false,
-                };
-                if matches {
-                    let start = offset_to_position(&content, span.start as usize);
-                    let end = offset_to_position(&content, span.end as usize);
-                    locations.push(Location {
-                        uri: parsed_uri.clone(),
-                        range: Range { start, end },
-                    });
+                    SymbolKind::MemberDeclaration { name, is_static }
+                        if include_declaration
+                            && name == target_member
+                            && *is_static == target_is_static =>
+                    {
+                        // Check if the enclosing class is in the hierarchy.
+                        if let Some(hier) = hierarchy {
+                            let ctx = file_ctx_cell.get_or_init(|| self.file_context(file_uri));
+                            if let Some(enclosing) = find_class_at_offset(&ctx.classes, span.start)
+                            {
+                                let fqn = enclosing.fqn();
+                                if !hier.contains(&fqn) {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let start = offset_to_position(&content, span.start as usize);
+                        let end = offset_to_position(&content, span.end as usize);
+                        locations.push(Location {
+                            uri: parsed_uri.clone(),
+                            range: Range { start, end },
+                        });
+                    }
+                    _ => {}
                 }
             }
 
@@ -540,6 +633,14 @@ impl Backend {
             // pick up property declaration sites.
             if include_declaration && let Some(classes) = self.get_classes_for_uri(file_uri) {
                 for class in &classes {
+                    // Filter by hierarchy when available.
+                    if let Some(hier) = hierarchy {
+                        let class_fqn = class.fqn();
+                        if !hier.contains(&class_fqn) {
+                            continue;
+                        }
+                    }
+
                     for prop in &class.properties {
                         let prop_name = prop.name.strip_prefix('$').unwrap_or(&prop.name);
                         let target_name = target_member.strip_prefix('$').unwrap_or(target_member);
@@ -569,7 +670,7 @@ impl Backend {
         locations
     }
 
-    /// Find all references to a standalone function across all files.
+    /// Find all references to a function across all files.
     fn find_function_references(
         &self,
         target_fqn: &str,
@@ -602,38 +703,33 @@ impl Backend {
             };
 
             for span in &symbol_map.spans {
-                if let SymbolKind::FunctionCall { name, .. } = &span.kind {
-                    // Resolve the function call name to its FQN in the
-                    // context of the file where it appears.
+                if let SymbolKind::FunctionCall {
+                    name,
+                    is_definition,
+                } = &span.kind
+                {
+                    if *is_definition && !include_declaration {
+                        continue;
+                    }
                     let resolved = Self::resolve_to_fqn(name, &file_use_map, &file_namespace);
                     let resolved_normalized = resolved.strip_prefix('\\').unwrap_or(&resolved);
-
-                    // Match by FQN or by short name (for global functions
-                    // that may be called without a namespace prefix).
-                    if resolved_normalized == target
-                        || (name == target_short && !target.contains('\\'))
+                    if resolved_normalized != target
+                        && crate::util::short_name(resolved_normalized)
+                            != crate::util::short_name(target)
                     {
-                        let start = offset_to_position(&content, span.start as usize);
-                        let end = offset_to_position(&content, span.end as usize);
-                        locations.push(Location {
-                            uri: parsed_uri.clone(),
-                            range: Range { start, end },
-                        });
+                        // Also try matching by short name when the
+                        // namespaces don't line up (common for global
+                        // functions referenced from within a namespace).
+                        if name != target_short {
+                            continue;
+                        }
                     }
-                }
-            }
-
-            // Include the function declaration site if requested.
-            if include_declaration {
-                let fmap = self.global_functions.read();
-                if let Some((func_uri, func_info)) = fmap.get(target)
-                    && func_uri == file_uri
-                    && func_info.name_offset != 0
-                {
-                    let offset = func_info.name_offset;
-                    let start = offset_to_position(&content, offset as usize);
-                    let end = offset_to_position(&content, offset as usize + func_info.name.len());
-                    push_unique_location(&mut locations, &parsed_uri, start, end);
+                    let start = offset_to_position(&content, span.start as usize);
+                    let end = offset_to_position(&content, span.end as usize);
+                    locations.push(Location {
+                        uri: parsed_uri.clone(),
+                        range: Range { start, end },
+                    });
                 }
             }
         }
@@ -671,9 +767,10 @@ impl Backend {
             };
 
             for span in &symbol_map.spans {
-                if let SymbolKind::ConstantReference { name } = &span.kind
-                    && name == target_name
-                {
+                if let SymbolKind::ConstantReference { name } = &span.kind {
+                    if name != target_name {
+                        continue;
+                    }
                     let start = offset_to_position(&content, span.start as usize);
                     let end = offset_to_position(&content, span.end as usize);
                     locations.push(Location {
@@ -681,17 +778,15 @@ impl Backend {
                         range: Range { start, end },
                     });
                 }
-            }
-
-            // Include define() declaration sites if requested.
-            if include_declaration {
-                let dmap = self.global_defines.read();
-                if let Some(info) = dmap.get(target_name)
-                    && info.file_uri == *file_uri
+                // Include MemberDeclaration for constant declarations
+                // when they match (class constants use MemberDeclaration).
+                if include_declaration
+                    && let SymbolKind::MemberDeclaration { name, is_static } = &span.kind
+                    && name == target_name
+                    && *is_static
                 {
-                    let start = offset_to_position(&content, info.name_offset as usize);
-                    let end =
-                        offset_to_position(&content, info.name_offset as usize + target_name.len());
+                    let start = offset_to_position(&content, span.start as usize);
+                    let end = offset_to_position(&content, span.end as usize);
                     push_unique_location(&mut locations, &parsed_uri, start, end);
                 }
             }
@@ -708,8 +803,6 @@ impl Backend {
         locations
     }
 
-    /// Resolve a `self`/`static`/`parent` keyword to the FQN of the class
-    /// it refers to in the given file and offset context.
     fn resolve_keyword_to_fqn(
         &self,
         keyword: &str,
@@ -732,6 +825,350 @@ impl Backend {
                 })
             }
         }
+    }
+
+    // ─── Class hierarchy resolution for member references ───────────────────
+
+    /// Resolve the class hierarchy for a `MemberAccess` subject.
+    ///
+    /// Returns `Some(set_of_fqns)` when the subject can be resolved to at
+    /// least one class, or `None` when resolution fails entirely.
+    fn resolve_member_access_hierarchy(
+        &self,
+        uri: &str,
+        subject_text: &str,
+        is_static: bool,
+        span_start: u32,
+    ) -> Option<HashSet<String>> {
+        let ctx = self.file_context(uri);
+        let content = self.get_file_content(uri)?;
+        let fqns =
+            self.resolve_subject_to_fqns(subject_text, is_static, &ctx, span_start, &content);
+        if fqns.is_empty() {
+            return None;
+        }
+        Some(self.collect_hierarchy_for_fqns(&fqns))
+    }
+
+    /// Resolve the class hierarchy for a `MemberDeclaration` at a given offset.
+    ///
+    /// Finds the enclosing class and builds the hierarchy set from it.
+    fn resolve_member_declaration_hierarchy(
+        &self,
+        uri: &str,
+        offset: u32,
+    ) -> Option<HashSet<String>> {
+        let classes = self.ast_map.read().get(uri).cloned().unwrap_or_default();
+        let current_class = find_class_at_offset(&classes, offset)?;
+        let fqn = current_class.fqn();
+        Some(self.collect_hierarchy_for_fqns(&[fqn]))
+    }
+
+    /// Resolve a member access subject to zero or more class FQNs.
+    ///
+    /// This is a lightweight resolution path used during reference scanning.
+    /// It handles the common cases (`self`, `static`, `$this`, `parent`,
+    /// bare class names for static access, and typed `$variable` parameters)
+    /// without the full weight of the completion resolver.
+    fn resolve_subject_to_fqns(
+        &self,
+        subject_text: &str,
+        is_static: bool,
+        ctx: &crate::types::FileContext,
+        access_offset: u32,
+        content: &str,
+    ) -> Vec<String> {
+        let trimmed = subject_text.trim();
+
+        match trimmed {
+            "$this" | "self" | "static" => {
+                if let Some(cls) =
+                    self.find_enclosing_class_fqn(&ctx.classes, &ctx.namespace, access_offset)
+                {
+                    return vec![cls];
+                }
+                Vec::new()
+            }
+            "parent" => {
+                if let Some(cc) = find_class_at_offset(&ctx.classes, access_offset)
+                    && let Some(ref parent) = cc.parent_class
+                {
+                    let fqn = Self::resolve_to_fqn(parent, &ctx.use_map, &ctx.namespace);
+                    return vec![normalize_fqn(&fqn)];
+                }
+                Vec::new()
+            }
+            _ if is_static && !trimmed.starts_with('$') => {
+                // Bare class name for static access: `ClassName::method()`.
+                let fqn = Self::resolve_to_fqn(trimmed, &ctx.use_map, &ctx.namespace);
+                vec![normalize_fqn(&fqn)]
+            }
+            _ if trimmed.starts_with('$') => {
+                // Variable — try variable type resolution.
+                self.resolve_variable_to_fqns(trimmed, ctx, access_offset, content)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Try to resolve a variable to its class FQN(s) using the type
+    /// resolution engine.
+    fn resolve_variable_to_fqns(
+        &self,
+        var_name: &str,
+        ctx: &crate::types::FileContext,
+        cursor_offset: u32,
+        content: &str,
+    ) -> Vec<String> {
+        let enclosing_class = find_class_at_offset(&ctx.classes, cursor_offset)
+            .cloned()
+            .unwrap_or_default();
+
+        let class_loader = self.class_loader(ctx);
+        let function_loader = self.function_loader(ctx);
+
+        let resolved = crate::completion::variable::resolution::resolve_variable_types(
+            var_name,
+            &enclosing_class,
+            &ctx.classes,
+            content,
+            cursor_offset,
+            &class_loader,
+            Some(&function_loader),
+        );
+
+        resolved
+            .into_iter()
+            .map(|ci| normalize_fqn(&ci.fqn()))
+            .collect()
+    }
+
+    /// Find the FQN of the class enclosing a given byte offset.
+    fn find_enclosing_class_fqn(
+        &self,
+        classes: &[ClassInfo],
+        namespace: &Option<String>,
+        offset: u32,
+    ) -> Option<String> {
+        let cc = find_class_at_offset(classes, offset)?;
+        let fqn = match namespace {
+            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, cc.name),
+            _ => cc.name.clone(),
+        };
+        Some(normalize_fqn(&fqn))
+    }
+
+    /// Collect the full class hierarchy (ancestors and descendants) for
+    /// a set of starting FQNs.
+    ///
+    /// The result includes:
+    /// - The starting FQNs themselves
+    /// - All ancestor FQNs (parent chain, interfaces, traits)
+    /// - All descendant FQNs (classes that extend/implement any class in
+    ///   the hierarchy)
+    fn collect_hierarchy_for_fqns(&self, seed_fqns: &[String]) -> HashSet<String> {
+        let mut hierarchy = HashSet::new();
+        let class_loader = |name: &str| -> Option<ClassInfo> { self.find_or_load_class(name) };
+
+        // Insert the seeds.
+        for fqn in seed_fqns {
+            hierarchy.insert(fqn.clone());
+        }
+
+        // Walk up: collect all ancestors for each seed.
+        for fqn in seed_fqns {
+            self.collect_ancestors(fqn, &class_loader, &mut hierarchy);
+        }
+
+        // Walk down: collect all descendants from ast_map and class_index.
+        // We iterate until no new FQNs are added (transitive closure).
+        let mut changed = true;
+        let mut depth = 0u32;
+        while changed && depth < MAX_INHERITANCE_DEPTH {
+            changed = false;
+            depth += 1;
+
+            // Snapshot the current hierarchy to check against.
+            let current: Vec<String> = hierarchy.iter().cloned().collect();
+
+            // Scan all known classes for ones that extend/implement/use
+            // anything in the current hierarchy.
+            let all_classes: Vec<ClassInfo> = {
+                let map = self.ast_map.read();
+                map.values()
+                    .flat_map(|classes| classes.iter().cloned())
+                    .collect()
+            };
+
+            for cls in &all_classes {
+                let cls_fqn = normalize_fqn(&cls.fqn());
+                if hierarchy.contains(&cls_fqn) {
+                    continue;
+                }
+
+                if self.class_is_descendant_of(cls, &current, &class_loader) {
+                    hierarchy.insert(cls_fqn);
+                    changed = true;
+                }
+            }
+
+            // Also check class_index entries not yet in ast_map.
+            let index_entries: Vec<String> = {
+                let idx = self.class_index.read();
+                idx.keys().cloned().collect()
+            };
+
+            for fqn in &index_entries {
+                let normalized = normalize_fqn(fqn);
+                if hierarchy.contains(&normalized) {
+                    continue;
+                }
+
+                if let Some(cls) = class_loader(fqn)
+                    && self.class_is_descendant_of(&cls, &current, &class_loader)
+                {
+                    hierarchy.insert(normalized);
+                    changed = true;
+                }
+            }
+        }
+
+        hierarchy
+    }
+
+    /// Walk up the inheritance chain and collect all ancestor FQNs.
+    fn collect_ancestors(
+        &self,
+        fqn: &str,
+        class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+        hierarchy: &mut HashSet<String>,
+    ) {
+        let cls = match class_loader(fqn) {
+            Some(c) => c,
+            None => return,
+        };
+
+        // Parent class chain.
+        if let Some(ref parent) = cls.parent_class {
+            let parent_fqn = normalize_fqn(parent);
+            if hierarchy.insert(parent_fqn.clone()) {
+                self.collect_ancestors(&parent_fqn, class_loader, hierarchy);
+            }
+        }
+
+        // Interfaces.
+        for iface in &cls.interfaces {
+            let iface_fqn = normalize_fqn(iface);
+            if hierarchy.insert(iface_fqn.clone()) {
+                self.collect_ancestors(&iface_fqn, class_loader, hierarchy);
+            }
+        }
+
+        // Used traits.
+        for trait_name in &cls.used_traits {
+            let trait_fqn = normalize_fqn(trait_name);
+            if hierarchy.insert(trait_fqn.clone()) {
+                self.collect_ancestors(&trait_fqn, class_loader, hierarchy);
+            }
+        }
+
+        // Mixins.
+        for mixin in &cls.mixins {
+            let mixin_fqn = normalize_fqn(mixin);
+            if hierarchy.insert(mixin_fqn.clone()) {
+                self.collect_ancestors(&mixin_fqn, class_loader, hierarchy);
+            }
+        }
+    }
+
+    /// Check whether a class directly extends, implements, or uses
+    /// anything in the given set of FQNs.
+    fn class_is_descendant_of(
+        &self,
+        cls: &ClassInfo,
+        targets: &[String],
+        class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    ) -> bool {
+        // Direct parent.
+        if let Some(ref parent) = cls.parent_class {
+            let parent_fqn = normalize_fqn(parent);
+            if targets.contains(&parent_fqn) {
+                return true;
+            }
+            // Transitive: walk the parent chain.
+            if self.ancestor_in_set(&parent_fqn, targets, class_loader, 0) {
+                return true;
+            }
+        }
+
+        // Direct interfaces.
+        for iface in &cls.interfaces {
+            let iface_fqn = normalize_fqn(iface);
+            if targets.contains(&iface_fqn) {
+                return true;
+            }
+            if self.ancestor_in_set(&iface_fqn, targets, class_loader, 0) {
+                return true;
+            }
+        }
+
+        // Used traits.
+        for trait_name in &cls.used_traits {
+            let trait_fqn = normalize_fqn(trait_name);
+            if targets.contains(&trait_fqn) {
+                return true;
+            }
+        }
+
+        // Mixins.
+        for mixin in &cls.mixins {
+            let mixin_fqn = normalize_fqn(mixin);
+            if targets.contains(&mixin_fqn) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Recursively check whether any ancestor of `fqn` is in the target set.
+    fn ancestor_in_set(
+        &self,
+        fqn: &str,
+        targets: &[String],
+        class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+        depth: u32,
+    ) -> bool {
+        if depth >= MAX_INHERITANCE_DEPTH {
+            return false;
+        }
+
+        let cls = match class_loader(fqn) {
+            Some(c) => c,
+            None => return false,
+        };
+
+        if let Some(ref parent) = cls.parent_class {
+            let parent_fqn = normalize_fqn(parent);
+            if targets.contains(&parent_fqn) {
+                return true;
+            }
+            if self.ancestor_in_set(&parent_fqn, targets, class_loader, depth + 1) {
+                return true;
+            }
+        }
+
+        for iface in &cls.interfaces {
+            let iface_fqn = normalize_fqn(iface);
+            if targets.contains(&iface_fqn) {
+                return true;
+            }
+            if self.ancestor_in_set(&iface_fqn, targets, class_loader, depth + 1) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Ensure all workspace PHP files have been parsed and have symbol maps.
@@ -907,6 +1344,11 @@ impl Backend {
             }
         });
     }
+}
+
+/// Normalise a class FQN: strip leading `\` if present.
+fn normalize_fqn(fqn: &str) -> String {
+    fqn.strip_prefix('\\').unwrap_or(fqn).to_string()
 }
 
 /// Check whether a resolved class name matches the target FQN.

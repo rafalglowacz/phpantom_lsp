@@ -695,11 +695,31 @@ Parsed files stay cached in `ast_map`, `symbol_maps`, `use_map`, and `namespace_
 The `user_file_symbol_maps()` helper snapshots all symbol maps whose URI does not fall under the vendor directory or the internal stub scheme. With `Arc<SymbolMap>`, the snapshot is a vector of cheap reference-count increments rather than deep clones. Four scanners use this snapshot:
 
 - `find_class_references` — matches `ClassReference` spans by resolved FQN
-- `find_member_references` — matches `MemberAccess` and `MemberDeclaration` spans by member name
+- `find_member_references` — matches `MemberAccess` and `MemberDeclaration` spans by member name, filtered by class hierarchy
 - `find_function_references` — matches `FunctionCall` spans by resolved FQN
 - `find_constant_references` — matches `ConstantReference` spans by name
 
 Variable references (`$this`, local variables) are scoped to the enclosing function/class in the current file only, and do not use the cross-file scan.
+
+### Class-aware member filtering
+
+When the user triggers "Find References" on a method, property, or constant, the handler resolves the target class and builds a **hierarchy set** containing all related class FQNs. Only references whose subject resolves to a class in this set are included. This prevents `$user->save()` from matching `$order->save()` when `User` and `Order` are unrelated.
+
+The hierarchy set is built in two passes:
+
+1. **Ancestors** — walk the parent chain, interfaces, traits, and mixins upward from the target class, collecting every FQN encountered.
+2. **Descendants** — scan all classes in `ast_map` and `class_index` for classes that extend, implement, or use anything already in the set. This repeats until no new FQNs are added (transitive closure), bounded by `MAX_INHERITANCE_DEPTH`.
+
+For each candidate `MemberAccess` span, the subject text is resolved to class FQNs using a lightweight path:
+
+- `self` / `static` / `$this` → enclosing class FQN via `find_class_at_offset`
+- `parent` → enclosing class's parent FQN
+- Bare class name (static access) → resolved via the file's use-map and namespace
+- `$variable` → full variable type resolution via `resolve_variable_types`
+
+When the subject resolves to one or more FQNs, the reference is included only if at least one FQN is in the hierarchy set. When resolution fails entirely (untyped variable, complex expression), the reference is included conservatively to avoid false negatives.
+
+For `MemberDeclaration` spans, the enclosing class at the span offset is checked against the hierarchy set. Property declaration sites (which use `Variable` spans for GTD compatibility) are filtered by checking the declaring class's FQN.
 
 ## Union Type Completion (by design)
 

@@ -1029,3 +1029,365 @@ async fn test_method_declaration_cross_file() {
         in_b
     );
 }
+
+// ─── Class-Aware Member Filtering ───────────────────────────────────────────
+
+#[tokio::test]
+async fn test_unrelated_class_same_method_excluded() {
+    // Two unrelated classes with the same method name.  Find References
+    // on one should NOT return results from the other.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                            // L0
+        "class MyClass {\n",                                  // L1
+        "    public function save(): void {}\n",              // L2
+        "}\n",                                                // L3
+        "class OtherClass {\n",                               // L4
+        "    public function save(): void {}\n",              // L5
+        "}\n",                                                // L6
+        "function demo(MyClass $a, OtherClass $b): void {\n", // L7
+        "    $a->save();\n",                                  // L8
+        "    $b->save();\n",                                  // L9
+        "}\n",                                                // L10
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on save() at L8 ($a->save(), where $a: MyClass).
+    let locs = find_references(&backend, &uri, 8, 10, false).await;
+
+    // Should include L8 ($a->save()) but NOT L9 ($b->save()).
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&8),
+        "Should find $a->save() on L8; got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&9),
+        "Should NOT find $b->save() on L9 (unrelated class); got lines: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn test_unrelated_class_same_method_excluded_cross_file() {
+    // Cross-file: two unrelated classes with the same method name.
+    let backend = Backend::new_test();
+    let uri_a = Url::parse("file:///a.php").unwrap();
+    let uri_b = Url::parse("file:///b.php").unwrap();
+
+    let text_a = concat!(
+        "<?php\n",                               // L0
+        "class MyClass {\n",                     // L1
+        "    public function save(): void {}\n", // L2
+        "}\n",                                   // L3
+        "class OtherClass {\n",                  // L4
+        "    public function save(): void {}\n", // L5
+        "}\n",                                   // L6
+    );
+    let text_b = concat!(
+        "<?php\n",                                         // L0
+        "function useMyClass(MyClass $m): void {\n",       // L1
+        "    $m->save();\n",                               // L2
+        "}\n",                                             // L3
+        "function useOtherClass(OtherClass $o): void {\n", // L4
+        "    $o->save();\n",                               // L5
+        "}\n",                                             // L6
+    );
+
+    open_file(&backend, &uri_a, text_a).await;
+    open_file(&backend, &uri_b, text_b).await;
+
+    // Find references to MyClass::save() from its declaration (L2 in a.php).
+    // "save" starts at character 20 in "    public function save(): void {}"
+    let locs = find_references(&backend, &uri_a, 2, 21, true).await;
+
+    // b.php should have $m->save() (L2) but NOT $o->save() (L5).
+    let b_lines: Vec<u32> = locs
+        .iter()
+        .filter(|l| l.uri == uri_b)
+        .map(|l| l.range.start.line)
+        .collect();
+    assert!(
+        b_lines.contains(&2),
+        "Should find $m->save() on L2 of b.php; got lines: {:?}",
+        b_lines
+    );
+    assert!(
+        !b_lines.contains(&5),
+        "Should NOT find $o->save() on L5 of b.php (unrelated class); got lines: {:?}",
+        b_lines
+    );
+
+    // The declaration of OtherClass::save() (L5 in a.php) should also be excluded.
+    let a_lines: Vec<u32> = locs
+        .iter()
+        .filter(|l| l.uri == uri_a)
+        .map(|l| l.range.start.line)
+        .collect();
+    assert!(
+        a_lines.contains(&2),
+        "Should include MyClass::save() declaration on L2 of a.php; got: {:?}",
+        a_lines
+    );
+    assert!(
+        !a_lines.contains(&5),
+        "Should NOT include OtherClass::save() declaration on L5 of a.php; got: {:?}",
+        a_lines
+    );
+}
+
+#[tokio::test]
+async fn test_inherited_method_references_included() {
+    // A child class inherits a method from its parent.  Find References
+    // on the parent's method should include calls via the child.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                    // L0
+        "class Base {\n",                             // L1
+        "    public function save(): void {}\n",      // L2
+        "}\n",                                        // L3
+        "class Child extends Base {}\n",              // L4
+        "function demo(Base $a, Child $b): void {\n", // L5
+        "    $a->save();\n",                          // L6
+        "    $b->save();\n",                          // L7
+        "}\n",                                        // L8
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on save() at L6 ($a->save(), $a: Base).
+    let locs = find_references(&backend, &uri, 6, 10, false).await;
+
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&6),
+        "Should find $a->save() on L6; got lines: {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&7),
+        "Should find $b->save() on L7 (Child extends Base); got lines: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn test_interface_method_references_included() {
+    // A class implements an interface.  Find References on the interface's
+    // method should include calls via the implementing class.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                         // L0
+        "interface Saveable {\n",                          // L1
+        "    public function save(): void;\n",             // L2
+        "}\n",                                             // L3
+        "class Record implements Saveable {\n",            // L4
+        "    public function save(): void {}\n",           // L5
+        "}\n",                                             // L6
+        "function demo(Saveable $s, Record $r): void {\n", // L7
+        "    $s->save();\n",                               // L8
+        "    $r->save();\n",                               // L9
+        "}\n",                                             // L10
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on save() at L8 ($s->save(), $s: Saveable).
+    let locs = find_references(&backend, &uri, 8, 10, false).await;
+
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&8),
+        "Should find $s->save() on L8; got lines: {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&9),
+        "Should find $r->save() on L9 (Record implements Saveable); got lines: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn test_static_method_unrelated_class_excluded() {
+    // Two unrelated classes with the same static method name.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                        // L0
+        "class Alpha {\n",                                // L1
+        "    public static function create(): void {}\n", // L2
+        "}\n",                                            // L3
+        "class Beta {\n",                                 // L4
+        "    public static function create(): void {}\n", // L5
+        "}\n",                                            // L6
+        "function demo(): void {\n",                      // L7
+        "    Alpha::create();\n",                         // L8
+        "    Beta::create();\n",                          // L9
+        "}\n",                                            // L10
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on create() at L8 (Alpha::create()).
+    let locs = find_references(&backend, &uri, 8, 14, false).await;
+
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&8),
+        "Should find Alpha::create() on L8; got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&9),
+        "Should NOT find Beta::create() on L9 (unrelated class); got lines: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn test_self_static_method_references_scoped() {
+    // self:: and static:: calls should be scoped to the enclosing class.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                       // L0
+        "class Foo {\n",                                 // L1
+        "    public static function build(): void {}\n", // L2
+        "    public function demo(): void {\n",          // L3
+        "        self::build();\n",                      // L4
+        "    }\n",                                       // L5
+        "}\n",                                           // L6
+        "class Bar {\n",                                 // L7
+        "    public static function build(): void {}\n", // L8
+        "    public function demo(): void {\n",          // L9
+        "        self::build();\n",                      // L10
+        "    }\n",                                       // L11
+        "}\n",                                           // L12
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on build() at L4 (self::build() inside Foo).
+    let locs = find_references(&backend, &uri, 4, 16, false).await;
+
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&4),
+        "Should find self::build() on L4 (inside Foo); got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&10),
+        "Should NOT find self::build() on L10 (inside Bar, unrelated); got lines: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn test_unresolvable_variable_included_conservatively() {
+    // When a variable's type cannot be resolved, the reference should
+    // be included conservatively rather than dropped.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                       // L0
+        "class MyClass {\n",                             // L1
+        "    public function save(): void {}\n",         // L2
+        "}\n",                                           // L3
+        "function demo(MyClass $a, $unknown): void {\n", // L4
+        "    $a->save();\n",                             // L5
+        "    $unknown->save();\n",                       // L6
+        "}\n",                                           // L7
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on save() at L5 ($a->save(), $a: MyClass).
+    let locs = find_references(&backend, &uri, 5, 10, false).await;
+
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&5),
+        "Should find $a->save() on L5; got lines: {:?}",
+        lines
+    );
+    // $unknown has no type hint — should be included conservatively.
+    assert!(
+        lines.contains(&6),
+        "Should conservatively include $unknown->save() on L6 (unresolvable type); got lines: {:?}",
+        lines
+    );
+}
+
+#[tokio::test]
+async fn test_this_method_references_excludes_unrelated() {
+    // $this->method() inside one class should not match $this->method()
+    // inside an unrelated class with the same method name.
+    // Note: $this references are currently file-local, but the member
+    // reference search is cross-file.  This test checks the member
+    // name filtering when triggered from a $this-> call site.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                    // L0
+        "class Dog {\n",                              // L1
+        "    public function speak(): void {}\n",     // L2
+        "    public function demo(): void {\n",       // L3
+        "        $this->speak();\n",                  // L4
+        "    }\n",                                    // L5
+        "}\n",                                        // L6
+        "class Cat {\n",                              // L7
+        "    public function speak(): void {}\n",     // L8
+        "    public function demo(): void {\n",       // L9
+        "        $this->speak();\n",                  // L10
+        "    }\n",                                    // L11
+        "}\n",                                        // L12
+        "function outside(Dog $d, Cat $c): void {\n", // L13
+        "    $d->speak();\n",                         // L14
+        "    $c->speak();\n",                         // L15
+        "}\n",                                        // L16
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Click on speak() at L14 ($d->speak(), $d: Dog).
+    let locs = find_references(&backend, &uri, 14, 10, true).await;
+
+    let lines: Vec<u32> = locs.iter().map(|l| l.range.start.line).collect();
+    assert!(
+        lines.contains(&14),
+        "Should find $d->speak() on L14; got lines: {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&2),
+        "Should include Dog::speak() declaration on L2; got lines: {:?}",
+        lines
+    );
+    assert!(
+        lines.contains(&4),
+        "Should include $this->speak() inside Dog on L4; got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&8),
+        "Should NOT include Cat::speak() declaration on L8; got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&10),
+        "Should NOT include $this->speak() inside Cat on L10; got lines: {:?}",
+        lines
+    );
+    assert!(
+        !lines.contains(&15),
+        "Should NOT include $c->speak() on L15 (unrelated class); got lines: {:?}",
+        lines
+    );
+}
