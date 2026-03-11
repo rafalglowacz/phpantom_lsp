@@ -332,6 +332,12 @@ pub struct Backend {
     /// Wrapped in `Arc` so the diagnostic worker task (spawned during
     /// `initialized`) shares the same slot as the main `Backend`.
     pub(crate) diag_pending_uris: Arc<Mutex<Vec<String>>>,
+    /// Last-published slow diagnostics (unknown classes, unknown members, etc.)
+    /// per file URI.  Used by the two-phase diagnostic publisher: the fast
+    /// phase merges fresh fast diagnostics with the previous slow diagnostics
+    /// so the editor never shows a flicker where slow diagnostics disappear
+    /// and then reappear.
+    pub(crate) diag_last_slow: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
     // NOTE: resolved_class_cache uses parking_lot::Mutex because it is
     // frequently written (cache stores) and RwLock read→write upgrades
     // are error-prone.
@@ -381,6 +387,7 @@ impl Backend {
             diag_version: Arc::new(AtomicU64::new(0)),
             diag_notify: Arc::new(tokio::sync::Notify::new()),
             diag_pending_uris: Arc::new(Mutex::new(Vec::new())),
+            diag_last_slow: Arc::new(Mutex::new(HashMap::new())),
             config: Mutex::new(config::Config::default()),
         }
     }
@@ -552,6 +559,7 @@ impl Backend {
             diag_version: Arc::clone(&self.diag_version),
             diag_notify: Arc::clone(&self.diag_notify),
             diag_pending_uris: Arc::clone(&self.diag_pending_uris),
+            diag_last_slow: Arc::clone(&self.diag_last_slow),
             config: Mutex::new(self.config.lock().clone()),
         }
     }

@@ -86,27 +86,57 @@ impl Backend {
             Err(_) => return,
         };
 
-        let mut diagnostics = Vec::new();
+        // ── Phase 1: fast diagnostics (cheap, no type resolution) ───────
+        // Publish these immediately together with the *previous* slow
+        // diagnostics so the editor dims unused imports and strikes
+        // through deprecated symbols without waiting for the heavier
+        // collectors, and without flickering away existing warnings.
+        let mut fast_diagnostics = Vec::new();
 
         // ── @deprecated usage diagnostics ───────────────────────────────
-        self.collect_deprecated_diagnostics(uri_str, content, &mut diagnostics);
+        self.collect_deprecated_diagnostics(uri_str, content, &mut fast_diagnostics);
 
         // ── Unused `use` dimming ────────────────────────────────────────
-        self.collect_unused_import_diagnostics(uri_str, content, &mut diagnostics);
+        self.collect_unused_import_diagnostics(uri_str, content, &mut fast_diagnostics);
+
+        // Merge fresh fast diagnostics with stale slow diagnostics so
+        // the editor never shows a gap where slow diagnostics vanish
+        // and then reappear.
+        let mut phase1 = fast_diagnostics.clone();
+        {
+            let cache = self.diag_last_slow.lock();
+            if let Some(prev_slow) = cache.get(uri_str) {
+                phase1.extend(prev_slow.iter().cloned());
+            }
+        }
+        deduplicate_diagnostics(&mut phase1);
+        client.publish_diagnostics(uri.clone(), phase1, None).await;
+
+        // ── Phase 2: slow diagnostics (require type resolution) ─────────
+        let mut slow_diagnostics = Vec::new();
 
         // ── Unknown class references ────────────────────────────────────
-        self.collect_unknown_class_diagnostics(uri_str, content, &mut diagnostics);
+        self.collect_unknown_class_diagnostics(uri_str, content, &mut slow_diagnostics);
 
         // ── Unknown member access ───────────────────────────────────────
-        self.collect_unknown_member_diagnostics(uri_str, content, &mut diagnostics);
+        self.collect_unknown_member_diagnostics(uri_str, content, &mut slow_diagnostics);
 
         // ── Unknown function calls ──────────────────────────────────────
-        self.collect_unknown_function_diagnostics(uri_str, content, &mut diagnostics);
+        self.collect_unknown_function_diagnostics(uri_str, content, &mut slow_diagnostics);
 
         // ── Unresolved member access (opt-in) ───────────────────────────
-        self.collect_unresolved_member_access_diagnostics(uri_str, content, &mut diagnostics);
+        self.collect_unresolved_member_access_diagnostics(uri_str, content, &mut slow_diagnostics);
 
-        // ── Deduplicate diagnostics ─────────────────────────────────────
+        // Cache the fresh slow diagnostics for the next fast-phase merge.
+        {
+            let mut cache = self.diag_last_slow.lock();
+            cache.insert(uri_str.to_string(), slow_diagnostics.clone());
+        }
+
+        // ── Combine fast + slow and deduplicate ─────────────────────────
+        let mut diagnostics = fast_diagnostics;
+        diagnostics.extend(slow_diagnostics);
+
         // When multiple providers flag the same span, suppress the
         // lower-value diagnostic.  In particular, suppress
         // `unresolved_member_access` (Hint) when a more specific
@@ -233,6 +263,9 @@ impl Backend {
 
     /// Clear diagnostics for a file (e.g. on `did_close`).
     pub(crate) async fn clear_diagnostics_for_file(&self, uri_str: &str) {
+        // Remove cached slow diagnostics so we don't leak memory.
+        self.diag_last_slow.lock().remove(uri_str);
+
         let client = match &self.client {
             Some(c) => c,
             None => return,

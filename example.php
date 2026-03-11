@@ -20,7 +20,6 @@ use Exception;
 use Stringable;
 use Demo\UserProfile as Profile;
 
-
 // ═══════════════════════════════════════════════════════════════════════════
 //  DEMOS — open any demo() method and trigger completion inside
 // ═══════════════════════════════════════════════════════════════════════════

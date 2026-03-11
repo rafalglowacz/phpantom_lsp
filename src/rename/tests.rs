@@ -736,3 +736,145 @@ async fn rename_variable_does_not_leak_across_functions() {
     assert!(result.contains("function alpha(): void {\n    $y = 1;\n    echo $y;\n}"));
     assert!(result.contains("function beta(): void {\n    $x = 2;\n    echo $x;\n}"));
 }
+
+// ─── Class-Aware Member Rename ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn rename_method_does_not_leak_to_unrelated_class() {
+    // Two unrelated classes with the same method name.  Renaming the
+    // method on one class must not touch the other.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                 // L0
+        "class Dog {\n",                           // L1
+        "    public function speak(): void {}\n",  // L2
+        "}\n",                                     // L3
+        "class Cat {\n",                           // L4
+        "    public function speak(): void {}\n",  // L5
+        "}\n",                                     // L6
+        "function demo(Dog $d, Cat $c): void {\n", // L7
+        "    $d->speak();\n",                      // L8
+        "    $c->speak();\n",                      // L9
+        "}\n",                                     // L10
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Rename speak() from the Dog::speak declaration (line 2, col 21).
+    // "    public function speak(): void {}"
+    //                     ^ col 20
+    let edit = rename(&backend, &uri, 2, 21, "bark").await;
+    assert!(edit.is_some(), "Rename should produce edits");
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // Dog::speak and $d->speak should be renamed to bark.
+    assert!(
+        result.contains("function bark()"),
+        "Dog's method should be renamed to bark; got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("$d->bark()"),
+        "$d->speak() should become $d->bark(); got:\n{}",
+        result
+    );
+
+    // Cat::speak and $c->speak must NOT be renamed.
+    assert!(
+        result.contains("class Cat {\n    public function speak(): void {}"),
+        "Cat's method should remain speak; got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("$c->speak()"),
+        "$c->speak() should remain unchanged; got:\n{}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_method_includes_inherited_class() {
+    // Renaming a method on a parent class should also rename it on
+    // accesses through a child class.
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                    // L0
+        "class Base {\n",                             // L1
+        "    public function run(): void {}\n",       // L2
+        "}\n",                                        // L3
+        "class Child extends Base {}\n",              // L4
+        "function demo(Base $b, Child $c): void {\n", // L5
+        "    $b->run();\n",                           // L6
+        "    $c->run();\n",                           // L7
+        "}\n",                                        // L8
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Rename run() from $b->run() (line 6, col 10).
+    let edit = rename(&backend, &uri, 6, 10, "execute").await;
+    assert!(edit.is_some(), "Rename should produce edits");
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // Both $b->run() and $c->run() should be renamed (Child extends Base).
+    assert!(
+        result.contains("$b->execute()"),
+        "$b->run() should become $b->execute(); got:\n{}",
+        result
+    );
+    assert!(
+        result.contains("$c->execute()"),
+        "$c->run() should become $c->execute() (inherited); got:\n{}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_static_method_does_not_leak_to_unrelated_class() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                        // L0
+        "class Alpha {\n",                                // L1
+        "    public static function create(): void {}\n", // L2
+        "}\n",                                            // L3
+        "class Beta {\n",                                 // L4
+        "    public static function create(): void {}\n", // L5
+        "}\n",                                            // L6
+        "function demo(): void {\n",                      // L7
+        "    Alpha::create();\n",                         // L8
+        "    Beta::create();\n",                          // L9
+        "}\n",                                            // L10
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Rename create() from Alpha::create() call (line 8, col 12).
+    // "    Alpha::create();"
+    //             ^ col 11
+    let edit = rename(&backend, &uri, 8, 12, "make").await;
+    assert!(edit.is_some(), "Rename should produce edits");
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // Alpha::create should be renamed.
+    assert!(
+        result.contains("Alpha::make()"),
+        "Alpha::create() should become Alpha::make(); got:\n{}",
+        result
+    );
+
+    // Beta::create must NOT be renamed.
+    assert!(
+        result.contains("Beta::create()"),
+        "Beta::create() should remain unchanged; got:\n{}",
+        result
+    );
+}
