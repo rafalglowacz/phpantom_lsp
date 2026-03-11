@@ -64,7 +64,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use memchr::memmem;
+use memchr::{memchr, memmem};
 
 // ─── Data structures ────────────────────────────────────────────────────────
 
@@ -113,6 +113,18 @@ pub fn scan_file(path: &Path) -> Vec<String> {
     find_classes(&content)
 }
 
+/// Scan already-loaded file content and return the fully-qualified class
+/// names it defines.
+///
+/// This avoids a redundant `fs::read` when the caller already has the
+/// bytes in memory (e.g. from a parallel batch read).
+pub fn scan_content(content: &[u8]) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    find_classes(content)
+}
+
 /// Scan a single PHP file and return all discovered symbols (classes,
 /// functions, and constants).
 ///
@@ -128,6 +140,14 @@ pub fn scan_file_full(path: &Path) -> ScanResult {
     find_symbols(&content)
 }
 
+/// Return the number of available CPU cores, capped at a sensible
+/// default.  Used to size parallel scanning batches.
+fn thread_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+}
+
 /// Build a classmap by scanning all `.php` files under the given
 /// directories.
 ///
@@ -137,6 +157,10 @@ pub fn scan_file_full(path: &Path) -> ScanResult {
 /// also skipped.  Any directory whose absolute path is in
 /// `vendor_dir_paths` is explicitly skipped regardless of `.gitignore`.
 ///
+/// File scanning is parallelised across CPU cores: the directory walk
+/// collects file paths first, then files are read and scanned in
+/// parallel batches using [`std::thread::scope`].
+///
 /// Returns a `HashMap<String, PathBuf>` mapping fully-qualified class
 /// names to the absolute file path where they are defined.  When a
 /// class name appears in multiple files, the first occurrence wins.
@@ -144,14 +168,14 @@ pub fn scan_directories(
     dirs: &[PathBuf],
     vendor_dir_paths: &[PathBuf],
 ) -> HashMap<String, PathBuf> {
-    let mut classmap = HashMap::new();
+    let mut php_files: Vec<PathBuf> = Vec::new();
     for dir in dirs {
         if !dir.is_dir() {
             continue;
         }
-        scan_directory_gitignore(dir, vendor_dir_paths, &mut classmap);
+        collect_php_files(dir, vendor_dir_paths, &mut php_files);
     }
-    classmap
+    scan_files_parallel_classes(&php_files)
 }
 
 /// Build a classmap by scanning all `.php` files under the given
@@ -166,6 +190,8 @@ pub fn scan_directories(
 /// Entries from `classmap_dirs` are scanned without PSR-4 filtering
 /// (equivalent to Composer's `autoload.classmap` entries).
 ///
+/// File scanning is parallelised across CPU cores.
+///
 /// `vendor_dir_paths` contains absolute paths of all known vendor
 /// directories.  Any directory whose absolute path matches one of
 /// these is skipped.
@@ -174,22 +200,29 @@ pub fn scan_psr4_directories(
     classmap_dirs: &[PathBuf],
     vendor_dir_paths: &[PathBuf],
 ) -> HashMap<String, PathBuf> {
-    let mut classmap = HashMap::new();
-
-    // PSR-4 directories with namespace filtering
+    // ── PSR-4 directories: collect (path, expected_fqn) pairs ───────
+    let mut psr4_files: Vec<(PathBuf, String)> = Vec::new();
     for (prefix, base_path) in psr4 {
         if !base_path.is_dir() {
             continue;
         }
-        scan_psr4_directory_gitignore(base_path, prefix, vendor_dir_paths, &mut classmap);
+        collect_psr4_php_files(base_path, prefix, vendor_dir_paths, &mut psr4_files);
     }
 
-    // Plain classmap directories (no namespace filtering)
+    // ── Plain classmap directories ──────────────────────────────────
+    let mut plain_files: Vec<PathBuf> = Vec::new();
     for dir in classmap_dirs {
         if !dir.is_dir() {
             continue;
         }
-        scan_directory_gitignore(dir, vendor_dir_paths, &mut classmap);
+        collect_php_files(dir, vendor_dir_paths, &mut plain_files);
+    }
+
+    // ── Scan all files in parallel ──────────────────────────────────
+    let mut classmap = scan_files_parallel_psr4(&psr4_files);
+    let plain_classmap = scan_files_parallel_classes(&plain_files);
+    for (fqcn, path) in plain_classmap {
+        classmap.entry(fqcn).or_insert(path);
     }
 
     classmap
@@ -216,21 +249,25 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
     //   Composer 1: top-level array of packages
     //   Composer 2: { "packages": [...] }
     let packages = if let Some(arr) = json.as_array() {
-        arr.clone()
+        arr.as_slice()
     } else if let Some(pkgs) = json.get("packages").and_then(|p| p.as_array()) {
-        pkgs.clone()
+        pkgs.as_slice()
     } else {
         return HashMap::new();
     };
 
-    let mut classmap = HashMap::new();
     let vendor_dir_paths: Vec<PathBuf> = vec![vendor_path.clone()];
 
     // The directory containing installed.json — install-path values
     // are relative to this directory.
     let composer_dir = vendor_path.join("composer");
 
-    for package in &packages {
+    // Phase 1: collect all file paths from all packages (sequential
+    // walk, but no file I/O beyond stat calls).
+    let mut psr4_files: Vec<(PathBuf, String)> = Vec::new();
+    let mut plain_files: Vec<PathBuf> = Vec::new();
+
+    for package in packages {
         // Locate the package on disk.  Composer 2's installed.json
         // includes an `install-path` field that is relative to the
         // `vendor/composer/` directory.  This is the authoritative
@@ -274,12 +311,7 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
                 for dir_str in value_to_strings(paths) {
                     let dir = pkg_path.join(&dir_str);
                     if dir.is_dir() {
-                        scan_psr4_directory_gitignore(
-                            &dir,
-                            &prefix,
-                            &vendor_dir_paths,
-                            &mut classmap,
-                        );
+                        collect_psr4_php_files(&dir, &prefix, &vendor_dir_paths, &mut psr4_files);
                     }
                 }
             }
@@ -291,15 +323,20 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
                 if let Some(dir_str) = entry.as_str() {
                     let dir = pkg_path.join(dir_str);
                     if dir.is_dir() {
-                        scan_directory_gitignore(&dir, &vendor_dir_paths, &mut classmap);
+                        collect_php_files(&dir, &vendor_dir_paths, &mut plain_files);
                     } else if dir.is_file() && dir.extension().is_some_and(|ext| ext == "php") {
-                        for fqcn in scan_file(&dir) {
-                            classmap.entry(fqcn).or_insert_with(|| dir.clone());
-                        }
+                        plain_files.push(dir);
                     }
                 }
             }
         }
+    }
+
+    // Phase 2: scan all collected files in parallel
+    let mut classmap = scan_files_parallel_psr4(&psr4_files);
+    let plain_classmap = scan_files_parallel_classes(&plain_files);
+    for (fqcn, path) in plain_classmap {
+        classmap.entry(fqcn).or_insert(path);
     }
 
     classmap
@@ -321,6 +358,205 @@ pub fn scan_workspace_fallback(
     vendor_dir_paths: &[PathBuf],
 ) -> HashMap<String, PathBuf> {
     scan_directories(&[workspace_root.to_path_buf()], vendor_dir_paths)
+}
+
+/// Scan a batch of files for class names in parallel and return a classmap.
+///
+/// Uses [`std::thread::scope`] with one thread per CPU core.  Small
+/// batches (≤ 4 files) are processed sequentially to avoid thread
+/// overhead.
+fn scan_files_parallel_classes(files: &[PathBuf]) -> HashMap<String, PathBuf> {
+    if files.is_empty() {
+        return HashMap::new();
+    }
+
+    // Small batches: sequential
+    if files.len() <= 4 {
+        let mut classmap = HashMap::new();
+        for path in files {
+            if let Ok(content) = std::fs::read(path) {
+                for fqcn in scan_content(&content) {
+                    classmap.entry(fqcn).or_insert_with(|| path.clone());
+                }
+            }
+        }
+        return classmap;
+    }
+
+    let n_threads = thread_count().min(files.len());
+    let chunk_size = files.len().div_ceil(n_threads);
+
+    let results: Vec<Vec<(String, PathBuf)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(chunk_size)
+            .map(|chunk| {
+                s.spawn(move || {
+                    let mut local: Vec<(String, PathBuf)> = Vec::new();
+                    for path in chunk {
+                        if let Ok(content) = std::fs::read(path) {
+                            for fqcn in scan_content(&content) {
+                                local.push((fqcn, path.clone()));
+                            }
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let total: usize = results.iter().map(|v| v.len()).sum();
+    let mut classmap = HashMap::with_capacity(total);
+    for batch in results {
+        for (fqcn, path) in batch {
+            classmap.entry(fqcn).or_insert(path);
+        }
+    }
+    classmap
+}
+
+/// Scan a batch of files for class names with PSR-4 filtering in
+/// parallel.
+///
+/// Each entry is `(file_path, expected_fqn)`.  Only classes whose FQN
+/// matches the expected FQN are included.
+fn scan_files_parallel_psr4(files: &[(PathBuf, String)]) -> HashMap<String, PathBuf> {
+    if files.is_empty() {
+        return HashMap::new();
+    }
+
+    // Small batches: sequential
+    if files.len() <= 4 {
+        let mut classmap = HashMap::new();
+        for (path, expected_fqn) in files {
+            if let Ok(content) = std::fs::read(path) {
+                for fqcn in scan_content(&content) {
+                    if &fqcn == expected_fqn {
+                        classmap.entry(fqcn).or_insert_with(|| path.clone());
+                    }
+                }
+            }
+        }
+        return classmap;
+    }
+
+    let n_threads = thread_count().min(files.len());
+    let chunk_size = files.len().div_ceil(n_threads);
+
+    let results: Vec<Vec<(String, PathBuf)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(chunk_size)
+            .map(|chunk| {
+                s.spawn(move || {
+                    let mut local: Vec<(String, PathBuf)> = Vec::new();
+                    for (path, expected_fqn) in chunk {
+                        if let Ok(content) = std::fs::read(path) {
+                            for fqcn in scan_content(&content) {
+                                if &fqcn == expected_fqn {
+                                    local.push((fqcn, path.clone()));
+                                }
+                            }
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let total: usize = results.iter().map(|v| v.len()).sum();
+    let mut classmap = HashMap::with_capacity(total);
+    for batch in results {
+        for (fqcn, path) in batch {
+            classmap.entry(fqcn).or_insert(path);
+        }
+    }
+    classmap
+}
+
+/// Scan a batch of files for all symbols (classes, functions, constants)
+/// in parallel and return a [`WorkspaceScanResult`].
+fn scan_files_parallel_full(files: &[PathBuf]) -> WorkspaceScanResult {
+    if files.is_empty() {
+        return WorkspaceScanResult::default();
+    }
+
+    // Small batches: sequential
+    if files.len() <= 4 {
+        let mut result = WorkspaceScanResult::default();
+        for path in files {
+            if let Ok(content) = std::fs::read(path) {
+                let scan = find_symbols(&content);
+                for fqcn in scan.classes {
+                    result.classmap.entry(fqcn).or_insert_with(|| path.clone());
+                }
+                for fqn in scan.functions {
+                    result
+                        .function_index
+                        .entry(fqn)
+                        .or_insert_with(|| path.clone());
+                }
+                for name in scan.constants {
+                    result
+                        .constant_index
+                        .entry(name)
+                        .or_insert_with(|| path.clone());
+                }
+            }
+        }
+        return result;
+    }
+
+    let n_threads = thread_count().min(files.len());
+    let chunk_size = files.len().div_ceil(n_threads);
+
+    let results: Vec<Vec<(ScanResult, PathBuf)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = files
+            .chunks(chunk_size)
+            .map(|chunk| {
+                s.spawn(move || {
+                    let mut local: Vec<(ScanResult, PathBuf)> = Vec::new();
+                    for path in chunk {
+                        if let Ok(content) = std::fs::read(path) {
+                            let scan = find_symbols(&content);
+                            if !scan.classes.is_empty()
+                                || !scan.functions.is_empty()
+                                || !scan.constants.is_empty()
+                            {
+                                local.push((scan, path.clone()));
+                            }
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    let mut result = WorkspaceScanResult::default();
+    for batch in results {
+        for (scan, path) in batch {
+            for fqcn in scan.classes {
+                result.classmap.entry(fqcn).or_insert_with(|| path.clone());
+            }
+            for fqn in scan.functions {
+                result
+                    .function_index
+                    .entry(fqn)
+                    .or_insert_with(|| path.clone());
+            }
+            for name in scan.constants {
+                result
+                    .constant_index
+                    .entry(name)
+                    .or_insert_with(|| path.clone());
+            }
+        }
+    }
+    result
 }
 
 /// Scan all `.php` files under the workspace root using the full-scan
@@ -345,9 +581,9 @@ pub fn scan_workspace_fallback_full(
 ) -> WorkspaceScanResult {
     use ignore::WalkBuilder;
 
-    let mut result = WorkspaceScanResult::default();
     let skip_dirs_owned = skip_dirs.clone();
 
+    // Phase 1: collect file paths (single-threaded walk)
     let walker = WalkBuilder::new(workspace_root)
         .git_ignore(true)
         .git_global(true)
@@ -367,33 +603,16 @@ pub fn scan_workspace_fallback_full(
         })
         .build();
 
+    let mut php_files: Vec<PathBuf> = Vec::new();
     for entry in walker.flatten() {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
-            let scan = scan_file_full(path);
-            let path_buf = path.to_path_buf();
-            for fqcn in scan.classes {
-                result
-                    .classmap
-                    .entry(fqcn)
-                    .or_insert_with(|| path_buf.clone());
-            }
-            for fqn in scan.functions {
-                result
-                    .function_index
-                    .entry(fqn)
-                    .or_insert_with(|| path_buf.clone());
-            }
-            for name in scan.constants {
-                result
-                    .constant_index
-                    .entry(name)
-                    .or_insert_with(|| path_buf.clone());
-            }
+            php_files.push(path.to_path_buf());
         }
     }
 
-    result
+    // Phase 2: scan files in parallel
+    scan_files_parallel_full(&php_files)
 }
 
 // ─── Core scanner ───────────────────────────────────────────────────────────
@@ -438,53 +657,66 @@ pub fn find_symbols(content: &[u8]) -> ScanResult {
     let mut heredoc_id: &[u8] = &[];
 
     while i < len {
-        // ── Skip: line comment ──────────────────────────────────────
+        // ── Skip: line comment (memchr to newline) ──────────────────
         if in_line_comment {
-            if content[i] == b'\n' {
-                in_line_comment = false;
+            if let Some(pos) = memchr(b'\n', &content[i..]) {
+                i += pos + 1;
+            } else {
+                break; // rest of file is a comment
             }
-            i += 1;
+            in_line_comment = false;
             continue;
         }
 
-        // ── Skip: block comment ─────────────────────────────────────
+        // ── Skip: block comment (memchr to '*') ─────────────────────
         if in_block_comment {
-            if content[i] == b'*' && i + 1 < len && content[i + 1] == b'/' {
-                in_block_comment = false;
-                i += 2;
+            if let Some(pos) = memchr(b'*', &content[i..]) {
+                i += pos;
+                if i + 1 < len && content[i + 1] == b'/' {
+                    in_block_comment = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             } else {
-                i += 1;
+                break; // unclosed block comment
             }
             continue;
         }
 
-        // ── Skip: single-quoted string ──────────────────────────────
+        // ── Skip: single-quoted string (memchr to '\'' or '\\') ────
         if in_single_string {
-            if content[i] == b'\\' && i + 1 < len {
-                i += 2;
-            } else if content[i] == b'\'' {
-                in_single_string = false;
-                i += 1;
-            } else {
-                i += 1;
+            match memchr2_single_string(&content[i..]) {
+                Some((offset, b'\\')) => {
+                    i += offset + 2; // skip escaped char
+                }
+                Some((offset, _)) => {
+                    // Found closing quote
+                    i += offset + 1;
+                    in_single_string = false;
+                }
+                None => break, // unclosed string
             }
             continue;
         }
 
-        // ── Skip: double-quoted string ──────────────────────────────
+        // ── Skip: double-quoted string (memchr to '"' or '\\') ─────
         if in_double_string {
-            if content[i] == b'\\' && i + 1 < len {
-                i += 2;
-            } else if content[i] == b'"' {
-                in_double_string = false;
-                i += 1;
-            } else {
-                i += 1;
+            match memchr2_double_string(&content[i..]) {
+                Some((offset, b'\\')) => {
+                    i += offset + 2; // skip escaped char
+                }
+                Some((offset, _)) => {
+                    // Found closing quote
+                    i += offset + 1;
+                    in_double_string = false;
+                }
+                None => break, // unclosed string
             }
             continue;
         }
 
-        // ── Skip: heredoc / nowdoc ──────────────────────────────────
+        // ── Skip: heredoc / nowdoc (memchr to newline) ──────────────
         if in_heredoc {
             let line_start = i;
             while i < len && (content[i] == b' ' || content[i] == b'\t') {
@@ -505,11 +737,10 @@ pub fn find_symbols(content: &[u8]) -> ScanResult {
                 }
             }
             i = line_start;
-            while i < len && content[i] != b'\n' {
-                i += 1;
-            }
-            if i < len {
-                i += 1;
+            if let Some(pos) = memchr(b'\n', &content[i..]) {
+                i += pos + 1;
+            } else {
+                break; // rest of file is inside heredoc
             }
             continue;
         }
@@ -816,53 +1047,64 @@ pub fn find_classes(content: &[u8]) -> Vec<String> {
     let mut heredoc_id: &[u8] = &[];
 
     while i < len {
-        // ── Skip: line comment ──────────────────────────────────────
+        // ── Skip: line comment (memchr to newline) ──────────────────
         if in_line_comment {
-            if content[i] == b'\n' {
-                in_line_comment = false;
+            if let Some(pos) = memchr(b'\n', &content[i..]) {
+                i += pos + 1;
+            } else {
+                break;
             }
-            i += 1;
+            in_line_comment = false;
             continue;
         }
 
-        // ── Skip: block comment ─────────────────────────────────────
+        // ── Skip: block comment (memchr to '*') ─────────────────────
         if in_block_comment {
-            if content[i] == b'*' && i + 1 < len && content[i + 1] == b'/' {
-                in_block_comment = false;
-                i += 2;
+            if let Some(pos) = memchr(b'*', &content[i..]) {
+                i += pos;
+                if i + 1 < len && content[i + 1] == b'/' {
+                    in_block_comment = false;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
             } else {
-                i += 1;
+                break;
             }
             continue;
         }
 
-        // ── Skip: single-quoted string ──────────────────────────────
+        // ── Skip: single-quoted string (memchr to '\'' or '\\') ────
         if in_single_string {
-            if content[i] == b'\\' && i + 1 < len {
-                i += 2;
-            } else if content[i] == b'\'' {
-                in_single_string = false;
-                i += 1;
-            } else {
-                i += 1;
+            match memchr2_single_string(&content[i..]) {
+                Some((offset, b'\\')) => {
+                    i += offset + 2;
+                }
+                Some((offset, _)) => {
+                    i += offset + 1;
+                    in_single_string = false;
+                }
+                None => break,
             }
             continue;
         }
 
-        // ── Skip: double-quoted string ──────────────────────────────
+        // ── Skip: double-quoted string (memchr to '"' or '\\') ─────
         if in_double_string {
-            if content[i] == b'\\' && i + 1 < len {
-                i += 2;
-            } else if content[i] == b'"' {
-                in_double_string = false;
-                i += 1;
-            } else {
-                i += 1;
+            match memchr2_double_string(&content[i..]) {
+                Some((offset, b'\\')) => {
+                    i += offset + 2;
+                }
+                Some((offset, _)) => {
+                    i += offset + 1;
+                    in_double_string = false;
+                }
+                None => break,
             }
             continue;
         }
 
-        // ── Skip: heredoc / nowdoc ──────────────────────────────────
+        // ── Skip: heredoc / nowdoc (memchr to newline) ──────────────
         if in_heredoc {
             let line_start = i;
             // Skip leading whitespace (PHP 7.3+ flexible heredoc)
@@ -885,11 +1127,10 @@ pub fn find_classes(content: &[u8]) -> Vec<String> {
             }
             // Skip to next line
             i = line_start;
-            while i < len && content[i] != b'\n' {
-                i += 1;
-            }
-            if i < len {
-                i += 1;
+            if let Some(pos) = memchr(b'\n', &content[i..]) {
+                i += pos + 1;
+            } else {
+                break;
             }
             continue;
         }
@@ -1103,6 +1344,20 @@ fn is_boundary_char(c: u8) -> bool {
     !c.is_ascii_alphanumeric() && c != b'_' && c != b':' && c != b'$'
 }
 
+/// Find the next single-quote or backslash in a slice, returning the
+/// offset and the byte found.  Uses `memchr` for SIMD acceleration.
+#[inline]
+fn memchr2_single_string(haystack: &[u8]) -> Option<(usize, u8)> {
+    memchr::memchr2(b'\'', b'\\', haystack).map(|pos| (pos, haystack[pos]))
+}
+
+/// Find the next double-quote or backslash in a slice, returning the
+/// offset and the byte found.  Uses `memchr` for SIMD acceleration.
+#[inline]
+fn memchr2_double_string(haystack: &[u8]) -> Option<(usize, u8)> {
+    memchr::memchr2(b'"', b'\\', haystack).map(|pos| (pos, haystack[pos]))
+}
+
 /// Check whether a keyword can start at this offset.
 ///
 /// Rejects property accesses like `$node->class` and
@@ -1241,11 +1496,9 @@ fn value_to_strings(value: &serde_json::Value) -> Vec<String> {
 /// rules at every level.  Hidden directories are skipped automatically.
 /// Directories whose absolute path is in `vendor_dir_paths` are also
 /// skipped.
-fn scan_directory_gitignore(
-    dir: &Path,
-    vendor_dir_paths: &[PathBuf],
-    classmap: &mut HashMap<String, PathBuf>,
-) {
+/// Collect all `.php` file paths under a directory using gitignore-aware
+/// walking.  Paths are appended to `out`.  No file content is read.
+fn collect_php_files(dir: &Path, vendor_dir_paths: &[PathBuf], out: &mut Vec<PathBuf>) {
     use ignore::WalkBuilder;
 
     let vendor_paths: Vec<PathBuf> = vendor_dir_paths.to_vec();
@@ -1271,25 +1524,19 @@ fn scan_directory_gitignore(
     for entry in walker.flatten() {
         let path = entry.path();
         if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
-            for fqcn in scan_file(path) {
-                classmap.entry(fqcn).or_insert_with(|| path.to_path_buf());
-            }
+            out.push(path.to_path_buf());
         }
     }
 }
 
-/// Scan a PSR-4 directory using gitignore-aware walking, only including
-/// classes whose FQN matches the PSR-4 mapping.
-///
-/// Uses the `ignore` crate's `WalkBuilder` to respect `.gitignore`
-/// rules at every level.  Hidden directories are skipped automatically.
-/// Directories whose absolute path is in `vendor_dir_paths` are also
-/// skipped.
-fn scan_psr4_directory_gitignore(
+/// Collect all `.php` file paths under a PSR-4 directory, computing the
+/// expected FQN for each file from its relative path.  Paths and
+/// expected FQNs are appended to `out`.  No file content is read.
+fn collect_psr4_php_files(
     base_path: &Path,
     namespace_prefix: &str,
     vendor_dir_paths: &[PathBuf],
-    classmap: &mut HashMap<String, PathBuf>,
+    out: &mut Vec<(PathBuf, String)>,
 ) {
     use ignore::WalkBuilder;
 
@@ -1331,12 +1578,7 @@ fn scan_psr4_directory_gitignore(
             // Convert path separators to namespace separators
             let expected_fqn = format!("{}{}", namespace_prefix, stem.replace('/', "\\"));
 
-            let classes = scan_file(path);
-            for fqcn in classes {
-                if fqcn == expected_fqn {
-                    classmap.entry(fqcn).or_insert_with(|| path.to_path_buf());
-                }
-            }
+            out.push((path.to_path_buf(), expected_fqn));
         }
     }
 }

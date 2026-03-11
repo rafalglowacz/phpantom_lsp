@@ -3176,8 +3176,10 @@ async fn test_completion_foreach_enum_cases_cross_file() {
         "}\n",
     );
 
-    let (backend, dir) =
-        create_psr4_workspace_with_enum_stubs(composer_json, &[("src/Enums/Country.php", enum_content)]);
+    let (backend, dir) = create_psr4_workspace_with_enum_stubs(
+        composer_json,
+        &[("src/Enums/Country.php", enum_content)],
+    );
 
     let handler_uri = Url::from_file_path(dir.path().join("handler.php")).unwrap();
     let handler_text = concat!(

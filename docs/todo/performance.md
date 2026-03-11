@@ -124,6 +124,101 @@ refactor:
 
 ---
 
+## 9. Parallel pre-filter in `find_implementors`
+**Impact: Medium · Effort: Medium**
+
+`find_implementors` Phase 3 reads every unloaded classmap file
+sequentially: `fs::read_to_string`, string pre-filter for the target
+name, then `parse_and_cache_file`. On a project with thousands of
+vendor classes, this loop is dominated by I/O latency. The string
+pre-filter rejects most files (the target name appears in very few),
+so the vast majority of reads are wasted.
+
+### Fix
+
+Split Phase 3 into two sub-phases:
+
+1. **Parallel pre-filter.** Collect the candidate paths into a
+   `Vec<PathBuf>`, then use `std::thread::scope` to read files and
+   run the `raw.contains(target_short)` check in parallel. Return
+   only the paths that pass the filter along with their content.
+
+2. **Sequential parse.** For the (few) files that pass, call
+   `parse_and_cache_file` sequentially. This step mutates `ast_map`
+   and calls `class_loader`, which may re-lock shared state.
+
+The same pattern applies to Phase 5 (PSR-4 directory walk for files
+not in the classmap). The pre-filter I/O is the bottleneck; the
+parse step processes very few files and is fast.
+
+### Trade-off
+
+Thread spawning overhead is only worthwhile when the candidate set
+is large. Skip parallelism when the candidate count is below a
+threshold (e.g. 8 files).
+
+---
+
+## 10. `memmem` for block comment terminator search
+**Impact: Low-Medium · Effort: Low**
+
+The current block comment skip in `find_classes` and `find_symbols`
+uses `memchr(b'*', ...)` and then checks the next byte for `/`.
+This is effective but can false-match on `*` characters inside
+docblock annotations (e.g. `@param`, `@return`, starred lines).
+Each false match falls through to a single-byte advance, which is
+correct but suboptimal for large docblocks.
+
+### Fix
+
+Replace `memchr(b'*', ...)` with `memmem::find(content[i..], b"*/")`.
+This searches for the two-byte sequence `*/` directly, skipping all
+intermediate `*` characters in a single SIMD pass. The `memmem`
+searcher is already imported and used for keyword pre-screening.
+
+For typical PHP files this is a marginal improvement. For files with
+very large docblocks (e.g. generated API documentation classes with
+hundreds of `@method` tags), it avoids O(n) false `*` matches inside
+the comment body.
+
+---
+
+## 11. `memmap2` for file reads during scanning
+**Impact: Low-Medium · Effort: Low**
+
+All file-scanning paths (`scan_files_parallel_classes`,
+`scan_files_parallel_psr4`, `scan_files_parallel_full`, and the
+`find_implementors` pre-filter) use `std::fs::read(path)` which
+copies the entire file into a heap-allocated `Vec<u8>`. When the OS
+page cache already has the file mapped, `memmap2` can provide a
+read-only view of the file's pages without any copy.
+
+### Fix
+
+Add `memmap2` as a dependency. In the parallel scan helpers, replace
+`std::fs::read(path)` with `unsafe { Mmap::map(&file) }`. The
+`find_classes` and `find_symbols` scanners already accept `&[u8]`,
+so the change is confined to the call sites.
+
+### Safety
+
+Memory-mapped reads are `unsafe` because another process could
+truncate the file while the map is live, causing a SIGBUS. In
+practice this does not happen during LSP initialization (the user is
+not deleting PHP files while the editor starts). A fallback to
+`fs::read` on map failure handles edge cases.
+
+### When to implement
+
+Profile first. On Linux with a warm page cache the difference
+between `read` and `mmap` is small for files under ~100 KB (which
+covers most PHP files). The benefit is more pronounced on macOS
+where `read` involves an extra kernel-to-userspace copy. If
+profiling shows that file I/O is no longer the bottleneck after
+parallelisation, this item can be dropped.
+
+---
+
 ## 8. Incremental text sync
 **Impact: Low-Medium · Effort: Medium**
 

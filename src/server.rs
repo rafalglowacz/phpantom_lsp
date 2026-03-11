@@ -511,6 +511,13 @@ impl Backend {
         let (mappings, vendor_dir) = composer::parse_composer_json(root);
         let mapping_count = mappings.len();
 
+        // Parse the raw composer.json once so that build_self_scan_composer
+        // and is_classmap_incomplete can reuse it without redundant I/O.
+        let composer_json: Option<serde_json::Value> =
+            std::fs::read_to_string(root.join("composer.json"))
+                .ok()
+                .and_then(|c| serde_json::from_str(&c).ok());
+
         // Cache the vendor dir path so cross-file scans can skip it
         // without re-reading composer.json on every request.
         let vendor_path = root.join(&vendor_dir);
@@ -537,17 +544,25 @@ impl Backend {
                 (cm, source)
             }
             IndexingStrategy::SelfScan | IndexingStrategy::Full => {
-                let scan = self.build_self_scan_composer(root, &vendor_dir);
+                let scan = self.build_self_scan_composer(root, &vendor_dir, composer_json.as_ref());
                 self.populate_autoload_indices(&scan);
                 (scan.classmap, "self-scan")
             }
             IndexingStrategy::Composer => {
                 let composer_cm = composer::parse_autoload_classmap(root, &vendor_dir);
                 if !composer_cm.is_empty() {
-                    let incomplete = self.is_classmap_incomplete(root, &composer_cm);
+                    let incomplete = Self::is_classmap_incomplete_with_json(
+                        root,
+                        &composer_cm,
+                        composer_json.as_ref(),
+                    );
                     if incomplete {
                         let mut cm = composer_cm;
-                        let scan = self.build_self_scan_composer(root, &vendor_dir);
+                        let scan = self.build_self_scan_composer(
+                            root,
+                            &vendor_dir,
+                            composer_json.as_ref(),
+                        );
                         self.populate_autoload_indices(&scan);
                         for (fqcn, path) in scan.classmap {
                             cm.entry(fqcn).or_insert(path);
@@ -561,7 +576,8 @@ impl Backend {
                         MessageType::INFO,
                         "PHPantom: No Composer classmap found. Building class index. Run `composer dump-autoload -o` for faster startup.".to_string(),
                     ).await;
-                    let scan = self.build_self_scan_composer(root, &vendor_dir);
+                    let scan =
+                        self.build_self_scan_composer(root, &vendor_dir, composer_json.as_ref());
                     self.populate_autoload_indices(&scan);
                     (scan.classmap, "self-scan")
                 }
@@ -715,7 +731,7 @@ impl Backend {
             // subproject, self-scan its PSR-4 directories.
             let sub_cm_empty = composer::parse_autoload_classmap(sub_root, vendor_dir).is_empty();
             if sub_cm_empty {
-                let scan = self.build_self_scan_composer(sub_root, vendor_dir);
+                let scan = self.build_self_scan_composer(sub_root, vendor_dir, None);
                 self.populate_autoload_indices(&scan);
                 let mut classmap = self.classmap.write();
                 for (fqcn, path) in scan.classmap {
@@ -931,17 +947,28 @@ impl Backend {
         &self,
         project_root: &std::path::Path,
         vendor_dir: &str,
+        preloaded_json: Option<&serde_json::Value>,
     ) -> WorkspaceScanResult {
-        // Read composer.json to extract autoload directories.
-        let composer_path = project_root.join("composer.json");
-        let json = match std::fs::read_to_string(&composer_path)
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        {
+        // Use the pre-parsed JSON when available; only read from disk
+        // as a fallback (e.g. monorepo subproject calls).
+        let owned_json;
+        let json = match preloaded_json {
             Some(j) => j,
             None => {
-                let skip_dirs = HashSet::new();
-                return classmap_scanner::scan_workspace_fallback_full(project_root, &skip_dirs);
+                let composer_path = project_root.join("composer.json");
+                owned_json = std::fs::read_to_string(&composer_path)
+                    .ok()
+                    .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
+                match owned_json.as_ref() {
+                    Some(j) => j,
+                    None => {
+                        let skip_dirs = HashSet::new();
+                        return classmap_scanner::scan_workspace_fallback_full(
+                            project_root,
+                            &skip_dirs,
+                        );
+                    }
+                }
             }
         };
 
@@ -1031,18 +1058,13 @@ impl Backend {
     /// absent, the classmap is considered incomplete (likely from a
     /// non-optimized `composer dump-autoload` that only covers vendor
     /// code).
-    fn is_classmap_incomplete(
-        &self,
+    fn is_classmap_incomplete_with_json(
         workspace_root: &std::path::Path,
         classmap: &HashMap<String, PathBuf>,
+        json: Option<&serde_json::Value>,
     ) -> bool {
-        let composer_path = workspace_root.join("composer.json");
-        let json = match std::fs::read_to_string(&composer_path)
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        {
-            Some(j) => j,
-            None => return false,
+        let Some(json) = json else {
+            return false;
         };
 
         // Collect PSR-4 namespace prefixes from the project's own autoload.

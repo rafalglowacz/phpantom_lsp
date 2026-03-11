@@ -194,6 +194,9 @@ eventually but don't move the needle.
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
 | 90 | Type AST for `apply_substitution` (full refactor) | High | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
+| 96 | Parallel pre-filter in `find_implementors` | Medium | Performance | [performance.md §9](todo/performance.md#9-parallel-pre-filter-in-find_implementors) |
+| 97 | `memmem` for block comment terminator search | Low | Performance | [performance.md §10](todo/performance.md#10-memmem-for-block-comment-terminator-search) |
+| 98 | `memmap2` for file reads during scanning | Low | Performance | [performance.md §11](todo/performance.md#11-memmap2-for-file-reads-during-scanning) |
 
 ### External stubs
 

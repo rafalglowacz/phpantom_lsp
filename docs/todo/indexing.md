@@ -195,6 +195,23 @@ removed. Parsed files stay cached in `ast_map`, `symbol_maps`,
 from the work already done. This trades a small amount of memory for
 faster repeat queries and simpler code.
 
+**Self-scan classmap building** (`scan_psr4_directories`,
+`scan_directories`, `scan_vendor_packages`,
+`scan_workspace_fallback_full`) now uses a two-phase approach:
+directory walks collect file paths first (single-threaded), then files
+are read and scanned in parallel batches via `std::thread::scope`.
+Three parallel helpers in `classmap_scanner.rs` cover the three scan
+modes: `scan_files_parallel_classes` (plain classmap),
+`scan_files_parallel_psr4` (PSR-4 with FQN filtering), and
+`scan_files_parallel_full` (classes + functions + constants). Small
+batches (≤ 4 files) skip threading overhead.
+
+The byte-level PHP scanner (`find_classes`, `find_symbols`) uses
+`memchr` SIMD acceleration to skip line comments, block comments,
+single-quoted strings, double-quoted strings, and heredocs/nowdocs
+instead of scanning byte-by-byte. This reduces per-file scanning time
+for files with large docblocks or string literals.
+
 ### Remaining work
 
 The following are deferred to a later sprint:
@@ -208,6 +225,10 @@ The following are deferred to a later sprint:
   interleaves reads and writes through `class_loader` callbacks.
 - **`memmap2` for file reads.** Avoids copying file contents into
   userspace when the OS page cache already has them.
+- **Parallel autoload file scanning.** The `scan_autoload_files` work
+  queue is inherently sequential due to `require_once` chain
+  following, but the initial batch of files could be processed in
+  parallel before following chains.
 
 ### Why not rayon?
 
