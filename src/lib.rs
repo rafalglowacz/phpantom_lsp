@@ -97,6 +97,7 @@ mod formatting;
 mod highlight;
 mod hover;
 pub(crate) mod inheritance;
+mod inlay_hints;
 mod parser;
 mod phpstan;
 mod references;

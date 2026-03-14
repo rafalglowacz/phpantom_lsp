@@ -173,6 +173,12 @@ pub(crate) struct CallSite {
     /// argument list.  Used to compute the active parameter index:
     /// count how many comma offsets are < cursor offset.
     pub comma_offsets: Vec<u32>,
+    /// Byte offset of each argument expression's start token.
+    ///
+    /// One entry per argument in source order.  Used by inlay hints
+    /// to place parameter-name annotations immediately before each
+    /// argument.
+    pub arg_offsets: Vec<u32>,
     /// Number of arguments passed at the call site.
     ///
     /// Computed from the AST argument list length during extraction.
@@ -184,6 +190,10 @@ pub(crate) struct CallSite {
     /// When `true`, argument count diagnostics are suppressed because
     /// the actual number of arguments is unknown at static analysis time.
     pub has_unpacking: bool,
+    /// Indices (into `arg_offsets`) of arguments that use named syntax
+    /// (e.g. `name: $value`).  Inlay hints are suppressed for these
+    /// because the parameter name is already visible in source.
+    pub named_arg_indices: Vec<u32>,
 }
 
 // ─── Variable definition site structures ────────────────────────────────────

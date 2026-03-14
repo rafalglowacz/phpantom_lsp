@@ -71,6 +71,7 @@ impl LanguageServer for Backend {
                     },
                     completion_item: None,
                 }),
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
@@ -622,7 +623,7 @@ impl Backend {
     /// Most LSP handlers follow the pattern "get content, run handler
     /// with panic protection, return result" — this helper captures
     /// that boilerplate in one place.
-    fn with_file_content<T>(
+    pub(crate) fn with_file_content<T>(
         &self,
         handler_name: &str,
         uri: &str,

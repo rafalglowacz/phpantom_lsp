@@ -45,7 +45,6 @@ feature surface grows.
 
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
-| 40 | Inlay hints (`textDocument/inlayHint`) | Medium | LSP Features | [lsp-features.md §9](todo/lsp-features.md#9-inlay-hints-textdocumentinlayhint) |
 | 87 | Reference-counted `ClassInfo` (`Arc<ClassInfo>`) — propagate through APIs | Medium | Performance | [performance.md §2](todo/performance.md#2-reference-counted-classinfo-arcclassinfo) |
 
 **After Sprint 3:** PHPantom feels like a complete LSP to everyday

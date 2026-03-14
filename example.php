@@ -2362,6 +2362,47 @@ class CodeLensDemo extends ScaffoldingAbstractShape implements ScaffoldingDrawab
 }
 
 
+// ── Inlay Hints ─────────────────────────────────────────────────────────────
+// Enable inlay hints in your editor to see parameter names and by-reference
+// indicators at call sites. PHPantom shows:
+//   - Parameter name hints: greet(/*name:*/ 'Alice', /*age:*/ 25)
+//   - By-reference indicators: modify(/*&data:*/ $arr)
+// Hints are suppressed when the argument already makes the parameter obvious
+// (e.g. $name matches $name, or a property ->name matches $name).
+
+class InlayHintsDemo
+{
+    public function demo(): void
+    {
+        // Parameter name hints appear before each argument:
+        $user = createUser('Alice', 25);          // name:, age:
+
+        // By-reference parameters show & before the name:
+        $arr = [1, 2, 3];
+        $this->modify($arr, 'ascending');         // &data:, direction:
+
+        // Hints are suppressed when variable name matches parameter:
+        $needle = 'search term';
+        $this->search($needle, 10);               // (no hint for $needle), limit:
+
+        // Constructor calls also get hints:
+        $recipe = new Recipe('Cake', [new Ingredient('flour', 2)]);  // name:, ingredients:
+
+        // Static method calls:
+        User::findByEmail('alice@example.com');    // email:
+
+        // Chained method calls:
+        $pen = Pen::make('blue');                  // color:
+        $pen->rename('Sky Blue');                  // name:
+    }
+
+    /** @param array<int> &$data */
+    public function modify(array &$data, string $direction): void {}
+
+    public function search(string $needle, int $limit = 10): mixed { return null; }
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 // ┃  SCAFFOLDING — Supporting definitions below this line.              ┃

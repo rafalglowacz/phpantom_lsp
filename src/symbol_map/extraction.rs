@@ -2168,6 +2168,30 @@ fn emit_call_site(
 
     let arg_count = argument_list.arguments.len() as u32;
 
+    // Collect the byte offset of each argument's start token and
+    // track which arguments use named syntax (`name: value`).
+    let mut arg_offsets = Vec::with_capacity(arg_count as usize);
+    let mut named_arg_indices = Vec::new();
+    for (i, arg) in argument_list.arguments.iter().enumerate() {
+        match arg {
+            Argument::Positional(pos) => {
+                // If unpacking is used, the `...` token comes before the
+                // value expression.  Use the ellipsis offset when present
+                // so the hint appears before `...`.
+                let offset = pos
+                    .ellipsis
+                    .as_ref()
+                    .map(|e| e.start.offset)
+                    .unwrap_or_else(|| pos.value.span().start.offset);
+                arg_offsets.push(offset);
+            }
+            Argument::Named(named) => {
+                arg_offsets.push(named.name.span.start.offset);
+                named_arg_indices.push(i as u32);
+            }
+        }
+    }
+
     // Detect argument unpacking (`...$args`).  Only positional
     // arguments can use the spread operator; the AST stores it as
     // `ellipsis: Some(Span)` on `PositionalArgument`.
@@ -2181,8 +2205,10 @@ fn emit_call_site(
         args_end,
         call_expression,
         comma_offsets,
+        arg_offsets,
         arg_count,
         has_unpacking,
+        named_arg_indices,
     });
 }
 

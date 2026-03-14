@@ -224,56 +224,6 @@ can reject a rename before the user types a new name).
 
 ---
 
-## 9. Inlay hints (`textDocument/inlayHint`)
-**Impact: Low · Effort: Medium**
-
-Display inline type and parameter-name annotations in the editor without
-the user having to hover or trigger completion. Since we already perform
-deep type inference, this is primarily a presentation-layer feature —
-surfacing data we already compute.
-
-### Hint types (in priority order)
-
-1. **Parameter name hints** — prepend the parameter name at call sites:
-   `array_search(/*needle:*/ $x, /*haystack:*/ $arr)`. Skip when the
-   argument is a variable whose name matches the parameter name (e.g.
-   `foo($needle)` — the hint would be redundant).
-
-2. **By-reference indicator** — annotate arguments passed by reference
-   with `&`. This is a safety signal: the user may not realise a
-   function mutates its argument.
-
-3. **Inferred return type** — show the return type on functions/methods
-   that lack an explicit return type declaration. Double-clicking (in
-   editors that support it) could insert the type into the code.
-
-4. **Variable assignment type** — show the inferred type after `$x =`
-   assignments where the type isn't obvious from the RHS.
-
-### Implementation
-
-1. **Register the capability** — set `inlay_hint_provider: Some(OneOf::Left(true))` in `ServerCapabilities`.
-
-2. **Handler:** Given a range, walk the AST within that range and emit
-   `InlayHint` entries:
-   - For call expressions: resolve the callable, zip arguments with
-     parameters, emit parameter name hints.
-   - For function/method declarations without return types: resolve the
-     inferred return type, emit a hint after the closing `)`.
-   - For variable assignments: resolve the RHS type, emit a hint after
-     the `=`.
-
-3. **Configuration:** Respect editor-level `editor.inlayHints.enabled`
-   (handled by the client). Consider per-hint-type flags if users find
-   some hints noisy (e.g. `phpantom.inlayHints.parameterNames: bool`).
-
-**Performance:** Inlay hints are requested for the visible viewport
-range only (editors send the range). For a typical screen of ~50 lines,
-the cost is resolving types for the call expressions and assignments
-visible — well within our per-file performance budget.
-
----
-
 ## 11. No go-to-definition for built-in (stub) functions and constants
 **Impact: Medium · Effort: Medium**
 

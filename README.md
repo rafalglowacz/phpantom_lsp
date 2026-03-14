@@ -23,7 +23,7 @@ PHPantom focuses on deep type intelligence. Here's how it compares:
 | Formatting | 🧩 | ✅ | ✅ | 🧩 | ✅ |
 | PHPStan diagnostics | ✅ | ❌ | ❌ | ✅ | ✅ |
 | Code lens | ✅ | 💰 | ✅ | ❌ | ✅ |
-| Inlay hints | ❌ | 💰 | ✅ | ❌ | ✅ |
+| Inlay hints | ✅ | 💰 | ✅ | ❌ | ✅ |
 | Type hierarchy | ❌ | 💰 | ❌ | ❌ | ✅ |
 | Document links | ❌ | 💰 | ❌ | ❌ | ✅ |
 | **Type Intelligence** | | | | | |
