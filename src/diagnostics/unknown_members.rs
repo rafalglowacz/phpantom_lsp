@@ -2918,4 +2918,51 @@ class Helper {
             diags,
         );
     }
+
+    /// Member access on a property typed with a namespaced stub class
+    /// (e.g. `BcMath\Number`) should not produce a diagnostic.  The
+    /// stub index keys include FQNs like `"BcMath\\Number"`, and the
+    /// resolver must look them up by the full name, not just the short
+    /// segment.
+    #[test]
+    fn no_diagnostic_for_namespaced_stub_class_member() {
+        let stub_content = r#"<?php
+namespace BcMath {
+    final readonly class Number {
+        public function __construct(string|int $num) {}
+        public function add(Number|string|int $num, ?int $scale = null): Number {}
+        public function sub(Number|string|int $num, ?int $scale = null): Number {}
+    }
+}
+"#;
+        let mut stubs = std::collections::HashMap::new();
+        stubs.insert("BcMath\\Number", stub_content as &str);
+        let backend = Backend::new_test_with_stubs(stubs);
+        let uri = "file:///test.php";
+        let content = r#"<?php
+namespace Luxplus\Decimal;
+
+use BcMath\Number;
+
+final class Decimal
+{
+    private Number $number;
+
+    public function __construct(string $value) {
+        $this->number = new Number($value);
+    }
+
+    public function add(int|self|string $value): self
+    {
+        return new self($this->number->add((string)$value));
+    }
+}
+"#;
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.is_empty(),
+            "Expected no diagnostics for member access on namespaced stub class BcMath\\Number, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        );
+    }
 }

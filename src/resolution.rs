@@ -107,16 +107,37 @@ impl Backend {
 
         // ── Phase 3: Try embedded PHP stubs ──
         // Stubs are bundled in the binary for built-in classes/interfaces
-        // (e.g. UnitEnum, BackedEnum).  Parse on first access and cache in
-        // the ast_map under a `phpantom-stub://` URI so subsequent lookups
-        // hit Phase 1 and skip parsing entirely.
+        // (e.g. UnitEnum, BackedEnum, BcMath\Number).  Parse on first
+        // access and cache in the ast_map under a `phpantom-stub://` URI
+        // so subsequent lookups hit Phase 1 and skip parsing entirely.
         //
-        // Stubs live in the global namespace, so skip this phase when the
-        // caller is looking for a class in a specific namespace (e.g.
-        // "Demo\\PDO" should NOT match the global PDO stub).
-        if expected_ns.is_none()
-            && let Some(&stub_content) = self.stub_index.get(last_segment)
-        {
+        // Two lookup strategies:
+        //
+        //   a) **FQN lookup** — when the caller requests a namespaced
+        //      name like `BcMath\Number`, look it up in the stub index
+        //      by the full name.  Many PHP extensions define classes
+        //      inside namespaces (Ds, BcMath, Random, Fiber, etc.).
+        //
+        //   b) **Short-name lookup** — when the caller requests an
+        //      unqualified name like `PDO`, look it up by the short
+        //      name.  This only fires when `expected_ns` is `None` to
+        //      avoid `Demo\PDO` matching the global `PDO` stub.
+        //
+        // Strategy (a) is tried first because it is more specific.
+        if expected_ns.is_some() {
+            // Namespaced lookup — try the full FQN as a stub key.
+            if let Some(&stub_content) = self.stub_index.get(class_name) {
+                let stub_uri = format!("phpantom-stub://{}", class_name);
+                let ver = Some(self.php_version());
+                if let Some(classes) =
+                    self.parse_and_cache_content_versioned(stub_content, &stub_uri, ver)
+                    && let Some(cls) = classes.iter().find(|c| c.name == last_segment)
+                {
+                    return Some(Arc::clone(cls));
+                }
+            }
+        } else if let Some(&stub_content) = self.stub_index.get(last_segment) {
+            // Global-namespace lookup — match by short name only.
             let stub_uri = format!("phpantom-stub://{}", last_segment);
             let ver = Some(self.php_version());
             if let Some(classes) =
