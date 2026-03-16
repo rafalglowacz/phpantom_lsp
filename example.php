@@ -18,6 +18,9 @@
 
 namespace Demo {
 
+use Closure;
+use Demo\ValidationException;
+use Demo\NotFoundException;
 use Exception;
 use Stringable;
 use Demo\UserProfile as Profile;
@@ -2156,6 +2159,51 @@ class UnknownMemberDemo
 }
 
 
+// ── PHPDoc Block Generation ─────────────────────────────────────────────────
+// Typing `/**` above a declaration generates a docblock skeleton.  Tags are
+// only emitted when the native type hint needs enrichment: missing types get
+// @param/${mixed}, bare `array` gets a placeholder, and classes with @template
+// parameters get generic type tab stops (e.g. Collection<TKey, TValue>).
+// Fully-typed scalar params/return types are skipped.  Properties and
+// constants always get @var.  Uncaught exceptions always get @throws.
+// No special treatment for overrides.
+
+class PhpDocGenerationDemo extends ScaffoldingException
+{
+    public const int MAX_ITEMS = 100;
+    const LABEL = 'demo';
+
+    public string $title = '';
+    public $description;
+
+    public function demo($data, array $items, Closure $handler, callable $fallback, TypedCollection $primary, string $boring, TypedCollection $secondary): array
+    {
+        try {
+            throw new ValidationException('Invalid id');
+        } catch (ValidationException $e) {
+            // Caught — should NOT appear in @throws.
+        }
+
+        /** @throws NotFoundException */
+        getUnknownValue();
+
+        $this->throwsException();
+
+        return [];
+    }
+}
+
+
+// Class-level @extends with template tab stops.  The parent TypedCollection
+// has @template TKey and @template TValue, so typing `/**` above this class
+// generates `@extends TypedCollection<TKey, TValue>` with tab stops.
+// Try: type `/**` above this class.
+class DocGenExtendsDemo extends TypedCollection
+{
+    public function customMethod(): void {}
+}
+
+
 // ── Diagnostic: Scalar Member Access ────────────────────────────────────────
 // Accessing a property or calling a method on a scalar type (int, string,
 // bool, float, null, void, never) is always a runtime error.  PHPantom flags
@@ -2719,8 +2767,8 @@ class ScaffoldingException
     protected function lookup(int $id): ?array { return null; }
     protected function riskyOperation(): void {}
 
-    /** @throws \Exception */
-    protected function throwsException(): void { throw new \Exception('error'); }
+    /** @throws AuthorizationException */
+    protected function throwsException(): void { throw new AuthorizationException('forbidden'); }
 }
 
 class ScaffoldingClosureParamInference

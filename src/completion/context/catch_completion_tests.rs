@@ -136,8 +136,9 @@ fn test_find_inline_throws_annotations_in_catch() {
     "#;
     let result = throws_analysis::find_inline_throws_annotations(body);
     // Raw names are returned; short-name extraction happens in detect_catch_context
+    let names: Vec<&str> = result.iter().map(|t| t.type_name.as_str()).collect();
     assert_eq!(
-        result,
+        names,
         vec!["ModelNotFoundException", "App\\Exceptions\\AuthException"]
     );
 }
@@ -151,7 +152,8 @@ fn test_find_inline_throws_multiline_docblock_in_catch() {
         doStuff();
     "#;
     let result = throws_analysis::find_inline_throws_annotations(body);
-    assert_eq!(result, vec!["RuntimeException"]);
+    let names: Vec<&str> = result.iter().map(|t| t.type_name.as_str()).collect();
+    assert_eq!(names, vec!["RuntimeException"]);
 }
 
 #[test]

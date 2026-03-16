@@ -110,12 +110,13 @@ pub(crate) fn detect_catch_context(content: &str, position: Position) -> Option<
 
     // 2. Inline `/** @throws ExceptionType */` annotations
     let inline_throws = throws_analysis::find_inline_throws_annotations(&try_body);
-    for exc_type in &inline_throws {
-        let short_name = exc_type
+    for info in &inline_throws {
+        let short_name = info
+            .type_name
             .trim_start_matches('\\')
             .rsplit('\\')
             .next()
-            .unwrap_or(exc_type);
+            .unwrap_or(&info.type_name);
         if !short_name.is_empty() && seen.insert(short_name.to_lowercase()) {
             suggested_types.push(short_name.to_string());
         }

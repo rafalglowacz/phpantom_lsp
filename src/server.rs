@@ -84,6 +84,8 @@ impl LanguageServer for Backend {
                         "[".to_string(),
                         " ".to_string(),
                         "\\".to_string(),
+                        "/".to_string(),
+                        "*".to_string(),
                     ]),
                     all_commit_characters: None,
                     work_done_progress_options: WorkDoneProgressOptions {
@@ -127,6 +129,10 @@ impl LanguageServer for Backend {
                 }),
                 selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 document_formatting_provider: Some(OneOf::Left(true)),
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_string(),
+                    more_trigger_character: None,
+                }),
                 document_link_provider: Some(DocumentLinkOptions {
                     resolve_provider: Some(false),
                     work_done_progress_options: WorkDoneProgressOptions {
@@ -644,6 +650,37 @@ impl LanguageServer for Backend {
         }
 
         Ok(result)
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        // Only handle Enter ("\n") for PHPDoc block generation.
+        if params.ch != "\n" {
+            return Ok(None);
+        }
+
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+
+        let content = match self.get_file_content(&uri) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let ctx = self.file_context(&uri);
+        let class_loader = self.class_loader(&ctx);
+
+        let edits = crate::completion::phpdoc::generation::try_generate_docblock_on_enter(
+            &content,
+            position,
+            &ctx.use_map,
+            &ctx.namespace,
+            &class_loader,
+        );
+
+        Ok(edits)
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {

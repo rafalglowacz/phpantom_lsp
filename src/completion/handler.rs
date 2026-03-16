@@ -192,6 +192,23 @@ impl Backend {
                 return Ok(None);
             }
 
+            // ── PHPDoc block generation on `/**` ────────────────────
+            // When the user types `/**` above a declaration, generate
+            // a complete docblock skeleton as a single snippet item.
+            // Must run before the docblock-interior checks below.
+            {
+                let class_loader = self.class_loader(&ctx);
+                if let Some(response) = crate::completion::phpdoc::generation::try_generate_docblock(
+                    &content,
+                    position,
+                    &ctx.use_map,
+                    &ctx.namespace,
+                    &class_loader,
+                ) {
+                    return Ok(Some(response));
+                }
+            }
+
             // ── PHPDoc tag completion ────────────────────────────────
             // Always short-circuits when an `@` prefix is detected
             // inside a docblock — even when the item list is empty.
@@ -326,6 +343,30 @@ impl Backend {
         ctx: &FileContext,
     ) -> CompletionResponse {
         let context = crate::completion::phpdoc::detect_context(content, position);
+        let class_loader = self.class_loader(ctx);
+        let function_loader = self.function_loader(ctx);
+
+        // For inline variable assignments, try to infer the type from
+        // the assignment RHS so that @var can be pre-filled.
+        let inferred_var_type =
+            if matches!(context, crate::completion::phpdoc::DocblockContext::Inline) {
+                let sym = crate::completion::phpdoc::extract_symbol_info(content, position);
+                crate::completion::phpdoc::generation::infer_inline_variable_type(
+                    &sym,
+                    content,
+                    position,
+                    &ctx.classes,
+                    &class_loader,
+                    Some(&function_loader as &dyn Fn(&str) -> Option<crate::types::FunctionInfo>),
+                )
+            } else {
+                None
+            };
+
+        let smart = crate::completion::phpdoc::SmartContext {
+            inferred_inline_var_type: inferred_var_type.as_deref(),
+            class_loader: Some(&class_loader),
+        };
         let items = crate::completion::phpdoc::build_phpdoc_completions(
             content,
             prefix,
@@ -333,6 +374,7 @@ impl Backend {
             position,
             &ctx.use_map,
             &ctx.namespace,
+            &smart,
         );
         CompletionResponse::Array(items)
     }
@@ -357,7 +399,29 @@ impl Backend {
         };
 
         match detect_docblock_typing_position(content, position) {
-            Some(DocblockTypingContext::Type { partial }) => {
+            Some(DocblockTypingContext::Type { partial, tag }) => {
+                // For @throws, use Throwable-filtered completion with
+                // the same ordering as `throw new` so that exception
+                // classes appear at the top.
+                if tag == "throws" {
+                    let (class_items, class_incomplete) = self.build_catch_class_name_completions(
+                        &ctx.use_map,
+                        &ctx.namespace,
+                        &partial,
+                        content,
+                        false,
+                        position,
+                    );
+                    return if class_items.is_empty() {
+                        None
+                    } else {
+                        Some(CompletionResponse::List(CompletionList {
+                            is_incomplete: class_incomplete,
+                            items: class_items,
+                        }))
+                    };
+                }
+
                 // Offer scalar / built-in types first, then class
                 // / interface / enum names from the project.
                 let partial_lower = partial.to_lowercase();

@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Document Links.** `require`/`include` paths are now Ctrl+Clickable. Path resolution supports string literals, `__DIR__` concatenation, `dirname(__DIR__)`, `dirname(__FILE__)`, and nested `dirname` with levels. Only emits links for files that exist on disk.
 - **`@see` navigation.** `@see` references in docblocks now work with go-to-definition. Supported forms: `@see ClassName`, `@see ClassName::method()`, `@see ClassName::$property`, `@see ClassName::CONSTANT`, `@see functionName()`, and inline `{@see ...}`.
 - **`@link`/`@see` URLs in hover.** Hover popups now show all `@link` and `@see` URLs from the docblock as clickable links (previously only the first `@link` was shown).
+- **PHPDoc block generation.** Typing `/**` above any declaration generates a docblock skeleton. Tags are only emitted when the native type hint needs enrichment: missing types get `@param`/`@return` with a `mixed` placeholder, bare `array` gets a placeholder, and classes with `@template` parameters get generic type tab stops. Fully-typed scalars are skipped. Properties and constants always get `@var`. Class-likes with templated parents or interfaces get `@extends`/`@implements` tags. Uncaught exceptions get `@throws` with auto-import. Works both via completion (editors that do not auto-close `/**`) and on-type formatting (editors that do).
+- **PHPDoc `@var` completion.** Inline `@var` above variable assignments sorts first and pre-fills the inferred type when available. Template parameters from `@template` enrich `@param`, `@return`, and `@var` type hints.
 
 ### Changed
 
@@ -42,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Diagnostics.** Scalar member access errors now detect method-return chains where an intermediate call returns a scalar type (e.g. `$user->getName()->trim()` correctly reports "Cannot access method 'trim' on type 'string'").
 - **Diagnostics.** By-reference `@param` annotations (e.g. `@param array<int> &$data`) no longer produce a false "unknown class '$data'" diagnostic.
+- **Hover on empty arrays.** `[]` and `array()` literals now show `array` on hover instead of nothing.
 
 ## [0.5.0] - 2026-03-12
 

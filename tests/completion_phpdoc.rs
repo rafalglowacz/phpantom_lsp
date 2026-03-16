@@ -1,6 +1,6 @@
 mod common;
 
-use common::create_test_backend;
+use common::{create_psr4_workspace, create_test_backend};
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -1842,4 +1842,962 @@ async fn test_phpdoc_return_void_no_hint_bare_return() {
         "Should suggest @return void when body only has bare return;"
     );
     assert_eq!(return_item.unwrap().label, "@return void");
+}
+
+// ─── Inline @var completion ─────────────────────────────────────────────────
+
+/// Inline @var above a variable assignment should sort first (0a_ prefix),
+/// ahead of general tags like @example, @todo, etc.
+#[tokio::test]
+async fn test_phpdoc_inline_var_sorts_first() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_sort.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $var = getUser();\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item in inline context"
+    );
+    let v = var_item.unwrap();
+    assert!(
+        v.sort_text.as_deref().unwrap_or("").starts_with("0a_"),
+        "Inline @var should have sort text starting with 0a_, got: {:?}",
+        v.sort_text
+    );
+
+    // General tags like @todo should sort later (prefix "1_")
+    let todo_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@todo"));
+    assert!(todo_item.is_some(), "Should have @todo item");
+    let t = todo_item.unwrap();
+    assert!(
+        t.sort_text.as_deref().unwrap_or("") > v.sort_text.as_deref().unwrap_or(""),
+        "@var should sort before @todo. var={:?}, todo={:?}",
+        v.sort_text,
+        t.sort_text
+    );
+}
+
+/// Inline @var with an inferred type should pre-fill the type.
+/// Here the RHS is a simple array literal whose type can be inferred.
+#[tokio::test]
+async fn test_phpdoc_inline_var_inferred_type() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_inferred.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $items = [1, 2, 3];\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item in inline context"
+    );
+    let v = var_item.unwrap();
+
+    // The label should contain the inferred type (e.g. "list<int>")
+    assert!(
+        v.label.starts_with("@var ") && v.label != "@var Type",
+        "Inline @var should have an inferred type, got label: {:?}",
+        v.label
+    );
+    // Insert text should start with "var " followed by the type
+    assert!(
+        v.insert_text.as_deref().unwrap_or("").starts_with("var "),
+        "Insert text should start with 'var ', got: {:?}",
+        v.insert_text
+    );
+    // Sort text should have 0a_ prefix
+    assert!(
+        v.sort_text.as_deref().unwrap_or("").starts_with("0a_"),
+        "Inferred inline @var should have sort text starting with 0a_, got: {:?}",
+        v.sort_text
+    );
+}
+
+/// Inline @var without an inferable type should offer "@var Type" with
+/// a trailing space for the user to type the type manually.
+#[tokio::test]
+async fn test_phpdoc_inline_var_no_inferred_type() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_no_infer.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $result = someUnknownCall();\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item in inline context even without inferred type"
+    );
+    let v = var_item.unwrap();
+    assert_eq!(
+        v.label, "@var Type",
+        "Label should be '@var Type' when type cannot be inferred"
+    );
+    // Insert text should be a snippet with a tab stop for the type
+    assert_eq!(
+        v.insert_text.as_deref(),
+        Some("var ${1:Type}"),
+        "Insert text should be a snippet with a Type placeholder"
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Inline @var without inferred type should use snippet format"
+    );
+    assert!(
+        v.sort_text.as_deref().unwrap_or("").starts_with("0a_"),
+        "Non-inferred inline @var should still sort first with 0a_ prefix"
+    );
+}
+
+/// In unknown context (not above a variable, property, or function),
+/// @var should offer a snippet with tab stops for Type and $var.
+#[tokio::test]
+async fn test_phpdoc_unknown_context_var_snippet() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_unknown_var.php").unwrap();
+    // Docblock at file level, not above any declaration
+    let text = concat!("<?php\n", "/**\n", " * @\n", " */\n",);
+
+    let items = complete_at(&backend, &uri, text, 2, 4).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item in unknown context"
+    );
+    let v = var_item.unwrap();
+    assert_eq!(
+        v.label, "@var Type $var",
+        "Unknown-context @var label should show full pattern"
+    );
+    assert_eq!(
+        v.insert_text.as_deref(),
+        Some("var ${1:Type} \\$${2:var}"),
+        "Unknown-context @var should be a snippet with tab stops"
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Unknown-context @var should have SNIPPET insert format"
+    );
+}
+
+// ─── Template enrichment on @param, @return, @var ───────────────────────────
+
+/// @param completion for a function whose parameter is typed with a class
+/// that has @template should offer the enriched type (e.g. Collection<T>).
+#[tokio::test]
+async fn test_phpdoc_template_enrichment_param() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[(
+            "src/Collection.php",
+            "<?php\nnamespace App;\n/**\n * @template T\n */\nclass Collection {}\n",
+        )],
+    );
+    let uri = Url::parse("file:///phpdoc_enrich_param.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Collection;\n",
+        "/**\n",
+        " * @\n",
+        " */\n",
+        "function process(Collection $items): void {}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 4).await;
+
+    let param_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@param"))
+        .collect();
+
+    assert!(!param_items.is_empty(), "Should have @param items");
+
+    let first = &param_items[0];
+    assert_eq!(
+        first.label, "@param Collection<T> $items",
+        "Should enrich Collection with template param T"
+    );
+    assert_eq!(
+        first.insert_text.as_deref(),
+        Some("param Collection<${1:T}> \\$items"),
+        "Insert text should contain tab stops on template params"
+    );
+    assert_eq!(
+        first.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched @param should use snippet format"
+    );
+}
+
+/// @return completion for a function returning a class with @template
+/// should offer the enriched type.
+#[tokio::test]
+async fn test_phpdoc_template_enrichment_return() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[(
+            "src/Collection.php",
+            "<?php\nnamespace App;\n/**\n * @template T\n */\nclass Collection {}\n",
+        )],
+    );
+    let uri = Url::parse("file:///phpdoc_enrich_return.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Collection;\n",
+        "/**\n",
+        " * @\n",
+        " */\n",
+        "function getItems(): Collection {}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 4).await;
+
+    let return_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@return"));
+    assert!(return_item.is_some(), "Should have @return item");
+    let r = return_item.unwrap();
+    assert_eq!(
+        r.label, "@return Collection<T>",
+        "Should enrich Collection with template param T"
+    );
+    assert_eq!(
+        r.insert_text.as_deref(),
+        Some("return Collection<${1:T}>"),
+        "Insert text should contain tab stops on template params"
+    );
+    assert_eq!(
+        r.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched @return should use snippet format"
+    );
+}
+
+/// @var completion on a property typed with a class that has @template
+/// should offer the enriched type.
+///
+/// Note: the property type uses a `\`-prefixed FQN because the context
+/// classifier lowercases tokens and only recognises unqualified class
+/// names that start with `\`, `?`, or are built-in type keywords.
+#[tokio::test]
+async fn test_phpdoc_template_enrichment_var_property() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[(
+            "src/Collection.php",
+            "<?php\nnamespace App;\n/**\n * @template T\n */\nclass Collection {}\n",
+        )],
+    );
+    let uri = Url::parse("file:///phpdoc_enrich_var.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Collection;\n",
+        "class Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public \\App\\Collection $items;\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_item.is_some(), "Should have @var item for property");
+    let v = var_item.unwrap();
+    // The enrichment strips the leading `\` and appends template params.
+    assert!(
+        v.label.contains("Collection<T>"),
+        "Should enrich Collection with template param T, got: {:?}",
+        v.label
+    );
+    assert!(
+        v.insert_text
+            .as_deref()
+            .unwrap_or("")
+            .contains("Collection<${1:T}>"),
+        "Insert text should contain enriched type with tab stop, got: {:?}",
+        v.insert_text
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched @var should use snippet format"
+    );
+}
+
+/// Template enrichment with multiple template parameters should list all.
+#[tokio::test]
+async fn test_phpdoc_template_enrichment_multiple_params() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[(
+            "src/Map.php",
+            "<?php\nnamespace App;\n/**\n * @template TKey\n * @template TValue\n */\nclass Map {}\n",
+        )],
+    );
+    let uri = Url::parse("file:///phpdoc_enrich_multi.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Map;\n",
+        "/**\n",
+        " * @\n",
+        " */\n",
+        "function process(Map $lookup): Map {}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 4).await;
+
+    let param_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@param"))
+        .collect();
+    assert!(!param_items.is_empty(), "Should have @param items");
+    assert_eq!(
+        param_items[0].label, "@param Map<TKey, TValue> $lookup",
+        "Should enrich Map with both template params"
+    );
+    assert_eq!(
+        param_items[0].insert_text.as_deref(),
+        Some("param Map<${1:TKey}, ${2:TValue}> \\$lookup"),
+        "Insert text should contain tab stops on all template params"
+    );
+    assert_eq!(
+        param_items[0].insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched @param should use snippet format"
+    );
+
+    let return_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@return"));
+    assert!(return_item.is_some(), "Should have @return item");
+    let r = return_item.unwrap();
+    assert_eq!(
+        r.label, "@return Map<TKey, TValue>",
+        "Should enrich Map with both template params"
+    );
+    assert_eq!(
+        r.insert_text.as_deref(),
+        Some("return Map<${1:TKey}, ${2:TValue}>"),
+        "Insert text should contain tab stops on all template params"
+    );
+    assert_eq!(
+        r.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched @return should use snippet format"
+    );
+}
+
+// ─── Inline @var context boundary tests ─────────────────────────────────────
+
+/// When the line after the docblock is a method call (`$names->add(…)`),
+/// NOT a variable assignment, the context should be Unknown and @var
+/// should offer the `@var Type $var` snippet, not a pre-filled type.
+#[tokio::test]
+async fn test_phpdoc_inline_var_method_call_not_assignment() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_method_call.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    $names = new \\ArrayObject();\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $names->add('foo');\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should still have a @var item. Got tags: {:?}",
+        filter_texts(&items)
+    );
+    let v = var_item.unwrap();
+    // Should be the Unknown-context snippet, NOT a pre-filled type
+    assert_eq!(
+        v.label, "@var Type $var",
+        "Method call on next line should yield Unknown context, not Inline. Got: {:?}",
+        v.label
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Should be a snippet with tab stops"
+    );
+}
+
+/// When there is a blank line between the docblock and the assignment,
+/// the context should be Unknown and @var should offer the snippet form.
+#[tokio::test]
+async fn test_phpdoc_inline_var_blank_line_gap() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_blank_gap.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "\n",
+        "    $names = new \\ArrayObject();\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should still have a @var item. Got tags: {:?}",
+        filter_texts(&items)
+    );
+    let v = var_item.unwrap();
+    assert_eq!(
+        v.label, "@var Type $var",
+        "Blank line gap should prevent Inline context. Got: {:?}",
+        v.label
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Should be a snippet with tab stops"
+    );
+}
+
+/// When the docblock is directly above an assignment (no blank line),
+/// inline @var should be detected and the type should be pre-filled.
+#[tokio::test]
+async fn test_phpdoc_inline_var_immediate_assignment() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_immediate.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $items = [1, 2, 3];\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item in inline context"
+    );
+    let v = var_item.unwrap();
+    // Should be a pre-filled type, NOT the snippet form
+    assert_ne!(
+        v.label, "@var Type $var",
+        "Immediate assignment should yield Inline context with inferred type"
+    );
+    assert!(
+        v.label.starts_with("@var "),
+        "Label should start with '@var '. Got: {:?}",
+        v.label
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Inline @var with inferred type should be a snippet with tab stops"
+    );
+}
+
+/// Inline @var with an inferred class type should enrich it with
+/// template parameters from @template when a class loader is available.
+#[tokio::test]
+async fn test_phpdoc_inline_var_enriched_with_templates() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[(
+            "src/Collection.php",
+            "<?php\nnamespace App;\n/**\n * @template TKey\n * @template TValue\n */\nclass Collection {}\n",
+        )],
+    );
+    let uri = Url::parse("file:///phpdoc_inline_enrich.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Collection;\n",
+        "function demo() {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $names = new Collection();\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item in inline context"
+    );
+    let v = var_item.unwrap();
+    assert_eq!(
+        v.label, "@var Collection<TKey, TValue>",
+        "Inferred Collection type should be enriched with template params"
+    );
+    assert_eq!(
+        v.insert_text.as_deref(),
+        Some("var Collection<${1:TKey}, ${2:TValue}>"),
+        "Insert text should contain enriched type with tab stops on template params"
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched inline @var should use snippet format"
+    );
+}
+
+/// When a variable is used (not assigned) on the next line after the
+/// docblock, the context should be Unknown even if the variable was
+/// assigned earlier in the function.
+#[tokio::test]
+async fn test_phpdoc_inline_var_usage_not_assignment() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_usage.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    $names = ['a', 'b'];\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    echo $names[0];\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have a @var item. Got tags: {:?}",
+        filter_texts(&items)
+    );
+    let v = var_item.unwrap();
+    // `echo $names[0]` is not an assignment — Unknown context
+    assert_eq!(
+        v.label, "@var Type $var",
+        "Variable usage (not assignment) should yield Unknown context. Got: {:?}",
+        v.label
+    );
+}
+
+/// Compound assignment operators like `+=`, `.=` should NOT be treated
+/// as a variable assignment for inline @var purposes.
+#[tokio::test]
+async fn test_phpdoc_smart_var_property_with_v_prefix() {
+    // When typing `@v` (not bare `@`), the smart pre-filled @var should
+    // still appear for a typed property — not the generic `@var Type $var`.
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_var_v_prefix.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Foo {\n",
+        "    /**\n",
+        "     * @v\n",
+        "     */\n",
+        "    public string $name;\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 9).await;
+
+    let var_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    assert!(
+        !var_items.is_empty(),
+        "Should have @var item with @v prefix"
+    );
+    assert_eq!(
+        var_items.len(),
+        1,
+        "Should have exactly one @var item (smart, not generic). Got: {:?}",
+        var_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    let v = var_items[0];
+    assert_eq!(
+        v.label, "@var string",
+        "Should be smart pre-filled @var, not generic snippet"
+    );
+    assert_eq!(v.insert_text.as_deref(), Some("var string"));
+}
+
+#[tokio::test]
+async fn test_phpdoc_smart_var_promoted_property_bare_at() {
+    // A docblock above a promoted constructor property should detect
+    // Property context and offer smart @var with the type hint.
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_promoted_bare.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Foo {\n",
+        "    public function __construct(\n",
+        "        /**\n",
+        "         * @\n",
+        "         */\n",
+        "        private string $service,\n",
+        "    ) {}\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 12).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item for promoted property"
+    );
+    let v = var_item.unwrap();
+    assert_eq!(
+        v.label, "@var string",
+        "Should be smart pre-filled @var for promoted property"
+    );
+    assert_eq!(v.insert_text.as_deref(), Some("var string"));
+}
+
+#[tokio::test]
+async fn test_phpdoc_smart_var_promoted_property_with_v_prefix() {
+    // Typing `@v` above a promoted constructor property should still
+    // produce the smart pre-filled @var, not the generic snippet.
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_promoted_v.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Foo {\n",
+        "    public function __construct(\n",
+        "        /**\n",
+        "         * @v\n",
+        "         */\n",
+        "        private string $service,\n",
+        "    ) {}\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 13).await;
+
+    let var_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    assert!(
+        !var_items.is_empty(),
+        "Should have @var item for promoted property with @v prefix"
+    );
+    assert_eq!(
+        var_items.len(),
+        1,
+        "Should have exactly one @var item (smart). Got: {:?}",
+        var_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    let v = var_items[0];
+    assert_eq!(
+        v.label, "@var string",
+        "Should be smart pre-filled @var for promoted property"
+    );
+    assert_eq!(v.insert_text.as_deref(), Some("var string"));
+}
+
+#[tokio::test]
+async fn test_phpdoc_smart_var_promoted_property_enriched() {
+    // Promoted property with a class type should get template enrichment.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[(
+            "src/Collection.php",
+            "<?php\nnamespace App;\n/**\n * @template TKey\n * @template TModel\n */\nclass Collection {}\n",
+        )],
+    );
+    let uri = Url::parse("file:///phpdoc_promoted_enriched.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use App\\Collection;\n",
+        "class Foo {\n",
+        "    public function __construct(\n",
+        "        /**\n",
+        "         * @\n",
+        "         */\n",
+        "        private \\App\\Collection $items,\n",
+        "    ) {}\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 5, 12).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(
+        var_item.is_some(),
+        "Should have @var item for promoted property"
+    );
+    let v = var_item.unwrap();
+    assert!(
+        v.label.contains("Collection<TKey, TModel>"),
+        "Should enrich Collection with template params TKey, TModel, got: {:?}",
+        v.label
+    );
+    // Insert text should use snippet format with tab stops on template params.
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Enriched property @var should use snippet format. insert_text: {:?}",
+        v.insert_text
+    );
+    let insert = v.insert_text.as_deref().unwrap_or("");
+    assert!(
+        insert.contains("${1:TKey}") && insert.contains("${2:TModel}"),
+        "Insert text should have tab stops for template params, got: {:?}",
+        insert
+    );
+}
+
+#[tokio::test]
+async fn test_phpdoc_smart_var_no_generic_when_smart_available() {
+    // When a smart @var is available, the generic `@var Type $var` snippet
+    // must NOT appear alongside it.
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_no_generic.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Foo {\n",
+        "    /**\n",
+        "     * @v\n",
+        "     */\n",
+        "    public int $count;\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 3, 9).await;
+
+    let var_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    // Should never see the generic `@var Type $var` snippet
+    let has_generic = var_items
+        .iter()
+        .any(|i| i.label.contains("$var") || i.label.contains("Type $"));
+    assert!(
+        !has_generic,
+        "Generic `@var Type $var` should NOT appear when smart @var is available. Items: {:?}",
+        var_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Regression test: exact editor scenario where typing `@v` in a property
+/// docblock should produce the smart pre-filled `@var string`, not the
+/// generic `@var Type $var` snippet. The content here mirrors what the
+/// editor sends on a re-triggered completion request after the user types
+/// the `v` character following `@`.
+#[tokio::test]
+async fn test_phpdoc_smart_var_property_retrigger_after_v() {
+    // Simulate the exact sequence: user has a closed docblock, types `@`,
+    // gets completions, then types `v` and the editor re-requests.
+    // The file content at that point has `@v` in it.
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_retrigger_v.php").unwrap();
+
+    // Step 1: bare `@` — should get smart @var
+    let text_at = concat!(
+        "<?php\n",
+        "class MyService {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public string $name;\n",
+        "}\n",
+    );
+    let items_at = complete_at(&backend, &uri, text_at, 3, 8).await;
+    let var_at = items_at
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_at.is_some(), "Bare @ should produce @var");
+    assert_eq!(
+        var_at.unwrap().label,
+        "@var string",
+        "Bare @ should produce smart @var string"
+    );
+
+    // Step 2: user types `v`, editor re-requests with `@v` in the content.
+    // Use a different URI to avoid cached state from step 1.
+    let uri2 = Url::parse("file:///phpdoc_retrigger_v2.php").unwrap();
+    let text_v = concat!(
+        "<?php\n",
+        "class MyService {\n",
+        "    /**\n",
+        "     * @v\n",
+        "     */\n",
+        "    public string $name;\n",
+        "}\n",
+    );
+    let items_v = complete_at(&backend, &uri2, text_v, 3, 9).await;
+    let var_items_v: Vec<_> = items_v
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    assert!(
+        !var_items_v.is_empty(),
+        "@v prefix should still produce @var item"
+    );
+    assert_eq!(
+        var_items_v.len(),
+        1,
+        "Should have exactly one @var, not both smart and generic. Got: {:?}",
+        var_items_v.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        var_items_v[0].label, "@var string",
+        "@v prefix should produce smart pre-filled @var, not generic snippet"
+    );
+    // The insert text should NOT contain `$var` (property @var omits the variable name)
+    assert!(
+        !var_items_v[0]
+            .insert_text
+            .as_deref()
+            .unwrap_or("")
+            .contains("$var"),
+        "Property @var should not include $var in insert text. Got: {:?}",
+        var_items_v[0].insert_text
+    );
+}
+
+#[tokio::test]
+async fn test_phpdoc_smart_var_property_open_docblock_v_prefix() {
+    // When the docblock is not yet closed (user is still typing), the
+    // context detection falls back to scanning text after the cursor.
+    // Make sure the smart @var still works with an unclosed docblock.
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_open_v_prefix.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Foo {\n",
+        "    /**\n",
+        "     * @v\n",
+        "    public string $name;\n",
+        "}\n",
+    );
+
+    // Cursor after `@v` on line 3
+    let items = complete_at(&backend, &uri, text, 3, 9).await;
+
+    let var_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    assert!(
+        !var_items.is_empty(),
+        "Should have @var item for open docblock with @v prefix. All items: {:?}",
+        items
+            .iter()
+            .map(|i| (&i.label, &i.filter_text))
+            .collect::<Vec<_>>()
+    );
+    // Should be the smart pre-filled version, not the generic snippet.
+    let v = var_items[0];
+    assert_eq!(
+        v.label, "@var string",
+        "Open docblock should still produce smart @var. Got: {:?}",
+        v.label
+    );
+}
+
+#[tokio::test]
+async fn test_phpdoc_inline_var_compound_assignment_is_unknown() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///phpdoc_inline_compound.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo() {\n",
+        "    $total = 0;\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    $total += 10;\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 8).await;
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_item.is_some(), "Should have a @var item");
+    let v = var_item.unwrap();
+    // Inline @var should detect `$total = …` as assignment, and
+    // `$total += …` has `=` after `+`, so our `is_variable_assignment`
+    // should handle this — it checks for `=` not preceded by other ops.
+    // Actually += starts with `+` not `=`, so `rest` after var name
+    // is `+= 10;`. strip_prefix('=') fails → not assignment → Unknown.
+    assert_eq!(
+        v.label, "@var Type $var",
+        "Compound assignment should yield Unknown context. Got: {:?}",
+        v.label
+    );
 }

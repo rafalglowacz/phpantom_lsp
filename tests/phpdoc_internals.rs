@@ -4,7 +4,10 @@
 //! in `src/completion/phpdoc.rs` to keep the project's convention of
 //! placing tests in the `tests/` directory.
 
+use std::sync::Arc;
+
 use phpantom_lsp::completion::phpdoc::*;
+use phpantom_lsp::types::ClassInfo;
 use tower_lsp::lsp_types::*;
 
 // ── is_inside_non_doc_comment ───────────────────────────────────────
@@ -208,7 +211,8 @@ fn typing_pos_param_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -223,7 +227,8 @@ fn typing_pos_param_partial_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Str".to_string()
+            partial: "Str".to_string(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -279,7 +284,8 @@ fn typing_pos_return_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "return".to_string(),
         })
     );
 }
@@ -294,7 +300,8 @@ fn typing_pos_return_partial_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Coll".to_string()
+            partial: "Coll".to_string(),
+            tag: "return".to_string(),
         })
     );
 }
@@ -319,7 +326,8 @@ fn typing_pos_throws_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "throws".to_string(),
         })
     );
 }
@@ -334,7 +342,8 @@ fn typing_pos_throws_partial_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Invalid".to_string()
+            partial: "Invalid".to_string(),
+            tag: "throws".to_string(),
         })
     );
 }
@@ -349,7 +358,8 @@ fn typing_pos_var_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "var".to_string(),
         })
     );
 }
@@ -364,7 +374,8 @@ fn typing_pos_var_partial_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Dat".to_string()
+            partial: "Dat".to_string(),
+            tag: "var".to_string(),
         })
     );
 }
@@ -379,7 +390,8 @@ fn typing_pos_mixin_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "mixin".to_string(),
         })
     );
 }
@@ -394,7 +406,8 @@ fn typing_pos_extends_partial_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Base".to_string()
+            partial: "Base".to_string(),
+            tag: "extends".to_string(),
         })
     );
 }
@@ -409,7 +422,8 @@ fn typing_pos_implements_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "implements".to_string(),
         })
     );
 }
@@ -424,7 +438,8 @@ fn typing_pos_property_empty_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "property".to_string(),
         })
     );
 }
@@ -454,7 +469,8 @@ fn typing_pos_property_read_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "property-read".to_string(),
         })
     );
 }
@@ -469,7 +485,8 @@ fn typing_pos_phpstan_param_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "phpstan-param".to_string(),
         })
     );
 }
@@ -484,7 +501,8 @@ fn typing_pos_phpstan_return_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Coll".to_string()
+            partial: "Coll".to_string(),
+            tag: "phpstan-return".to_string(),
         })
     );
 }
@@ -501,7 +519,8 @@ fn typing_pos_union_type_second_part() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Fo".to_string()
+            partial: "Fo".to_string(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -516,7 +535,8 @@ fn typing_pos_union_type_pipe_only() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -531,7 +551,8 @@ fn typing_pos_intersection_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Ba".to_string()
+            partial: "Ba".to_string(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -546,7 +567,8 @@ fn typing_pos_nullable_type() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Fo".to_string()
+            partial: "Fo".to_string(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -564,7 +586,8 @@ fn typing_pos_generic_type_inside_angle_brackets() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Us".to_string()
+            partial: "Us".to_string(),
+            tag: "return".to_string(),
         })
     );
 }
@@ -580,7 +603,8 @@ fn typing_pos_generic_type_after_comma() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: String::new()
+            partial: String::new(),
+            tag: "return".to_string(),
         })
     );
 }
@@ -595,7 +619,8 @@ fn typing_pos_generic_type_after_comma_partial() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "Us".to_string()
+            partial: "Us".to_string(),
+            tag: "return".to_string(),
         })
     );
 }
@@ -630,7 +655,8 @@ fn typing_pos_array_shape_inside_braces() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "str".to_string()
+            partial: "str".to_string(),
+            tag: "return".to_string(),
         })
     );
 }
@@ -647,7 +673,8 @@ fn typing_pos_namespaced_partial() {
     assert_eq!(
         detect_docblock_typing_position(content, pos),
         Some(DocblockTypingContext::Type {
-            partial: "App\\Models\\Us".to_string()
+            partial: "App\\Models\\Us".to_string(),
+            tag: "param".to_string(),
         })
     );
 }
@@ -1329,6 +1356,7 @@ fn completions_bare_at_function() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
 
@@ -1388,6 +1416,7 @@ fn completions_bare_at_class() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1445,6 +1474,7 @@ fn completions_bare_at_property() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1492,6 +1522,7 @@ fn completions_bare_at_constant() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1524,6 +1555,7 @@ fn completions_unknown_includes_all() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1564,6 +1596,7 @@ fn completions_filtered_by_prefix() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1591,6 +1624,7 @@ fn completions_phpstan_prefix() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1630,6 +1664,7 @@ fn completions_case_insensitive() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1656,6 +1691,7 @@ fn completions_have_keyword_kind() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     for item in &items {
         assert_eq!(
@@ -1680,6 +1716,7 @@ fn completions_no_duplicates() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
     let filter_texts: Vec<&str> = items
         .iter()
@@ -1716,6 +1753,7 @@ fn smart_param_completions_per_parameter() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let param_items: Vec<_> = items
@@ -1764,6 +1802,7 @@ fn smart_param_skips_already_documented() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let param_items: Vec<_> = items
@@ -1801,6 +1840,7 @@ fn smart_return_prefilled() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let return_item = items
@@ -1836,6 +1876,7 @@ fn smart_return_void_uses_no_return_item() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let return_item = items
@@ -1870,6 +1911,7 @@ fn smart_return_skipped_when_already_documented() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let return_items: Vec<_> = items
@@ -1905,6 +1947,7 @@ fn smart_var_prefilled_for_property() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let var_item = items
@@ -1937,6 +1980,7 @@ fn smart_var_nullable_property() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let var_item = items
@@ -1960,6 +2004,7 @@ fn display_labels_for_generic_tags() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let method_item = items
@@ -1999,6 +2044,7 @@ fn display_labels_for_general_tags() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let throws_item = items
@@ -2036,6 +2082,7 @@ fn smart_param_untyped_params() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let param_items: Vec<_> = items
@@ -2069,6 +2116,7 @@ fn smart_return_nullable() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let return_item = items
@@ -2099,6 +2147,7 @@ fn all_params_documented_falls_back_to_generic() {
         pos,
         &std::collections::HashMap::new(),
         &None,
+        &SmartContext::EMPTY,
     );
 
     let param_items: Vec<_> = items
@@ -2112,4 +2161,337 @@ fn all_params_documented_falls_back_to_generic() {
         "Should NOT suggest @param when all params are documented. Got: {:?}",
         param_items.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn smart_var_prefilled_for_property_with_prefix() {
+    // When typing `@v` (not just bare `@`), the smart pre-filled @var
+    // item should still appear — not the generic `@var Type $var` snippet.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @v\n",
+        "     */\n",
+        "    public string $name;\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 9,
+    };
+    let items = build_phpdoc_completions(
+        content,
+        "@v",
+        DocblockContext::Property,
+        pos,
+        &std::collections::HashMap::new(),
+        &None,
+        &SmartContext::EMPTY,
+    );
+
+    let var_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    assert!(
+        !var_items.is_empty(),
+        "Should have @var item with @v prefix"
+    );
+    // There should be exactly one @var item — the smart pre-filled one.
+    assert_eq!(
+        var_items.len(),
+        1,
+        "Should have exactly one @var item, got: {:?}",
+        var_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    let v = var_items[0];
+    assert_eq!(
+        v.label, "@var string",
+        "Should be smart pre-filled, not generic snippet"
+    );
+    assert_eq!(v.insert_text.as_deref(), Some("var string"));
+}
+
+#[test]
+fn smart_var_property_with_templates_has_snippet_tab_stops() {
+    // When a property's type is a class with @template params, the smart
+    // @var completion should use snippet format with tab stops on the
+    // template parameters: `var Collection<${1:TKey}, ${2:TModel}>`
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public Collection $items;\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 8,
+    };
+
+    let collection_class = Arc::new(ClassInfo {
+        name: "Collection".to_string(),
+        template_params: vec!["TKey".to_string(), "TModel".to_string()],
+        ..ClassInfo::default()
+    });
+    let collection_ref = collection_class.clone();
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        if name == "Collection" {
+            Some(collection_ref.clone())
+        } else {
+            None
+        }
+    };
+    let smart = SmartContext {
+        inferred_inline_var_type: None,
+        class_loader: Some(&class_loader),
+    };
+
+    let items = build_phpdoc_completions(
+        content,
+        "@",
+        DocblockContext::Property,
+        pos,
+        &std::collections::HashMap::new(),
+        &None,
+        &smart,
+    );
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_item.is_some(), "Should have @var item");
+    let v = var_item.unwrap();
+    // Label uses plain text (no tab stops).
+    assert_eq!(v.label, "@var Collection<TKey, TModel>");
+    // Insert text uses snippet format with tab stops.
+    assert_eq!(
+        v.insert_text.as_deref(),
+        Some("var Collection<${1:TKey}, ${2:TModel}>")
+    );
+    assert_eq!(
+        v.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "Should use snippet format when templates are present"
+    );
+}
+
+#[test]
+fn smart_var_property_with_templates_and_prefix_has_snippet_tab_stops() {
+    // Same as above but with `@v` prefix — should still produce snippet.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @v\n",
+        "     */\n",
+        "    public Collection $items;\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 9,
+    };
+
+    let collection_class = Arc::new(ClassInfo {
+        name: "Collection".to_string(),
+        template_params: vec!["TKey".to_string(), "TModel".to_string()],
+        ..ClassInfo::default()
+    });
+    let collection_ref = collection_class.clone();
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        if name == "Collection" {
+            Some(collection_ref.clone())
+        } else {
+            None
+        }
+    };
+    let smart = SmartContext {
+        inferred_inline_var_type: None,
+        class_loader: Some(&class_loader),
+    };
+
+    let items = build_phpdoc_completions(
+        content,
+        "@v",
+        DocblockContext::Property,
+        pos,
+        &std::collections::HashMap::new(),
+        &None,
+        &smart,
+    );
+
+    let var_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.filter_text.as_deref() == Some("@var"))
+        .collect();
+    assert_eq!(
+        var_items.len(),
+        1,
+        "Should have exactly one @var item, got: {:?}",
+        var_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    let v = var_items[0];
+    assert_eq!(v.label, "@var Collection<TKey, TModel>");
+    assert_eq!(
+        v.insert_text.as_deref(),
+        Some("var Collection<${1:TKey}, ${2:TModel}>")
+    );
+    assert_eq!(v.insert_text_format, Some(InsertTextFormat::SNIPPET));
+}
+
+#[test]
+fn smart_var_property_scalar_no_snippet_format() {
+    // For scalar types (no templates), the insert text should be plain
+    // and insert_text_format should be None (not snippet).
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public string $name;\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 8,
+    };
+
+    let items = build_phpdoc_completions(
+        content,
+        "@",
+        DocblockContext::Property,
+        pos,
+        &std::collections::HashMap::new(),
+        &None,
+        &SmartContext::EMPTY,
+    );
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_item.is_some(), "Should have @var item");
+    let v = var_item.unwrap();
+    assert_eq!(v.label, "@var string");
+    assert_eq!(v.insert_text.as_deref(), Some("var string"));
+    assert_eq!(
+        v.insert_text_format, None,
+        "Scalar type should not use snippet format"
+    );
+}
+
+#[test]
+fn smart_var_property_class_without_templates_no_snippet_format() {
+    // A class type without @template params should produce plain text,
+    // not snippet format.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public DateTime $created;\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 8,
+    };
+
+    let datetime_class = Arc::new(ClassInfo {
+        name: "DateTime".to_string(),
+        template_params: vec![],
+        ..ClassInfo::default()
+    });
+    let datetime_ref = datetime_class.clone();
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        if name == "DateTime" {
+            Some(datetime_ref.clone())
+        } else {
+            None
+        }
+    };
+    let smart = SmartContext {
+        inferred_inline_var_type: None,
+        class_loader: Some(&class_loader),
+    };
+
+    let items = build_phpdoc_completions(
+        content,
+        "@",
+        DocblockContext::Property,
+        pos,
+        &std::collections::HashMap::new(),
+        &None,
+        &smart,
+    );
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_item.is_some(), "Should have @var item");
+    let v = var_item.unwrap();
+    assert_eq!(v.label, "@var DateTime");
+    assert_eq!(v.insert_text.as_deref(), Some("var DateTime"));
+    assert_eq!(
+        v.insert_text_format, None,
+        "Class without templates should not use snippet format"
+    );
+}
+
+#[test]
+fn smart_var_constant_with_templates_has_snippet_tab_stops() {
+    // Constants also get the smart @var with template snippet tab stops.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public Collection $items;\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 8,
+    };
+
+    let collection_class = Arc::new(ClassInfo {
+        name: "Collection".to_string(),
+        template_params: vec!["TKey".to_string(), "TModel".to_string()],
+        ..ClassInfo::default()
+    });
+    let collection_ref = collection_class.clone();
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        if name == "Collection" {
+            Some(collection_ref.clone())
+        } else {
+            None
+        }
+    };
+    let smart = SmartContext {
+        inferred_inline_var_type: None,
+        class_loader: Some(&class_loader),
+    };
+
+    // Use Constant context — should behave the same as Property.
+    let items = build_phpdoc_completions(
+        content,
+        "@",
+        DocblockContext::Constant,
+        pos,
+        &std::collections::HashMap::new(),
+        &None,
+        &smart,
+    );
+
+    let var_item = items
+        .iter()
+        .find(|i| i.filter_text.as_deref() == Some("@var"));
+    assert!(var_item.is_some(), "Should have @var item for constant");
+    let v = var_item.unwrap();
+    assert_eq!(v.label, "@var Collection<TKey, TModel>");
+    assert_eq!(
+        v.insert_text.as_deref(),
+        Some("var Collection<${1:TKey}, ${2:TModel}>")
+    );
+    assert_eq!(v.insert_text_format, Some(InsertTextFormat::SNIPPET));
 }

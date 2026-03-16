@@ -410,12 +410,12 @@ async fn test_throws_all_documented_falls_back() {
         smart.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
 
-    // Generic @throws fallback is no longer shown when all are documented
+    // Generic @throws fallback is always shown — the user may want to
+    // manually document additional exceptions the detection missed.
     let generic = generic_throws_item(&items);
     assert!(
-        generic.is_none(),
-        "Generic @throws should NOT appear when all throws are documented. Got: {:?}",
-        generic.map(|i| &i.label)
+        generic.is_some(),
+        "Generic @throws should always appear so users can manually add exceptions"
     );
 }
 
@@ -1060,9 +1060,9 @@ async fn test_throws_no_throws_generic_fallback() {
     );
 }
 
-/// throw without `new` (re-throw of variable) should not be detected.
+/// throw $e where $e is a caught exception should detect the type.
 #[tokio::test]
-async fn test_throws_rethrow_variable_not_detected() {
+async fn test_throws_rethrow_variable_detected_from_catch() {
     let backend = create_test_backend();
     let uri = Url::parse("file:///throws_rethrow.php").unwrap();
     let text = concat!(
@@ -1082,13 +1082,15 @@ async fn test_throws_rethrow_variable_not_detected() {
     let items = complete_at(&backend, &uri, text, 2, 4).await;
     let smart = throws_items(&items);
 
-    // `throw $e` is a re-throw, not `throw new`, so we don't detect the type.
-    // This is a known limitation — we only handle `throw new Type(…)`.
-    assert!(
-        smart.is_empty(),
-        "Re-throw of variable should not be detected. Got: {:?}",
+    // `throw $e` re-throws the caught variable — the LSP resolves $e
+    // to RuntimeException from the catch clause.
+    assert_eq!(
+        smart.len(),
+        1,
+        "expected one @throws suggestion, got: {:?}",
         smart.iter().map(|i| &i.label).collect::<Vec<_>>()
     );
+    assert_eq!(smart[0].label, "@throws RuntimeException");
 }
 
 /// No global namespace, no use — should not add import edits.

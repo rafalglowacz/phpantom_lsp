@@ -114,7 +114,7 @@ pub(crate) fn find_throw_statements(body: &str) -> Vec<ThrowInfo> {
 /// Returns a [`ThrowInfo`] for each resolved throw-expression.
 pub(crate) fn find_throw_expression_types(body: &str, file_content: &str) -> Vec<ThrowInfo> {
     let mut results = Vec::new();
-    let patterns: &[&str] = &["$this->", "self::", "static::"];
+    let method_patterns: &[&str] = &["$this->", "self::", "static::"];
 
     let bytes = body.as_bytes();
     let len = bytes.len();
@@ -143,11 +143,13 @@ pub(crate) fn find_throw_expression_types(body: &str, file_content: &str) -> Vec
             if before_ok && after_ok {
                 let after_throw = body[pos + 5..].trim_start();
                 // Skip `throw new` (handled by find_throw_statements)
-                if !after_throw.starts_with("new ")
-                    && !after_throw.starts_with("new\t")
-                    && !after_throw.starts_with("new\n")
-                {
-                    for pat in patterns {
+                let is_new = after_throw.starts_with("new ")
+                    || after_throw.starts_with("new\t")
+                    || after_throw.starts_with("new\n");
+                if !is_new {
+                    let mut matched = false;
+                    // Try method-call patterns first: $this->m(), self::m(), static::m()
+                    for pat in method_patterns {
                         if let Some(rest) = after_throw.strip_prefix(pat) {
                             let name_end = rest
                                 .find(|c: char| !c.is_alphanumeric() && c != '_')
@@ -162,7 +164,92 @@ pub(crate) fn find_throw_expression_types(body: &str, file_content: &str) -> Vec
                                     offset: pos,
                                 });
                             }
+                            matched = true;
                             break;
+                        }
+                    }
+                    // Bare function call: `throw makeException(…)`
+                    if !matched {
+                        let name_end = after_throw
+                            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+                            .unwrap_or(after_throw.len());
+                        let func_name = after_throw[..name_end].trim_start_matches('\\');
+                        let after_name = after_throw[name_end..].trim_start();
+                        if !func_name.is_empty()
+                            && after_name.starts_with('(')
+                            && let Some(ret_type) = find_method_return_type(file_content, func_name)
+                        {
+                            results.push(ThrowInfo {
+                                type_name: ret_type,
+                                offset: pos,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        pos += 1;
+    }
+
+    results
+}
+
+/// Find `throw $variable` patterns and resolve the variable's exception
+/// type from catch clauses whose body contains the throw.
+///
+/// When `throw $e` appears inside a `catch (SomeException $e) { … }` block,
+/// the thrown type is `SomeException`.
+fn find_throw_variable_types(body: &str, catches: &[CatchInfo]) -> Vec<ThrowInfo> {
+    let mut results = Vec::new();
+    let bytes = body.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+
+    while pos < len {
+        if bytes[pos] == b'\'' || bytes[pos] == b'"' {
+            pos = skip_string_forward(bytes, pos);
+            continue;
+        }
+        if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'/' {
+            pos = skip_line_comment(bytes, pos);
+            continue;
+        }
+        if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
+            pos = skip_block_comment(bytes, pos);
+            continue;
+        }
+
+        // Look for `throw` keyword
+        if pos + 5 <= len && &body[pos..pos + 5] == "throw" {
+            let before_ok =
+                pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+            let after_ok = pos + 5 >= len
+                || (!bytes[pos + 5].is_ascii_alphanumeric() && bytes[pos + 5] != b'_');
+            if before_ok && after_ok {
+                let after_throw = body[pos + 5..].trim_start();
+                if after_throw.starts_with('$') {
+                    // Extract the variable name (e.g. `$e`)
+                    let var_end = after_throw
+                        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+                        .unwrap_or(after_throw.len());
+                    let var_name = &after_throw[..var_end];
+                    if var_name.len() > 1 {
+                        // Find which catch clause this throw lives in and
+                        // whose variable matches.
+                        for c in catches {
+                            if pos > c.catch_body_start
+                                && pos < c.catch_body_end
+                                && c.var_name.as_deref() == Some(var_name)
+                            {
+                                for tn in &c.type_names {
+                                    results.push(ThrowInfo {
+                                        type_name: tn.clone(),
+                                        offset: pos,
+                                    });
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -256,7 +343,7 @@ pub(crate) fn find_propagated_throws(body: &str, file_content: &str) -> Vec<Thro
 /// doesn't have `@throws` annotations itself.
 ///
 /// Returns the short type names found.
-pub(crate) fn find_inline_throws_annotations(body: &str) -> Vec<String> {
+pub(crate) fn find_inline_throws_annotations(body: &str) -> Vec<ThrowInfo> {
     let mut results = Vec::new();
     let bytes = body.as_bytes();
     let len = bytes.len();
@@ -294,7 +381,10 @@ pub(crate) fn find_inline_throws_annotations(body: &str) -> Vec<String> {
                                 .trim_end_matches('*')
                                 .trim_end_matches('/');
                             if !clean.is_empty() && !clean.starts_with('$') {
-                                results.push(clean.to_string());
+                                results.push(ThrowInfo {
+                                    type_name: clean.to_string(),
+                                    offset: doc_start,
+                                });
                             }
                         }
                     }
@@ -695,10 +785,16 @@ pub(crate) fn extract_function_body(content: &str, position: Position) -> Option
 struct CatchInfo {
     /// The caught exception type names (multi-catch produces multiple).
     type_names: Vec<String>,
+    /// The variable name from the catch clause (e.g. `"$e"`), if present.
+    var_name: Option<String>,
     /// Byte offset of the start of the `try` block this catch belongs to.
     try_start: usize,
     /// Byte offset of the end of the `try` block (the matching `}`).
     try_end: usize,
+    /// Byte offset of the opening `{` of the catch block body.
+    catch_body_start: usize,
+    /// Byte offset of the closing `}` of the catch block body.
+    catch_body_end: usize,
 }
 
 /// Find all `try { … } catch (…)` blocks and their caught types.
@@ -783,29 +879,28 @@ fn find_catch_blocks(body: &str) -> Vec<CatchInfo> {
                                     {
                                         let paren_content = &remaining
                                             [paren_content_start..paren_content_start + close_p];
-                                        let type_names = parse_catch_types(paren_content);
-                                        if !type_names.is_empty() {
-                                            results.push(CatchInfo {
-                                                type_names,
-                                                try_start: try_body_start,
-                                                try_end: try_body_end,
-                                            });
-                                        }
+                                        let (type_names, var_name) =
+                                            parse_catch_types(paren_content);
 
                                         // Skip past the catch block body
                                         let after_close_paren =
                                             remaining_start + paren_content_start + close_p + 1;
                                         if let Some(cb) = body[after_close_paren..].find('{') {
-                                            let catch_body_start = after_close_paren + cb;
-                                            if let Some(catch_body_end) =
-                                                crate::util::find_matching_forward(
-                                                    body,
-                                                    catch_body_start,
-                                                    b'{',
-                                                    b'}',
-                                                )
-                                            {
-                                                catch_search = catch_body_end + 1;
+                                            let cb_start = after_close_paren + cb;
+                                            if let Some(cb_end) = crate::util::find_matching_forward(
+                                                body, cb_start, b'{', b'}',
+                                            ) {
+                                                if !type_names.is_empty() {
+                                                    results.push(CatchInfo {
+                                                        type_names,
+                                                        var_name,
+                                                        try_start: try_body_start,
+                                                        try_end: try_body_end,
+                                                        catch_body_start: cb_start,
+                                                        catch_body_end: cb_end,
+                                                    });
+                                                }
+                                                catch_search = cb_end + 1;
                                                 continue;
                                             }
                                         }
@@ -837,12 +932,31 @@ fn find_catch_blocks(body: &str) -> Vec<CatchInfo> {
     results
 }
 
-/// Parse the content inside `catch ( … )` into individual type names.
+/// Parse the content inside `catch ( … )` into individual type names and
+/// the optional variable name.
 ///
-/// Handles multi-catch: `ExceptionA | ExceptionB $e` → `["ExceptionA", "ExceptionB"]`.
-fn parse_catch_types(paren_content: &str) -> Vec<String> {
+/// Handles multi-catch: `ExceptionA | ExceptionB $e`
+/// → `(["ExceptionA", "ExceptionB"], Some("$e"))`.
+fn parse_catch_types(paren_content: &str) -> (Vec<String>, Option<String>) {
     let mut types = Vec::new();
-    // Remove the variable name (starts with `$`)
+
+    // Extract the variable name (starts with `$`)
+    let var_name = if let Some(dollar) = paren_content.rfind('$') {
+        let rest = &paren_content[dollar..];
+        let end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '$')
+            .unwrap_or(rest.len());
+        let name = rest[..end].trim();
+        if name.len() > 1 {
+            Some(name.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Remove the variable name to isolate the type list
     let without_var = if let Some(dollar) = paren_content.rfind('$') {
         &paren_content[..dollar]
     } else {
@@ -858,18 +972,21 @@ fn parse_catch_types(paren_content: &str) -> Vec<String> {
         }
     }
 
-    types
+    (types, var_name)
 }
 
 /// Determine which exception types in a function body are **not** caught
 /// by an enclosing `try/catch` block.
 ///
-/// Detects three patterns:
-/// 1. `throw new ExceptionType(…)` -- direct instantiation
+/// Detects six patterns:
+/// 1. `throw new ExceptionType(…)` (direct instantiation)
 /// 2. `throw $this->method()` / `throw self::method()` / `throw static::method()`
-///    -- the method's return type is the thrown exception type
-/// 3. `$this->method()` / `self::method()` calls where the called method's
-///    docblock declares `@throws ExceptionType` -- propagated throws
+///    (the method's return type is the thrown exception type)
+/// 3. `throw functionName()` (bare function call, return type is thrown)
+/// 4. `$this->method()` / `self::method()` calls where the called method's
+///    docblock declares `@throws ExceptionType` (propagated throws)
+/// 5. Inline `/** @throws ExceptionType */` annotations in the function body
+/// 6. `throw $variable` (resolved through enclosing catch clause variable)
 ///
 /// Returns a deduplicated list of short exception type names.
 pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Vec<String> {
@@ -882,6 +999,7 @@ pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Ve
     let throw_expr_types = find_throw_expression_types(&body, content);
     let propagated = find_propagated_throws(&body, content);
     let catches = find_catch_blocks(&body);
+    let throw_vars = find_throw_variable_types(&body, &catches);
 
     let mut uncaught: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -929,6 +1047,24 @@ pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Ve
         let sn = short_name(prop.type_name.trim_start_matches('\\'));
         if !sn.is_empty() && !is_caught_by(&catches, prop.offset, sn) && seen.insert(sn.to_string())
         {
+            uncaught.push(sn.to_string());
+        }
+    }
+
+    // 4. Inline `/** @throws ExceptionType */` annotations in the body
+    let inline = find_inline_throws_annotations(&body);
+    for info in &inline {
+        let sn = short_name(info.type_name.trim_start_matches('\\'));
+        if !sn.is_empty() && !is_caught_by(&catches, info.offset, sn) && seen.insert(sn.to_string())
+        {
+            uncaught.push(sn.to_string());
+        }
+    }
+
+    // 5. `throw $variable` — resolved from catch clause variable type
+    for tv in &throw_vars {
+        let sn = short_name(tv.type_name.trim_start_matches('\\'));
+        if !sn.is_empty() && !is_caught_by(&catches, tv.offset, sn) && seen.insert(sn.to_string()) {
             uncaught.push(sn.to_string());
         }
     }

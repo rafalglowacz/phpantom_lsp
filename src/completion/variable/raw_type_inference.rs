@@ -782,8 +782,10 @@ fn resolve_rhs_raw_type<'b>(rhs: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>)
         Expression::Literal(Literal::True(_) | Literal::False(_)) => Some("bool".to_string()),
         Expression::Literal(Literal::Null(_)) => Some("null".to_string()),
         // ── Array literal: `[new Foo(), new Bar()]` → `list<Foo|Bar>` ──
-        Expression::Array(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx),
-        Expression::LegacyArray(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx),
+        Expression::Array(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx)
+            .or_else(|| Some("array".to_string())),
+        Expression::LegacyArray(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx)
+            .or_else(|| Some("array".to_string())),
         // ── `new ClassName(…)` → class name ──
         Expression::Instantiation(inst) => match inst.class {
             Expression::Identifier(ident) => Some(ident.value().to_string()),

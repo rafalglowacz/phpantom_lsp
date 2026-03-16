@@ -184,11 +184,7 @@ impl Backend {
                     None => continue,
                 };
 
-            let message = if is_fqn || ref_name.contains('\\') {
-                format!("Class '{}' not found", fqn)
-            } else {
-                format!("Class '{}' not found", ref_name)
-            };
+            let message = format!("Class '{}' not found", fqn);
 
             out.push(make_diagnostic(
                 range,

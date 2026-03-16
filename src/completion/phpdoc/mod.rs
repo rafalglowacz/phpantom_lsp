@@ -1,5 +1,15 @@
 //! PHPDoc tag completion.
 //!
+//! ## Smart completion context
+//!
+//! The [`SmartContext`] struct bundles optional enrichment data that the
+//! handler passes into [`build_phpdoc_completions`]:
+//!
+//! - An **inferred inline variable type** (for pre-filling `@var` above
+//!   variable assignments).
+//! - A **class loader** callback (for enriching `@param`, `@return`, and
+//!   `@var` type hints with `@template` parameters).
+//!
 //! When the user types `@` inside a `/** … */` docblock, this module
 //! provides context-aware tag suggestions.  The tags offered depend on
 //! what PHP symbol follows the docblock:
@@ -26,11 +36,19 @@
 //! backward compatibility.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
 use crate::completion::source::throws_analysis;
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
+use crate::types::ClassInfo;
+
+/// Callback signature for resolving a class name to its [`ClassInfo`].
+///
+/// Used by [`SmartContext`] and other enrichment code to look up
+/// `@template` parameters and other class metadata.
+pub type ClassLoaderFn<'a> = &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>;
 
 // Re-export comment-position helpers so existing consumers (tests,
 // handler, catch_completion) that import from `phpdoc::` keep working.
@@ -41,6 +59,7 @@ pub use super::source::comment_position::{is_inside_docblock, is_inside_non_doc_
 // consumers (`handler.rs`, tests) that import from `phpdoc::` keep
 // working without path changes.
 mod context;
+pub(crate) mod generation;
 pub use context::{
     DocblockContext, DocblockTypingContext, SymbolInfo, detect_context,
     detect_docblock_typing_position, extract_phpdoc_prefix, extract_symbol_info,
@@ -423,6 +442,34 @@ const PHPSTAN_CLASS_TAGS: &[TagDef] = &[
 
 const PHPSTAN_PROPERTY_TAGS: &[TagDef] = &[];
 
+// ─── Smart Completion Context ───────────────────────────────────────────────
+
+/// Optional enrichment data for smart PHPDoc tag completion.
+///
+/// Bundles the inferred inline variable type and a class-loader callback
+/// so that [`build_phpdoc_completions`] can pre-fill `@var`, `@param`,
+/// and `@return` tags with concrete type information.
+pub struct SmartContext<'a> {
+    /// Pre-resolved type for an inline variable assignment (e.g.
+    /// `"list<int>"` when the next line is `$items = [1, 2, 3];`).
+    ///
+    /// `None` when the type could not be inferred or the context is not
+    /// an inline variable assignment.
+    pub inferred_inline_var_type: Option<&'a str>,
+
+    /// Callback that resolves a class name to its [`ClassInfo`], used
+    /// to look up `@template` parameters for type enrichment.
+    pub class_loader: Option<ClassLoaderFn<'a>>,
+}
+
+impl SmartContext<'_> {
+    /// Empty context with no enrichment data.
+    pub const EMPTY: SmartContext<'static> = SmartContext {
+        inferred_inline_var_type: None,
+        class_loader: None,
+    };
+}
+
 // ─── Completion Builder ─────────────────────────────────────────────────────
 
 /// Build completion items for PHPDoc tags based on context.
@@ -435,6 +482,7 @@ const PHPSTAN_PROPERTY_TAGS: &[TagDef] = &[];
 /// following declaration).
 /// `use_map` maps short class names to FQNs from `use` statements.
 /// `file_namespace` is the file's declared namespace (if any).
+/// `smart` carries optional enrichment data (inferred type, class loader).
 ///
 /// Returns the list of matching `CompletionItem`s.
 pub fn build_phpdoc_completions(
@@ -444,6 +492,7 @@ pub fn build_phpdoc_completions(
     position: Position,
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
+    smart: &SmartContext<'_>,
 ) -> Vec<CompletionItem> {
     let prefix_lower = prefix.to_lowercase();
     let mut seen = std::collections::HashSet::new();
@@ -529,14 +578,8 @@ pub fn build_phpdoc_completions(
                             ..CompletionItem::default()
                         });
                     }
-                    // Smart items emitted — skip the generic fallback.
-                    continue;
-                }
-
-                if !uncaught.is_empty() {
-                    // Uncaught exceptions exist but all are already
-                    // documented — nothing more to add, skip generic.
-                    continue;
+                    // Smart items emitted — fall through to also show
+                    // the generic fallback (sorted after smart items).
                 }
                 // No uncaught exceptions detected at all — fall through
                 // to the generic `@throws ExceptionType` fallback so the
@@ -560,13 +603,34 @@ pub fn build_phpdoc_completions(
                             continue;
                         }
 
-                        let (insert, label) = if let Some(th) = type_hint {
-                            (
-                                format!("param {} {}", th, name),
-                                format!("@param {} {}", th, name),
-                            )
+                        let (insert, label, fmt) = if let Some(th) = type_hint {
+                            // Plain label for display.
+                            let label_type = smart
+                                .class_loader
+                                .and_then(|cl| generation::enrichment_plain(&Some(th.clone()), cl))
+                                .unwrap_or_else(|| th.clone());
+
+                            // Snippet insert text with tab stops on template params.
+                            let mut tab_stop = 1u32;
+                            let snippet_type = smart.class_loader.and_then(|cl| {
+                                generation::enrichment_snippet(&Some(th.clone()), &mut tab_stop, cl)
+                            });
+
+                            if let Some(snippet) = snippet_type {
+                                (
+                                    format!("param {} {}", snippet, name.replace('$', "\\$")),
+                                    format!("@param {} {}", label_type, name),
+                                    Some(InsertTextFormat::SNIPPET),
+                                )
+                            } else {
+                                (
+                                    format!("param {} {}", label_type, name),
+                                    format!("@param {} {}", label_type, name),
+                                    None,
+                                )
+                            }
                         } else {
-                            (format!("param {}", name), format!("@param {}", name))
+                            (format!("param {}", name), format!("@param {}", name), None)
                         };
 
                         items.push(CompletionItem {
@@ -574,6 +638,7 @@ pub fn build_phpdoc_completions(
                             kind: Some(CompletionItemKind::KEYWORD),
                             detail: Some(def.detail.to_string()),
                             insert_text: Some(insert),
+                            insert_text_format: fmt,
                             filter_text: Some(def.tag.to_string()),
                             sort_text: Some(format!(
                                 "0a_{}_{:03}",
@@ -599,11 +664,33 @@ pub fn build_phpdoc_completions(
                 if let Some(ref ret) = sym.return_type
                     && ret != "void"
                 {
+                    // Plain label for display.
+                    let label_type = smart
+                        .class_loader
+                        .and_then(|cl| generation::enrichment_plain(&Some(ret.clone()), cl))
+                        .unwrap_or_else(|| ret.clone());
+
+                    // Snippet insert text with tab stops on template params.
+                    let mut tab_stop = 1u32;
+                    let snippet_type = smart.class_loader.and_then(|cl| {
+                        generation::enrichment_snippet(&Some(ret.clone()), &mut tab_stop, cl)
+                    });
+
+                    let (insert, fmt) = if let Some(snippet) = snippet_type {
+                        (
+                            format!("return {}", snippet),
+                            Some(InsertTextFormat::SNIPPET),
+                        )
+                    } else {
+                        (format!("return {}", label_type), None)
+                    };
+
                     items.push(CompletionItem {
-                        label: format!("@return {}", ret),
+                        label: format!("@return {}", label_type),
                         kind: Some(CompletionItemKind::KEYWORD),
                         detail: Some(def.detail.to_string()),
-                        insert_text: Some(format!("return {}", ret)),
+                        insert_text: Some(insert),
+                        insert_text_format: fmt,
                         filter_text: Some(def.tag.to_string()),
                         sort_text: Some(format!("0a_{}", def.tag.to_lowercase())),
                         ..CompletionItem::default()
@@ -680,13 +767,97 @@ pub fn build_phpdoc_completions(
                 )
                 && let Some(ref th) = sym.type_hint
             {
+                // Plain label for display.
+                let label_type = smart
+                    .class_loader
+                    .and_then(|cl| generation::enrichment_plain(&Some(th.clone()), cl))
+                    .unwrap_or_else(|| th.clone());
+
+                // Snippet insert text with tab stops on template params.
+                let mut tab_stop = 1u32;
+                let snippet_type = smart.class_loader.and_then(|cl| {
+                    generation::enrichment_snippet(&Some(th.clone()), &mut tab_stop, cl)
+                });
+
+                let (insert, fmt) = if let Some(snippet) = snippet_type {
+                    (format!("var {}", snippet), Some(InsertTextFormat::SNIPPET))
+                } else {
+                    (format!("var {}", label_type), None)
+                };
+
                 items.push(CompletionItem {
-                    label: format!("@var {}", th),
+                    label: format!("@var {}", label_type),
                     kind: Some(CompletionItemKind::KEYWORD),
                     detail: Some(def.detail.to_string()),
-                    insert_text: Some(format!("var {}", th)),
+                    insert_text: Some(insert),
+                    insert_text_format: fmt,
                     filter_text: Some(def.tag.to_string()),
                     sort_text: Some(format!("0a_{}", def.tag.to_lowercase())),
+                    ..CompletionItem::default()
+                });
+                continue;
+            }
+
+            // ── Smart item for @var in inline context ───────────────
+            // When the next line is a variable assignment, promoted
+            // property, or property, sort @var first so the user can
+            // quickly type the narrowing type.  When the type can be
+            // inferred from the assignment, pre-fill it.
+            if def.tag == "@var" && matches!(context, DocblockContext::Inline) {
+                if let Some(ty) = smart.inferred_inline_var_type {
+                    // Build both a display label (plain) and insert text
+                    // (snippet with tab stops on template parameters).
+                    let label_type = smart
+                        .class_loader
+                        .and_then(|cl| generation::enrichment_plain(&Some(ty.to_string()), cl))
+                        .unwrap_or_else(|| ty.to_string());
+
+                    let mut tab_stop = 1u32;
+                    let snippet_type = smart
+                        .class_loader
+                        .and_then(|cl| {
+                            generation::enrichment_snippet(&Some(ty.to_string()), &mut tab_stop, cl)
+                        })
+                        .unwrap_or_else(|| format!("${{1:{}}}", ty));
+
+                    items.push(CompletionItem {
+                        label: format!("@var {}", label_type),
+                        kind: Some(CompletionItemKind::KEYWORD),
+                        detail: Some(def.detail.to_string()),
+                        insert_text: Some(format!("var {}", snippet_type)),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        filter_text: Some(def.tag.to_string()),
+                        sort_text: Some(format!("0a_{}", def.tag.to_lowercase())),
+                        ..CompletionItem::default()
+                    });
+                } else {
+                    items.push(CompletionItem {
+                        label: "@var Type".to_string(),
+                        kind: Some(CompletionItemKind::KEYWORD),
+                        detail: Some(def.detail.to_string()),
+                        insert_text: Some("var ${1:Type}".to_string()),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        filter_text: Some(def.tag.to_string()),
+                        sort_text: Some(format!("0a_{}", def.tag.to_lowercase())),
+                        ..CompletionItem::default()
+                    });
+                }
+                continue;
+            }
+
+            // ── Snippet fallback for @var without a value definition ─
+            // When there is no variable assignment / property on the
+            // next line, offer a snippet with tab stops for both the
+            // type and the variable name:  `@var Type $var`
+            if def.tag == "@var" && matches!(context, DocblockContext::Unknown) {
+                items.push(CompletionItem {
+                    label: "@var Type $var".to_string(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some(def.detail.to_string()),
+                    insert_text: Some("var ${1:Type} \\$${2:var}".to_string()),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
+                    filter_text: Some(def.tag.to_string()),
+                    sort_text: Some(format!("1_{}", def.tag.to_lowercase())),
                     ..CompletionItem::default()
                 });
                 continue;

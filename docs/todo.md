@@ -25,19 +25,16 @@ Stubs, **P** = Performance, **X** = Indexing, **B** = Bug Fixes,
 ## Sprint 3 — Quick wins: close the visible gaps
 
 Every item here directly removes something a Neovim/Zed/VS Code user
-would notice as missing on day one. PHPDoc block generation is the
-most common "where did that go?" moment for users switching from
-PHPStorm or Intelephense. Update Docblock (A8) is a natural companion
-to PHPDoc generation (F1) since they share docblock manipulation code,
-and Change Visibility (A9) is a low-effort quick win. Neither depends
-on scope analysis or the refactoring toolkit, so they belong here
-rather than waiting for later sprints.
+would notice as missing on day one. Update Docblock (A8) is a natural
+companion to the now-complete PHPDoc generation (F1) since they share
+docblock manipulation code, and Change Visibility (A9) is a low-effort
+quick win. Neither depends on scope analysis or the refactoring
+toolkit, so they belong here rather than waiting for later sprints.
 
-| #   | Item                               | Effort | Domain       | Doc Link                                                                  |
-| --- | ---------------------------------- | ------ | ------------ | ------------------------------------------------------------------------- |
-| F1  | PHPDoc block generation on `/**`   | Medium | LSP Features | [lsp-features.md F1](todo/lsp-features.md#f1-phpdoc-block-generation-on-) |
-| A8  | Update docblock to match signature | Medium | Code Actions | [actions.md A8](todo/actions.md#a8-update-docblock-to-match-signature)    |
-| A9  | Change visibility                  | Low    | Code Actions | [actions.md A9](todo/actions.md#a9-change-visibility)                     |
+| #   | Item                               | Effort | Domain       | Doc Link                                                               |
+| --- | ---------------------------------- | ------ | ------------ | ---------------------------------------------------------------------- |
+| A8  | Update docblock to match signature | Medium | Code Actions | [actions.md A8](todo/actions.md#a8-update-docblock-to-match-signature) |
+| A9  | Change visibility                  | Low    | Code Actions | [actions.md A9](todo/actions.md#a9-change-visibility)                  |
 
 **After Sprint 3:** PHPantom feels like a complete LSP to everyday
 users. Outline, breadcrumbs, workspace search, semantic highlighting,

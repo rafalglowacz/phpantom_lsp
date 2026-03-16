@@ -51,6 +51,15 @@ pub struct SymbolInfo {
     pub return_type: Option<String>,
     /// Property / constant type hint.
     pub type_hint: Option<String>,
+    /// Function/method name (e.g. `"__construct"`, `"getName"`).
+    /// Only populated for `FunctionOrMethod` declarations.
+    pub method_name: Option<String>,
+    /// Variable name (e.g. `$items`) for inline variable assignments.
+    pub variable_name: Option<String>,
+    /// Parent class names from `extends` clause (class-like declarations).
+    pub extends_names: Vec<String>,
+    /// Interface names from `implements` clause (class-like declarations).
+    pub implements_names: Vec<String>,
 }
 
 // ─── Docblock Typing Position Detection ─────────────────────────────────────
@@ -62,7 +71,8 @@ pub enum DocblockTypingContext {
     /// Cursor is at a position where a type/class name is expected.
     ///
     /// `partial` is the identifier fragment being typed (may be empty).
-    Type { partial: String },
+    /// `tag` is the tag name without `@` (e.g. `"throws"`, `"param"`).
+    Type { partial: String, tag: String },
     /// Cursor is at a position where a `$variable` name is expected
     /// (e.g. after the type in `@param Type $`).
     ///
@@ -174,6 +184,7 @@ pub fn detect_docblock_typing_position(
     if trimmed.is_empty() {
         return Some(DocblockTypingContext::Type {
             partial: String::new(),
+            tag: tag_lower.clone(),
         });
     }
 
@@ -186,7 +197,10 @@ pub fn detect_docblock_typing_position(
         // Still inside the type expression — extract the partial
         // identifier fragment being typed (the last word-like segment).
         let partial = extract_trailing_identifier(trimmed);
-        return Some(DocblockTypingContext::Type { partial });
+        return Some(DocblockTypingContext::Type {
+            partial,
+            tag: tag_lower.clone(),
+        });
     }
 
     // The type token is complete.  Does this tag expect a $variable next?
@@ -413,14 +427,42 @@ fn get_text_after_docblock(content: &str, position: Position) -> String {
 
 /// Classify the PHP symbol from the first meaningful tokens.
 fn classify_from_tokens(text: &str) -> DocblockContext {
+    // Track whether a blank line appears before the first code line.
+    // Inline `@var` annotations must be on the line immediately before
+    // the variable assignment — a blank line in between means the
+    // docblock is not attached to the assignment.
+    //
+    // The text starts right after `*/`, so the very first line is the
+    // remainder of the closing `*/` line (typically empty or whitespace).
+    // That first line is NOT a real blank gap — only subsequent empty
+    // lines count.
+    let mut saw_blank_line = false;
+    let mut first_code_line: Option<&str> = None;
     let mut tokens = Vec::new();
+    let mut skipped_first_line = false;
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with("/**") {
+        if trimmed.is_empty() {
+            if !skipped_first_line {
+                // The tail of the `*/` line — always skip it.
+                skipped_first_line = true;
+            } else if tokens.is_empty() {
+                // A real blank line before any code.
+                saw_blank_line = true;
+            }
             continue;
         }
+        skipped_first_line = true;
+        if trimmed.starts_with('*') || trimmed.starts_with("/**") {
+            continue;
+        }
+        if first_code_line.is_none() {
+            first_code_line = Some(trimmed);
+        }
         for word in trimmed.split_whitespace() {
-            tokens.push(word.to_lowercase());
+            // Store original casing so that uppercase-initial class names
+            // (e.g. `Collection`) are recognised as type hints later.
+            tokens.push(word.to_string());
             if tokens.len() >= 6 {
                 break;
             }
@@ -437,7 +479,8 @@ fn classify_from_tokens(text: &str) -> DocblockContext {
     let mut saw_modifier = false;
     for token in &tokens {
         let t = token.as_str();
-        match t {
+        let lower = t.to_ascii_lowercase();
+        match lower.as_str() {
             "function" => return DocblockContext::FunctionOrMethod,
             "class" | "interface" | "trait" | "enum" => return DocblockContext::ClassLike,
             "const" => return DocblockContext::Constant,
@@ -449,18 +492,24 @@ fn classify_from_tokens(text: &str) -> DocblockContext {
                 if t.starts_with('$') {
                     // A `$variable` preceded by an access modifier like
                     // `public` is a property declaration.  Without a
-                    // modifier it is an inline statement (e.g.
-                    // `/** @var User $u */ $u = getUser();`).
-                    return if saw_modifier {
-                        DocblockContext::Property
-                    } else {
-                        DocblockContext::Inline
-                    };
+                    // modifier it *might* be an inline variable assignment
+                    // (e.g. `/** @var User $u */ $u = getUser();`).
+                    if saw_modifier {
+                        return DocblockContext::Property;
+                    }
+                    // Inline context requires:
+                    //  1. No blank line between `*/` and the code line.
+                    //  2. The statement is a variable assignment (`$v = …`),
+                    //     not a method call (`$v->foo()`) or other use.
+                    if !saw_blank_line && is_variable_assignment(first_code_line.unwrap_or("")) {
+                        return DocblockContext::Inline;
+                    }
+                    return DocblockContext::Unknown;
                 }
                 if t.starts_with('?')
                     || t.starts_with('\\')
                     || t.chars().next().is_some_and(|c| c.is_uppercase())
-                    || is_type_keyword(t)
+                    || is_type_keyword(&lower)
                 {
                     continue;
                 }
@@ -470,6 +519,32 @@ fn classify_from_tokens(text: &str) -> DocblockContext {
     }
 
     DocblockContext::Unknown
+}
+
+/// Check whether a trimmed code line is a simple variable assignment.
+///
+/// Returns `true` for lines like `$foo = expr;` or `$foo = expr` (no
+/// semicolon yet).  Returns `false` for method calls (`$foo->bar()`),
+/// comparisons (`$foo == bar`), and other non-assignment uses.
+fn is_variable_assignment(line: &str) -> bool {
+    // Find the first `$` — start of the variable name.
+    let Some(dollar) = line.find('$') else {
+        return false;
+    };
+    // Skip past the variable name (alphanumeric, `_`, `$`).
+    let after_name = &line[dollar..];
+    let name_len = after_name
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .count();
+    let rest = after_name[name_len..].trim_start();
+
+    // Must start with `=` but not `==` or `=>`.
+    if let Some(stripped) = rest.strip_prefix('=') {
+        !stripped.starts_with('=') && !stripped.starts_with('>')
+    } else {
+        false
+    }
 }
 
 /// Check if a token is a PHP type keyword (used in property declarations).
@@ -500,13 +575,31 @@ fn is_type_keyword(token: &str) -> bool {
 fn parse_symbol_info(text: &str) -> SymbolInfo {
     let mut info = SymbolInfo::default();
 
+    // Track blank lines — inline variable assignment detection requires
+    // the assignment to be on the very next line (no blank gap).
+    //
+    // The text starts right after `*/`, so the first line is the tail
+    // of the closing `*/` line (usually empty).  That does NOT count
+    // as a blank gap — only subsequent empty lines do.
+    let mut saw_blank_before_code = false;
+    let mut skipped_first_line = false;
+
     // Collect the declaration — may span multiple lines until `{` or `;`
     let mut decl = String::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with("/**") {
+        if trimmed.starts_with('*') || trimmed.starts_with("/**") {
             continue;
         }
+        if trimmed.is_empty() {
+            if !skipped_first_line {
+                skipped_first_line = true;
+            } else if decl.is_empty() {
+                saw_blank_before_code = true;
+            }
+            continue;
+        }
+        skipped_first_line = true;
         decl.push(' ');
         decl.push_str(trimmed);
         if trimmed.contains('{') || trimmed.contains(';') {
@@ -538,6 +631,27 @@ fn parse_symbol_info(text: &str) -> SymbolInfo {
     } else {
         // Property or constant — extract type hint
         info.type_hint = extract_property_type(decl);
+
+        // For inline variable assignments (e.g. `$items = getUser();`),
+        // extract the variable name so that @var completion can detect
+        // whether a variable definition follows the docblock.
+        //
+        // Only extract when:
+        //  - There is no blank line between `*/` and the code.
+        //  - The statement is actually an assignment (`$v = …`), not a
+        //    method call (`$v->foo()`) or comparison (`$v == bar`).
+        if !saw_blank_before_code
+            && is_variable_assignment(decl)
+            && let Some(dollar) = decl.find('$')
+        {
+            let name: String = decl[dollar..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            if !name.is_empty() {
+                info.variable_name = Some(name);
+            }
+        }
     }
 
     info
@@ -613,6 +727,11 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
                 let clean = t.trim_start_matches("...").trim_start_matches('&');
                 name = Some(clean.to_string());
                 break;
+            }
+            // Skip constructor promotion modifiers — they are not type hints
+            match t.to_lowercase().as_str() {
+                "public" | "protected" | "private" | "static" | "readonly" => continue,
+                _ => {}
             }
             // Otherwise it's (part of) the type hint
             if let Some(existing) = type_hint {
@@ -717,4 +836,18 @@ fn extract_property_type(decl: &str) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_promoted_property_type() {
+        let result = parse_params("public readonly bool $selected");
+        assert_eq!(result.len(), 1);
+        let (type_hint, name) = &result[0];
+        assert_eq!(type_hint.as_deref(), Some("bool"));
+        assert_eq!(name, "$selected");
+    }
 }

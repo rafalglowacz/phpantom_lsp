@@ -109,10 +109,8 @@ fn test_find_inline_throws_annotations() {
         $db->query();
     "#;
     let annotations = find_inline_throws_annotations(body);
-    assert_eq!(
-        annotations,
-        vec!["InvalidArgumentException", "RuntimeException"]
-    );
+    let names: Vec<&str> = annotations.iter().map(|t| t.type_name.as_str()).collect();
+    assert_eq!(names, vec!["InvalidArgumentException", "RuntimeException"]);
 }
 
 #[test]
@@ -256,18 +254,16 @@ fn test_find_catch_blocks_multi_catch() {
 
 #[test]
 fn test_parse_catch_types_basic() {
-    assert_eq!(
-        parse_catch_types("InvalidArgumentException $e"),
-        vec!["InvalidArgumentException"]
-    );
+    let (types, var) = parse_catch_types("InvalidArgumentException $e");
+    assert_eq!(types, vec!["InvalidArgumentException"]);
+    assert_eq!(var.as_deref(), Some("$e"));
 }
 
 #[test]
 fn test_parse_catch_types_multi() {
-    assert_eq!(
-        parse_catch_types("\\InvalidArgumentException | \\RuntimeException $e"),
-        vec!["InvalidArgumentException", "RuntimeException"]
-    );
+    let (types, var) = parse_catch_types("\\InvalidArgumentException | \\RuntimeException $e");
+    assert_eq!(types, vec!["InvalidArgumentException", "RuntimeException"]);
+    assert_eq!(var.as_deref(), Some("$e"));
 }
 
 #[test]
@@ -337,6 +333,242 @@ fn test_find_uncaught_throw_types_mixed() {
     };
     let uncaught = find_uncaught_throw_types(content, pos);
     assert_eq!(uncaught, vec!["RuntimeException"]);
+}
+
+#[test]
+fn test_find_uncaught_throw_types_inline_annotation_caught() {
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        try {\n",
+        "            /** @throws NotFoundException */\n",
+        "            findOrFail();\n",
+        "        } catch (NotFoundException $e) {\n",
+        "            // handled\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert!(
+        uncaught.is_empty(),
+        "inline @throws inside try/catch should be excluded, got: {:?}",
+        uncaught
+    );
+}
+
+#[test]
+fn test_find_uncaught_throw_types_inline_annotation_partially_caught() {
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        try {\n",
+        "            /** @throws NotFoundException */\n",
+        "            findOrFail();\n",
+        "        } catch (NotFoundException $e) {\n",
+        "            // handled\n",
+        "        }\n",
+        "        /** @throws RuntimeException */\n",
+        "        riskyCall();\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert_eq!(
+        uncaught,
+        vec!["RuntimeException"],
+        "only the uncaught inline @throws should remain"
+    );
+}
+
+// ── throw $variable tests ───────────────────────────────────────────
+
+#[test]
+fn test_find_uncaught_throw_variable_from_catch() {
+    // `throw $e` inside a catch block re-throws the caught type.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        try {\n",
+        "            throw new ValidationException('bad');\n",
+        "        } catch (ValidationException $e) {\n",
+        "            throw $e;\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert_eq!(
+        uncaught,
+        vec!["ValidationException"],
+        "re-thrown catch variable should appear in uncaught list"
+    );
+}
+
+#[test]
+fn test_find_uncaught_throw_variable_not_rethrown() {
+    // The caught exception is NOT re-thrown — should be empty.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        try {\n",
+        "            throw new ValidationException('bad');\n",
+        "        } catch (ValidationException $e) {\n",
+        "            // swallowed\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert!(
+        uncaught.is_empty(),
+        "caught and not re-thrown should be empty, got: {:?}",
+        uncaught
+    );
+}
+
+#[test]
+fn test_find_uncaught_throw_variable_multiple_catches() {
+    // Two catch blocks, each re-throwing — both types should appear.
+    let content = concat!(
+        "<?php\nclass Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        try {\n",
+        "            doSomething();\n",
+        "        } catch (ValidationException $e) {\n",
+        "            throw $e;\n",
+        "        } catch (NotFoundException $e) {\n",
+        "            throw $e;\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 3,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert!(
+        uncaught.contains(&"ValidationException".to_string()),
+        "should contain ValidationException, got: {:?}",
+        uncaught
+    );
+    assert!(
+        uncaught.contains(&"NotFoundException".to_string()),
+        "should contain NotFoundException, got: {:?}",
+        uncaught
+    );
+}
+
+// ── throw functionCall() tests ──────────────────────────────────────
+
+#[test]
+fn test_find_throw_expression_bare_function_call() {
+    let file_content = r#"
+function makeException(): RuntimeException {
+    return new RuntimeException("oops");
+}
+
+public function caller(): void {
+    throw makeException();
+}
+    "#;
+    let body = "throw makeException();";
+    let types = find_throw_expression_types(body, file_content);
+    assert_eq!(types.len(), 1, "should resolve bare function call");
+    assert_eq!(types[0].type_name, "RuntimeException");
+}
+
+#[test]
+fn test_find_uncaught_throw_bare_function_call() {
+    let content = concat!(
+        "<?php\n",
+        "function makeException(): RuntimeException {\n",
+        "    return new RuntimeException('oops');\n",
+        "}\n",
+        "class Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        throw makeException();\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 6,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert_eq!(
+        uncaught,
+        vec!["RuntimeException"],
+        "bare function call return type should appear in uncaught"
+    );
+}
+
+#[test]
+fn test_find_uncaught_throw_bare_function_caught() {
+    // throw functionCall() inside a try/catch that catches it.
+    let content = concat!(
+        "<?php\n",
+        "function makeException(): RuntimeException {\n",
+        "    return new RuntimeException('oops');\n",
+        "}\n",
+        "class Foo {\n",
+        "    /**\n",
+        "     * @\n",
+        "     */\n",
+        "    public function bar(): void {\n",
+        "        try {\n",
+        "            throw makeException();\n",
+        "        } catch (RuntimeException $e) {\n",
+        "            // handled\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let pos = Position {
+        line: 6,
+        character: 5,
+    };
+    let uncaught = find_uncaught_throw_types(content, pos);
+    assert!(
+        uncaught.is_empty(),
+        "caught bare function throw should be empty, got: {:?}",
+        uncaught
+    );
 }
 
 // ── Import helper tests ─────────────────────────────────────────────

@@ -7366,3 +7366,48 @@ class Logger {
         text
     );
 }
+
+#[test]
+fn hover_empty_array_literal_shows_array_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+function test() {
+    $items = [];
+    $items;
+}
+"#;
+
+    let hover = hover_at(&backend, uri, content, 3, 5).expect("expected hover on $items");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("array"),
+        "empty array literal should resolve to array type, got: {}",
+        text
+    );
+    assert!(
+        text.contains("$items"),
+        "should mention the variable name, got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_empty_legacy_array_literal_shows_array_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+function test() {
+    $items = array();
+    $items;
+}
+"#;
+
+    let hover = hover_at(&backend, uri, content, 3, 5).expect("expected hover on $items");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("array"),
+        "empty array() literal should resolve to array type, got: {}",
+        text
+    );
+}

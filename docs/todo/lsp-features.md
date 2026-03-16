@@ -12,43 +12,124 @@ within the same impact tier.
 
 ## F1. PHPDoc block generation on `/**`
 
-**Impact: Medium-High · Effort: Medium**
+**Impact: Medium-High · Effort: Medium · Status: implemented**
 
-Typing `/**` above a function, class, property, or constant should
-generate a complete doc block skeleton — not just offer tag completions
-(which we already do via `@`-triggered completion inside existing doc
-blocks). This is a distinct feature: the trigger is `/**` outside any
-doc block, and the result is a multi-line snippet with all tags
-pre-filled.
+Both entry points (completion on `/**`, on-type formatting on Enter)
+generate docblock skeletons following the enrichment-only rules below.
+Template-parameter detection, `@extends`/`@implements` for class-likes,
+space-aligned `@param` blocks, blank-line grouping, and `@var` for all
+properties/constants are all implemented. 66 generation tests and 77
+PHPDoc completion tests cover the behaviour.
 
-### What to generate
+### Delivery mechanism
 
-- **Functions/methods:** `@param` tags for every parameter (with type
-  from native hint or inference), `@return` with the declared/inferred
-  return type, `@throws` for uncaught exception types in the body.
-- **Method overrides:** insert `{@inheritDoc}` instead of repeating the
-  parent's documentation, unless the override changes the signature.
-- **Classes/interfaces/enums:** `@package` or a blank summary line.
-- **Properties:** `@var` with the declared/inferred type.
-- **Constants:** `@var` with the value's type.
+Two entry points, both already wired up:
 
-### Implementation
+1. **Completion** (`try_generate_docblock`) — fires when the cursor is
+   right after `/**` in editors that do not auto-close it. Returns a
+   snippet `CompletionItem` with tab stops.
+2. **On-type formatting** (`try_generate_docblock_on_enter`) — fires on
+   Enter via `textDocument/onTypeFormatting`. Detects a freshly
+   auto-generated empty `/** … */` block (VS Code, Zed, Neovim with
+   auto-pairs) and replaces it with the filled docblock.
 
-1. Register `/**` as a completion trigger (it already fires on
-   individual characters; the trigger is the `/` after `**`).
-2. In the completion handler, detect that the cursor is immediately
-   after `/**` with only whitespace before the next declaration.
-3. Find the declaration below the cursor (function, class, property,
-   constant) by scanning forward in the AST or raw text.
-4. Build a `CompletionItem` with `insertTextFormat: Snippet` containing
-   the full doc block with tab stops for summary and description fields.
-5. For functions, resolve parameter types using the same paths as
-   signature help. For `@throws`, reuse the exception-detection logic
-   from existing PHPDoc `@throws` completion.
+### What to generate — functions and methods
 
-**Note:** This is different from the existing `@`-triggered PHPDoc
-completion which suggests individual tags inside an already-open doc
-block. This generates the entire block from scratch.
+Only add tags that carry information the native type hints cannot
+express. No special treatment for overrides — apply the same rules.
+
+**`@param`** — include a tag when:
+
+| Native type            | Action                                          |
+| ---------------------- | ----------------------------------------------- |
+| Missing                | `@param ${mixed} $name`                         |
+| `array`                | `@param ${array} $name`                         |
+| `Closure` / `callable` | `@param (${Closure()}) $name`                   |
+| Union containing above | `@param array\|string $name` (echo raw type)    |
+| Class with templates   | `@param ClassName<${T}> $name` (template names) |
+| Anything else          | Skip (already fully expressed)                  |
+
+Template detection: load the class via `class_loader`, check for
+`@template` tags on it. Use the template parameter names as snippet
+tab-stop placeholders (e.g. `Collection<${1:TKey}, ${2:TValue}>`).
+
+`mixed`, `array`, and callable placeholders are tab stops so the user
+can type over them immediately. Union types containing `array`,
+`Closure`, or `callable` echo the raw type string so the user can
+refine the array/callable portion.
+
+**`@return`** — same logic as `@param`:
+
+| Native return type     | Action                                     |
+| ---------------------- | ------------------------------------------ |
+| Missing                | `@return ${mixed}`                         |
+| `void`                 | Skip                                       |
+| `array`                | `@return ${array}`                         |
+| `Closure` / `callable` | `@return (${Closure()})`                   |
+| Union containing above | `@return array\|string` (echo raw type)    |
+| Class with templates   | `@return ClassName<${T}>` (template names) |
+| Anything else          | Skip                                       |
+
+**`@throws`** — always add for every uncaught exception type detected
+in the body. Reuse `find_uncaught_throw_types`. Auto-import via
+`additional_text_edits` when the exception is not yet imported.
+
+**Ordering and alignment:**
+
+Tags are listed in this order, with a blank `*` separator line
+between different tag groups (but not before the first group, and
+not between tags of the same kind):
+
+1. `@param` tags (all params together)
+2. `@throws` tags
+3. `@return`
+
+No summary line is emitted when tags are present. When there are no
+tags at all, generate a summary-only skeleton (`/**\n * \n */`) so
+the user can type a description.
+
+Within the `@param` block, parameter names are space-aligned:
+
+```
+ * @param Collection<int, Alert> $activeAlerts
+ * @param string                 $reason
+```
+
+Right-pad the type string so that all `$name` tokens start at the same
+column.
+
+### What to generate — class-likes
+
+Check whether the class `extends` or `implements` something whose
+definition has `@template` parameters. If so, generate `@extends` /
+`@implements` tags with the template parameter names as tab stops:
+
+```
+/**
+ * @extends Factory<${1:TModel}>
+ */
+class UserFactory extends Factory
+```
+
+If neither parent nor interfaces have templates, generate a
+summary-only skeleton: `/**\n * \n */`.
+
+### What to generate — properties
+
+Always generate `/** @var Type */` with the native type pre-filled so
+the user has a starting point for adding a description.
+
+| Native type          | Generated                     |
+| -------------------- | ----------------------------- |
+| Missing              | `/** @var ${mixed} */`        |
+| `array`              | `/** @var ${array} */`        |
+| Class with templates | `/** @var ClassName<${T}> */` |
+| Any other type       | `/** @var thatType */`        |
+
+### What to generate — constants
+
+Same as properties: `/** @var Type */` with the declared type or
+`${mixed}` if untyped.
 
 ---
 
@@ -113,12 +194,12 @@ developer arrive before vendor matches, even within a single phase.
 
 ### Applicable requests
 
-| Request                        | Benefit                                                                         |
-| ------------------------------ | ------------------------------------------------------------------------------- |
-| `textDocument/implementation`  | Already scans five phases; each phase's matches can be streamed                 |
-| `textDocument/references`      | Will need full-project scanning; streaming is essential                         |
-| `workspace/symbol`             | Searches every known class/function; early batches feel instant                 |
-| `textDocument/completion`      | Less critical (usually fast), but long chains through vendor code could benefit |
+| Request                       | Benefit                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------- |
+| `textDocument/implementation` | Already scans five phases; each phase's matches can be streamed                 |
+| `textDocument/references`     | Will need full-project scanning; streaming is essential                         |
+| `workspace/symbol`            | Searches every known class/function; early batches feel instant                 |
+| `textDocument/completion`     | Less critical (usually fast), but long chains through vendor code could benefit |
 
 ### Implementation sketch
 
@@ -215,4 +296,3 @@ now, only single-class file renames are in scope.
   from the `changes` map to `documentChanges` array when file
   operations are included, since `changes` does not support renames.
   Check the client capability first.
-
