@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`@see` and `@link` improvements.** `@see` references in docblocks now work with go-to-definition (class, member, and function forms). Hover popups show all `@link` and `@see` URLs as clickable links. Deprecation diagnostics include `@see` targets when the `@deprecated` docblock references them.
 - **Progress indicators.** Go to Implementation and Find References now show a progress indicator in the editor while scanning.
 
+### Fixed
+
+- **Namespace alias completion.** Typing a class name through a namespace alias (e.g. `OA\Re` with `use OpenApi\Attributes as OA`) now correctly suggests classes under the aliased namespace such as `OA\Response` and `OA\RequestBody`. Previously only unrelated classes matched because the alias was not expanded before prefix matching.
+
 ### Changed
 
 - **Pull diagnostics.** Diagnostics are now delivered via the LSP 3.17 pull model (`textDocument/diagnostic`) when the editor supports it. The editor requests diagnostics only for visible files, and cross-file invalidation uses `workspace/diagnostic/refresh` instead of recomputing every open tab. Clients without pull support fall back to the previous push model automatically.

@@ -28,7 +28,7 @@ use crate::types::*;
 use crate::util::short_name;
 
 use super::class_completion::{
-    ClassItemCtx, ClassItemTexts, build_affinity_table, class_edit_texts, is_anonymous_class,
+    ClassItemCtx, ClassItemTexts, build_affinity_table, class_edit_texts, expand_alias_prefix, is_anonymous_class,
     matches_class_prefix,
 };
 use crate::completion::builder::analyze_use_block;
@@ -517,6 +517,14 @@ impl Backend {
         let prefix_lower = normalized.to_lowercase();
         let is_fqn_prefix = has_leading_backslash || normalized.contains('\\');
 
+        // When the prefix starts with an alias (e.g. `OA\Re` where
+        // `use OpenApi\Attributes as OA`), expand it to the FQN form
+        // so that `matches_class_prefix` can find classes under the
+        // aliased namespace.
+        let expanded = expand_alias_prefix(normalized, file_use_map);
+        let expanded_lower = expanded.as_deref().map(|s| s.to_lowercase());
+        let expanded_prefix_lower = expanded_lower.as_deref();
+
         // When the user is typing a namespace-qualified reference,
         // provide an explicit replacement range so the editor replaces
         // the entire typed prefix (including namespace separators).
@@ -566,7 +574,13 @@ impl Backend {
 
         // ── 1a. Use-imported classes/interfaces (must be Throwable) ─
         for (short_name, fqn) in file_use_map {
-            if !matches_class_prefix(short_name, fqn, &prefix_lower, is_fqn_prefix) {
+            if !matches_class_prefix(
+                short_name,
+                fqn,
+                &prefix_lower,
+                is_fqn_prefix,
+                expanded_prefix_lower,
+            ) {
                 continue;
             }
             if !seen_fqns.insert(fqn.clone()) {
@@ -646,6 +660,7 @@ impl Backend {
                                 &cls_fqn,
                                 &prefix_lower,
                                 is_fqn_prefix,
+                                expanded_prefix_lower,
                             ) {
                                 continue;
                             }
@@ -694,7 +709,13 @@ impl Backend {
             let idx = self.class_index.read();
             for fqn in idx.keys() {
                 let sn = short_name(fqn);
-                if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix) {
+                if !matches_class_prefix(
+                    sn,
+                    fqn,
+                    &prefix_lower,
+                    is_fqn_prefix,
+                    expanded_prefix_lower,
+                ) {
                     continue;
                 }
                 if !seen_fqns.insert(fqn.clone()) {
@@ -742,7 +763,13 @@ impl Backend {
                     continue;
                 }
                 let sn = short_name(fqn);
-                if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix) {
+                if !matches_class_prefix(
+                    sn,
+                    fqn,
+                    &prefix_lower,
+                    is_fqn_prefix,
+                    expanded_prefix_lower,
+                ) {
                     continue;
                 }
                 if !seen_fqns.insert(fqn.clone()) {
@@ -780,7 +807,13 @@ impl Backend {
                 continue;
             }
             let sn = short_name(name);
-            if !matches_class_prefix(sn, name, &prefix_lower, is_fqn_prefix) {
+            if !matches_class_prefix(
+                sn,
+                name,
+                &prefix_lower,
+                is_fqn_prefix,
+                expanded_prefix_lower,
+            ) {
                 continue;
             }
             if !seen_fqns.insert(name.to_string()) {

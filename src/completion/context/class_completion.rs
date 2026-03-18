@@ -448,19 +448,49 @@ pub(in crate::completion) fn is_anonymous_class(name: &str) -> bool {
     name.starts_with("__anonymous@")
 }
 
-/// Whether a class name (short or FQN) matches a typed prefix.
+/// Expand a namespace alias at the start of a typed prefix.
 ///
-/// In FQN mode, matches against both the short name and the full FQN.
-/// In non-FQN mode, only matches against the short name.
+/// Given a prefix like `OA\Re` and a use-map containing
+/// `OA → OpenApi\Attributes`, returns `Some("OpenApi\Attributes\Re")`.
+/// Returns `None` when the first segment of the prefix is not a known
+/// alias or the prefix contains no backslash.
+pub(in crate::completion) fn expand_alias_prefix(
+    normalized_prefix: &str,
+    use_map: &HashMap<String, String>,
+) -> Option<String> {
+    let bs = normalized_prefix.find('\\')?;
+    let first_segment = &normalized_prefix[..bs];
+    let rest = &normalized_prefix[bs + 1..]; // may be empty
+    let fqn_ns = use_map.get(first_segment)?;
+    if rest.is_empty() {
+        Some(format!("{}\\", fqn_ns))
+    } else {
+        Some(format!("{}\\{}", fqn_ns, rest))
+    }
+}
+
+/// Check whether a class matches the typed prefix.
+///
+/// In FQN-prefix mode (`is_fqn` is `true`) both the short name and the
+/// fully-qualified name are checked so that `App\Models\U` can surface
+/// `App\Models\User`.  When `expanded_prefix_lower` is provided (the
+/// alias-expanded form of the prefix, e.g. `openapi\attributes\re` for
+/// a typed `OA\Re`), it is also checked against the FQN so that
+/// classes under an aliased namespace are matched.
+///
+/// In non-FQN mode only the short name is checked to avoid flooding the
+/// response with every class under a broad namespace prefix.
 pub(in crate::completion) fn matches_class_prefix(
     short_name: &str,
     fqn: &str,
     prefix_lower: &str,
     is_fqn: bool,
+    expanded_prefix_lower: Option<&str>,
 ) -> bool {
     if is_fqn {
         short_name.to_lowercase().contains(prefix_lower)
             || fqn.to_lowercase().contains(prefix_lower)
+            || expanded_prefix_lower.is_some_and(|exp| fqn.to_lowercase().contains(exp))
     } else {
         short_name.to_lowercase().contains(prefix_lower)
     }
@@ -1037,6 +1067,14 @@ impl Backend {
         // no redundant `use` text-edit is generated.
         let is_fqn_prefix = has_leading_backslash || normalized.contains('\\') || is_use_import;
 
+        // When the prefix starts with an alias (e.g. `OA\Re` where
+        // `use OpenApi\Attributes as OA`), expand it to the FQN form
+        // (`OpenApi\Attributes\Re`) so that `matches_class_prefix` can
+        // find classes under the aliased namespace.
+        let expanded = expand_alias_prefix(normalized, file_use_map);
+        let expanded_lower = expanded.as_deref().map(|s| s.to_lowercase());
+        let expanded_prefix_lower = expanded_lower.as_deref();
+
         // In UseImport context, suppress namespace-relative
         // simplification — `use User;` is wrong even when the cursor
         // file lives in the same namespace as `User`.  Passing `None`
@@ -1105,7 +1143,13 @@ impl Backend {
 
         // ── 1. Use-imported classes (highest priority) ──────────────
         for (sn, fqn) in file_use_map {
-            if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix) {
+            if !matches_class_prefix(
+                sn,
+                fqn,
+                &prefix_lower,
+                is_fqn_prefix,
+                expanded_prefix_lower,
+            ) {
                 continue;
             }
             // Skip use-map entries that are namespace aliases rather
@@ -1189,6 +1233,7 @@ impl Backend {
                                 &cls_fqn,
                                 &prefix_lower,
                                 is_fqn_prefix,
+                                expanded_prefix_lower,
                             ) {
                                 continue;
                             }
@@ -1245,7 +1290,13 @@ impl Backend {
             let idx = self.class_index.read();
             for fqn in idx.keys() {
                 let sn = short_name(fqn);
-                if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix) {
+                if !matches_class_prefix(
+                    sn,
+                    fqn,
+                    &prefix_lower,
+                    is_fqn_prefix,
+                    expanded_prefix_lower,
+                ) {
                     continue;
                 }
                 if !seen_fqns.insert(fqn.clone()) {
@@ -1292,7 +1343,13 @@ impl Backend {
             let cmap = self.classmap.read();
             for fqn in cmap.keys() {
                 let sn = short_name(fqn);
-                if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix) {
+                if !matches_class_prefix(
+                    sn,
+                    fqn,
+                    &prefix_lower,
+                    is_fqn_prefix,
+                    expanded_prefix_lower,
+                ) {
                     continue;
                 }
                 if !seen_fqns.insert(fqn.clone()) {
@@ -1337,7 +1394,13 @@ impl Backend {
         // ── 5. Built-in PHP classes from stubs (lowest priority) ────
         for &name in self.stub_index.keys() {
             let sn = short_name(name);
-            if !matches_class_prefix(sn, name, &prefix_lower, is_fqn_prefix) {
+            if !matches_class_prefix(
+                sn,
+                name,
+                &prefix_lower,
+                is_fqn_prefix,
+                expanded_prefix_lower,
+            ) {
                 continue;
             }
             if !seen_fqns.insert(name.to_string()) {
@@ -1412,7 +1475,15 @@ impl Backend {
             // backslash.  A bare name like `User` in UseImport context
             // has `is_fqn_prefix` true but no namespace to browse.
             if ns_prefix_end > 0 {
-                let ns_prefix_lower = normalized[..ns_prefix_end].to_lowercase();
+                // When the prefix starts with an alias, use the
+                // expanded FQN form for namespace segment matching so
+                // that `OA\` finds segments under `OpenApi\Attributes\`.
+                let raw_ns_prefix = &normalized[..ns_prefix_end];
+                let expanded_ns = expand_alias_prefix(raw_ns_prefix, file_use_map);
+                let ns_prefix_lower = expanded_ns
+                    .as_deref()
+                    .unwrap_or(raw_ns_prefix)
+                    .to_lowercase();
                 // Partial text after the last `\` that the user is
                 // still typing (e.g. `U` from `App\Models\U`).  Used
                 // to filter segments whose short name doesn't match.

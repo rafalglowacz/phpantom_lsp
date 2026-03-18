@@ -4748,3 +4748,162 @@ async fn test_class_name_completion_class_index_label_is_short_name() {
         "Label should be the short name in non-FQN mode"
     );
 }
+
+// ─── Namespace alias prefix completion ─────────────────────────────────────
+
+/// When the user types `OA\Re` and the file has `use OpenApi\Attributes as OA`,
+/// classes under `OpenApi\Attributes` whose short name starts with `Re` should
+/// appear in completions (e.g. `OpenApi\Attributes\Response`).
+#[tokio::test]
+async fn test_namespace_alias_prefix_matches_classes_underneath() {
+    let backend = create_test_backend_with_stubs();
+
+    {
+        let mut idx = backend.class_index().write();
+        idx.insert(
+            "OpenApi\\Attributes\\Response".to_string(),
+            "file:///vendor/openapi/Response.php".to_string(),
+        );
+        idx.insert(
+            "OpenApi\\Attributes\\RequestBody".to_string(),
+            "file:///vendor/openapi/RequestBody.php".to_string(),
+        );
+        idx.insert(
+            "OpenApi\\Attributes\\Property".to_string(),
+            "file:///vendor/openapi/Property.php".to_string(),
+        );
+    }
+
+    let uri = Url::parse("file:///controller.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use OpenApi\\Attributes as OA;\n",
+        "new OA\\Re\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 2, 9).await;
+    let cls = class_items(&items);
+    let labels: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
+
+    // Both classes starting with "Re" should appear.
+    assert!(
+        labels.iter().any(|l| l.contains("Response")),
+        "Expected OA\\Response in completions, got: {:?}",
+        labels
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("RequestBody")),
+        "Expected OA\\RequestBody in completions, got: {:?}",
+        labels
+    );
+    // Property does NOT start with "Re", so it should be absent.
+    assert!(
+        !labels.iter().any(|l| l.contains("Property")),
+        "Property should not match OA\\Re prefix, got: {:?}",
+        labels
+    );
+}
+
+/// The insert text for alias-qualified completions should use the
+/// alias form (e.g. `OA\Response`), not the full FQN.
+#[tokio::test]
+async fn test_namespace_alias_prefix_insert_text_uses_alias() {
+    let backend = create_test_backend_with_stubs();
+
+    {
+        let mut idx = backend.class_index().write();
+        idx.insert(
+            "OpenApi\\Attributes\\Response".to_string(),
+            "file:///vendor/openapi/Response.php".to_string(),
+        );
+    }
+
+    let uri = Url::parse("file:///controller.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "use OpenApi\\Attributes as OA;\n",
+        "new OA\\Resp\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 2, 11).await;
+    let resp = items
+        .iter()
+        .find(|i| i.detail.as_deref() == Some("OpenApi\\Attributes\\Response"))
+        .expect("Should find OpenApi\\Attributes\\Response");
+
+    let insert = resp.insert_text.as_deref().unwrap_or("");
+    assert!(
+        insert.contains("OA\\Response"),
+        "Insert text should use alias form OA\\Response, got: {:?}",
+        insert
+    );
+}
+
+/// Namespace segments should work through aliases: typing `OA\` should
+/// show sub-namespace segments under `OpenApi\Attributes\`.
+#[tokio::test]
+async fn test_namespace_alias_prefix_shows_segments() {
+    let backend = create_test_backend_with_stubs();
+
+    {
+        let mut idx = backend.class_index().write();
+        idx.insert(
+            "OpenApi\\Attributes\\Callbacks\\Callback".to_string(),
+            "file:///vendor/openapi/Callbacks/Callback.php".to_string(),
+        );
+        idx.insert(
+            "OpenApi\\Attributes\\Response".to_string(),
+            "file:///vendor/openapi/Response.php".to_string(),
+        );
+    }
+
+    let uri = Url::parse("file:///controller.php").unwrap();
+    let text = concat!("<?php\n", "use OpenApi\\Attributes as OA;\n", "new OA\\C\n",);
+
+    let items = complete_at(&backend, &uri, text, 2, 8).await;
+
+    // The `Callbacks` sub-namespace segment should appear.
+    let callbacks = items.iter().find(|i| i.label.contains("Callbacks"));
+    assert!(
+        callbacks.is_some(),
+        "Expected a Callbacks namespace segment, got labels: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Typing just `OA\` (alias + backslash, no partial after it) should
+/// list all classes under `OpenApi\Attributes`.
+#[tokio::test]
+async fn test_namespace_alias_prefix_bare_backslash_lists_all() {
+    let backend = create_test_backend_with_stubs();
+
+    {
+        let mut idx = backend.class_index().write();
+        idx.insert(
+            "OpenApi\\Attributes\\Response".to_string(),
+            "file:///vendor/openapi/Response.php".to_string(),
+        );
+        idx.insert(
+            "OpenApi\\Attributes\\Property".to_string(),
+            "file:///vendor/openapi/Property.php".to_string(),
+        );
+    }
+
+    let uri = Url::parse("file:///controller.php").unwrap();
+    let text = concat!("<?php\n", "use OpenApi\\Attributes as OA;\n", "new OA\\\n",);
+
+    let items = complete_at(&backend, &uri, text, 2, 7).await;
+    let cls = class_items(&items);
+    let labels: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.iter().any(|l| l.contains("Response")),
+        "Expected Response in completions for OA\\, got: {:?}",
+        labels
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("Property")),
+        "Expected Property in completions for OA\\, got: {:?}",
+        labels
+    );
+}
