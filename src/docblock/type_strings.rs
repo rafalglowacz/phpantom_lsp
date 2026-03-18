@@ -46,21 +46,59 @@ pub(crate) const PHPDOC_TYPE_KEYWORDS: &[&str] = &[
     "self",
     "static",
     // ── PHPStan / PHPDoc extended types ─────────────────────────────
-    "scalar",
-    "numeric",
-    "class-string",
-    "list",
-    "non-empty-list",
-    "non-empty-array",
-    "non-empty-string",
+    // Integer refinements
     "positive-int",
     "negative-int",
     "non-negative-int",
     "non-positive-int",
+    "non-zero-int",
+    "int-mask",
+    "int-mask-of",
+    // String refinements
+    "non-empty-string",
+    "non-falsy-string",
+    "truthy-string",
+    "literal-string",
+    "non-empty-literal-string",
     "numeric-string",
+    "callable-string",
+    "lowercase-string",
+    "uppercase-string",
+    "non-empty-lowercase-string",
+    "non-empty-uppercase-string",
+    // Array / list refinements
+    "list",
+    "non-empty-list",
+    "non-empty-array",
+    "associative-array",
+    // Class-string variants
+    "class-string",
+    "interface-string",
+    "trait-string",
+    "enum-string",
+    // Scalar / mixed variants
+    "scalar",
+    "numeric",
+    "empty-scalar",
+    "non-empty-scalar",
+    "non-empty-mixed",
+    "number",
+    "empty",
+    // Object / callable variants
+    "callable-object",
+    "callable-array",
+    // Resource variants
+    "closed-resource",
+    "open-resource",
+    // Key / value utility types
     "array-key",
     "key-of",
     "value-of",
+    // Never aliases
+    "no-return",
+    "noreturn",
+    "never-return",
+    "never-returns",
 ];
 
 /// Split off the first type token from `s`, respecting `<…>` and `{…}`

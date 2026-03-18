@@ -28,8 +28,8 @@ use crate::types::*;
 use crate::util::short_name;
 
 use super::class_completion::{
-    ClassItemCtx, ClassItemTexts, build_affinity_table, class_edit_texts, expand_alias_prefix, is_anonymous_class,
-    matches_class_prefix,
+    ClassItemCtx, ClassItemTexts, build_affinity_table, class_edit_texts, expand_alias_prefix,
+    is_anonymous_class, matches_class_prefix,
 };
 use crate::completion::builder::analyze_use_block;
 use crate::completion::source::comment_position::position_to_byte_offset;

@@ -1143,13 +1143,7 @@ impl Backend {
 
         // ── 1. Use-imported classes (highest priority) ──────────────
         for (sn, fqn) in file_use_map {
-            if !matches_class_prefix(
-                sn,
-                fqn,
-                &prefix_lower,
-                is_fqn_prefix,
-                expanded_prefix_lower,
-            ) {
+            if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix, expanded_prefix_lower) {
                 continue;
             }
             // Skip use-map entries that are namespace aliases rather

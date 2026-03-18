@@ -888,7 +888,11 @@ impl Backend {
         skip_names: &[String],
     ) -> String {
         // Keywords that should never be resolved as class names.
+        // NOTE: native PHP types (int, string, array, etc.) are caught by
+        // `is_scalar()` elsewhere — only pseudo-types and special keywords
+        // that slip past that check need to be listed here.
         const TYPE_KEYWORDS: &[&str] = &[
+            // ── Special keywords ────────────────────────────────────
             "self",
             "static",
             "parent",
@@ -900,16 +904,59 @@ impl Backend {
             "null",
             "true",
             "false",
+            "class",
+            "callable",
+            "scalar",
+            "numeric",
+            "number",
+            "empty",
+            // ── Integer refinements ─────────────────────────────────
+            "positive-int",
+            "negative-int",
+            "non-negative-int",
+            "non-positive-int",
+            "non-zero-int",
+            "int-mask",
+            "int-mask-of",
+            // ── String refinements ──────────────────────────────────
+            "non-empty-string",
+            "numeric-string",
+            "non-falsy-string",
+            "truthy-string",
+            "literal-string",
+            "callable-string",
+            "lowercase-string",
+            "uppercase-string",
+            "non-empty-lowercase-string",
+            "non-empty-uppercase-string",
+            "non-empty-literal-string",
+            // ── Class-string variants ───────────────────────────────
             "class-string",
+            "interface-string",
+            "trait-string",
+            "enum-string",
+            // ── Array / list refinements ────────────────────────────
             "list",
             "non-empty-list",
             "non-empty-array",
-            "positive-int",
-            "negative-int",
-            "non-empty-string",
-            "numeric-string",
-            "class",
-            "callable",
+            "associative-array",
+            "array-key",
+            // ── Scalar / mixed variants ─────────────────────────────
+            "empty-scalar",
+            "non-empty-scalar",
+            "non-empty-mixed",
+            // ── Object / callable variants ──────────────────────────
+            "callable-object",
+            "callable-array",
+            // ── Resource variants ───────────────────────────────────
+            "closed-resource",
+            "open-resource",
+            // ── Never aliases ───────────────────────────────────────
+            "no-return",
+            "noreturn",
+            "never-return",
+            "never-returns",
+            // ── Key / value projection ──────────────────────────────
             "key-of",
             "value-of",
         ];
