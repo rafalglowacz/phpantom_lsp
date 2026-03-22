@@ -215,6 +215,47 @@ impl Backend {
             Some(&doc_ctx),
         );
         if !functions.is_empty() {
+            // Resolve class-like names in function return types and
+            // parameter type hints to FQNs so that cross-file consumers
+            // can resolve them without the declaring file's use map.
+            // This mirrors the resolution done for class method return
+            // types and parameter hints in `resolve_parent_class_names`.
+            for func in &mut functions {
+                let skip_names: Vec<String> = func.template_params.clone();
+
+                if let Some(ref ret) = func.return_type {
+                    let resolved =
+                        Self::resolve_type_string(ret, &use_map, &namespace, &skip_names);
+                    if resolved != *ret {
+                        func.return_type = Some(resolved);
+                    }
+                }
+                if let Some(ref ret) = func.native_return_type {
+                    let resolved =
+                        Self::resolve_type_string(ret, &use_map, &namespace, &skip_names);
+                    if resolved != *ret {
+                        func.native_return_type = Some(resolved);
+                    }
+                }
+                for param in &mut func.parameters {
+                    if let Some(ref hint) = param.type_hint {
+                        let resolved =
+                            Self::resolve_type_string(hint, &use_map, &namespace, &skip_names);
+                        if resolved != *hint {
+                            param.type_hint = Some(resolved);
+                        }
+                    }
+                }
+                // Resolve exception class names in @throws tags.
+                for throw in &mut func.throws {
+                    let resolved =
+                        Self::resolve_type_string(throw, &use_map, &namespace, &skip_names);
+                    if resolved != *throw {
+                        *throw = resolved;
+                    }
+                }
+            }
+
             let mut fmap = self.global_functions.write();
             for func_info in functions {
                 let fqn = if let Some(ref ns) = func_info.namespace {

@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Update docblock.** The code action no longer appears when the cursor is inside a function or method body. It now only triggers on the signature or the preceding docblock.
 - **Update docblock.** No longer suggests adding redundant `@param` tags when the docblock has no `@param` tags and all parameters already have sufficient native type hints. This matches the generate-docblock behaviour, which intentionally omits `@param` for fully-typed non-templated parameters.
 - **PHPStan diagnostics.** PHPStan cache pruning after deduplication now unconditionally writes the pruned set back, fixing a theoretically possible stale-entry reappearance when pruning changed diagnostics without changing the count.
+- **Function return type resolution across files.** Standalone functions (e.g. Laravel's `now()`) that declare return types using short names from their own `use` imports now resolve correctly in consuming files. Previously, the return type was stored as the unqualified name (e.g. `CarbonInterface` instead of `Carbon\CarbonInterface`), causing false "subject type could not be resolved" warnings and broken completion when the consuming file did not import the same class. Function parameter types and `@throws` types are also resolved.
 
 ### Added
 

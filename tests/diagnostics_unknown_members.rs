@@ -1726,6 +1726,54 @@ class Consumer {
 
 /// Static method returning an array: `Collection::all()[0]->getLabel()`.
 #[test]
+fn no_diagnostic_for_function_return_type_resolved_cross_file() {
+    // Regression test: standalone functions store return types as short
+    // names from the declaring file.  After FQN resolution in update_ast,
+    // consumers in other files should resolve the type correctly.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/" } } }"#,
+        &[(
+            "src/Clock.php",
+            r#"<?php
+namespace App;
+
+interface Clock {
+    public function subMinutes(int $value = 1): Clock;
+}
+"#,
+        )],
+    );
+
+    // A helper file that imports Clock via `use` and returns the short name.
+    let helpers_uri = "file:///helpers.php";
+    let helpers = r#"<?php
+use App\Clock;
+
+function now(): Clock {
+    // stub
+}
+"#;
+    backend.update_ast(helpers_uri, helpers);
+
+    // Consumer file does NOT import App\Clock — it relies on the
+    // function's return type being resolved to FQN at parse time.
+    let uri = "file:///test.php";
+    let text = r#"<?php
+class Consumer {
+    public function run(): void {
+        now()->subMinutes(5);
+    }
+}
+"#;
+    let diags = unknown_member_diagnostics(&backend, uri, text);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("subMinutes")),
+        "No diagnostic expected for subMinutes on function return type resolved via FQN, got: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn no_diagnostic_for_static_method_return_array_access() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
