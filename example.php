@@ -458,6 +458,37 @@ class TraitGenericDemo
 }
 
 
+// ── Null-Init + Conditional Reassignment ────────────────────────────────────
+
+class NullInitReassignDemo
+{
+    /** @param list<Pen> $pens */
+    public function demo(array $pens): void
+    {
+        // Pattern 1: null-init + foreach reassignment + truthiness guard
+        $found = null;
+        foreach ($pens as $pen) {
+            if ($pen->color() === 'blue') {
+                $found = $pen;
+            }
+        }
+        if ($found) {
+            $found->write();                      // Pen from foreach reassignment
+        }
+
+        // Pattern 2: null-coalesce + guard inside foreach
+        /** @var array<string, Pen> $lookup */
+        $lookup = getUnknownValue();
+        $keys = ['a', 'b'];
+        foreach ($keys as $key) {
+            $item = $lookup[$key] ?? null;
+            if (!$item) { continue; }
+            $item->write();                       // Pen from array access via coalesce
+        }
+    }
+}
+
+
 // ── Foreach & Array Access ──────────────────────────────────────────────────
 
 class ForeachArrayAccessDemo
@@ -4388,6 +4419,17 @@ function runDemoAssertions(): void
 
     assert(StaticAssert::isRock(new Rock()) === true, 'StaticAssert::isRock(Rock) must return true');
     assert(StaticAssert::isNotRock(new Banana()) === true, 'StaticAssert::isNotRock(Banana) must return true');
+
+    // ── Null-init + foreach reassignment (B11) ──────────────────────────
+    $pens = [new Pen('blue'), new Pen('red')];
+    $found = null;
+    foreach ($pens as $pen) {
+        if ($pen->color() === 'blue') {
+            $found = $pen;
+        }
+    }
+    assert($found instanceof Pen, 'Null-init + foreach reassign must resolve to Pen');
+    assert(method_exists($found, 'write'), 'Pen from foreach must have write()');
 
     // ── instanceof self/static/parent ───────────────────────────────────
     $sedan = new ScaffoldingSedan();

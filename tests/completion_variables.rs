@@ -17530,3 +17530,539 @@ async fn test_completion_nullable_return_type_chain() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+// ─── Null-init + conditional reassign (B11) ─────────────────────────────────
+
+/// When a variable is initialized as `$x = null` and then conditionally
+/// reassigned inside a foreach loop, the type from the reassignment
+/// should be available after the loop.
+#[tokio::test]
+async fn test_null_init_foreach_reassign() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b11_foreach.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                             // 0
+        "class Transaction {\n",                               // 1
+        "    public function commit(): void {}\n",             // 2
+        "}\n",                                                 // 3
+        "class Svc {\n",                                       // 4
+        "    /** @param list<string> $items */\n",             // 5
+        "    public function process(array $items): void {\n", // 6
+        "        $tx = null;\n",                               // 7
+        "        foreach ($items as $item) {\n",               // 8
+        "            $tx = new Transaction();\n",              // 9
+        "        }\n",                                         // 10
+        "        if ($tx) {\n",                                // 11
+        "            $tx->\n",                                 // 12
+        "        }\n",                                         // 13
+        "    }\n",                                             // 14
+        "}\n",                                                 // 15
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 12,
+                    character: 17,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions after null-init + foreach reassign"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"commit"),
+                "Should include Transaction's commit() after foreach reassign, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Variable-to-variable assignment inside foreach: `$found = $pen` where
+/// `$pen` is the foreach value variable. The RHS variable must be resolved
+/// through the foreach value type inference.
+#[tokio::test]
+async fn test_null_init_foreach_var_to_var_reassign() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b11_var_to_var.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                              // 0
+        "class Pen {\n",                                        // 1
+        "    public function write(): void {}\n",               // 2
+        "    public function color(): string { return ''; }\n", // 3
+        "}\n",                                                  // 4
+        "class Svc {\n",                                        // 5
+        "    /** @param list<Pen> $pens */\n",                  // 6
+        "    public function find(array $pens): void {\n",      // 7
+        "        $found = null;\n",                             // 8
+        "        foreach ($pens as $pen) {\n",                  // 9
+        "            if ($pen->color() === 'blue') {\n",        // 10
+        "                $found = $pen;\n",                     // 11
+        "            }\n",                                      // 12
+        "        }\n",                                          // 13
+        "        if ($found) {\n",                              // 14
+        "            $found->\n",                               // 15
+        "        }\n",                                          // 16
+        "    }\n",                                              // 17
+        "}\n",                                                  // 18
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 15,
+                    character: 20,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions for var-to-var reassign from foreach value"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"write"),
+                "Should include Pen's write() after var-to-var reassign from foreach value, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Same as above but with a nested if inside the foreach (the real-world
+/// pattern from the bug report: conditional reassignment inside a loop).
+#[tokio::test]
+async fn test_null_init_foreach_nested_if_reassign() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b11_foreach_nested.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                             // 0
+        "class Transaction {\n",                               // 1
+        "    public function commit(): void {}\n",             // 2
+        "}\n",                                                 // 3
+        "class Svc {\n",                                       // 4
+        "    /** @param list<string> $items */\n",             // 5
+        "    public function process(array $items): void {\n", // 6
+        "        $tx = null;\n",                               // 7
+        "        foreach ($items as $item) {\n",               // 8
+        "            if ($item === 'start') {\n",              // 9
+        "                $tx = new Transaction();\n",          // 10
+        "            }\n",                                     // 11
+        "        }\n",                                         // 12
+        "        if ($tx) {\n",                                // 13
+        "            $tx->\n",                                 // 14
+        "        }\n",                                         // 15
+        "    }\n",                                             // 16
+        "}\n",                                                 // 17
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 14,
+                    character: 17,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions after null-init + foreach + nested if reassign"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"commit"),
+                "Should include Transaction's commit() after foreach + nested if reassign, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Pattern 2 from B11: `$x = $arr[$key] ?? null` inside a foreach,
+/// followed by a guard clause. The null-coalesce RHS (`null`) resolves
+/// to empty, so `$x` gets the type from the LHS array access.
+#[tokio::test]
+async fn test_null_coalesce_guard_inside_foreach() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b11_coalesce.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                            // 0
+        "class Day {\n",                                      // 1
+        "    public string $from;\n",                         // 2
+        "}\n",                                                // 3
+        "class Svc {\n",                                      // 4
+        "    /** @param array<string, Day> $schedule */\n",   // 5
+        "    public function run(array $schedule): void {\n", // 6
+        "        $keys = ['mon', 'tue'];\n",                  // 7
+        "        foreach ($keys as $key) {\n",                // 8
+        "            $day = $schedule[$key] ?? null;\n",      // 9
+        "            if (!$day) { continue; }\n",             // 10
+        "            $day->\n",                               // 11
+        "        }\n",                                        // 12
+        "    }\n",                                            // 13
+        "}\n",                                                // 14
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 11,
+                    character: 18,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions for null-coalesce + guard inside foreach"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::PROPERTY))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"from"),
+                "Should include Day's 'from' property after coalesce + guard, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Same pattern but with a while loop instead of foreach.
+#[tokio::test]
+async fn test_null_init_while_reassign() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b11_while.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Order {\n",
+        "    public function total(): int { return 0; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $order = null;\n",
+        "        while ($row = rand(0,1)) {\n",
+        "            $order = new Order();\n",
+        "        }\n",
+        "        if ($order) {\n",
+        "            $order->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 11,
+                    character: 20,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions after null-init + while reassign"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"total"),
+                "Should include Order's total() after while reassign, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Null-init + reassign inside a for loop body.
+#[tokio::test]
+async fn test_null_init_for_reassign() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b11_for.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Widget {\n",
+        "    public function render(): void {}\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $w = null;\n",
+        "        for ($i = 0; $i < 5; $i++) {\n",
+        "            $w = new Widget();\n",
+        "        }\n",
+        "        if ($w) {\n",
+        "            $w->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 11,
+                    character: 16,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions after null-init + for reassign"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"render"),
+                "Should include Widget's render() after for reassign, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Cross-file version: null-init + foreach + PSR-4 class.
+#[tokio::test]
+async fn test_null_init_foreach_reassign_cross_file() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+        &[
+            (
+                "src/Invoice.php",
+                concat!(
+                    "<?php\n",
+                    "namespace App;\n",
+                    "class Invoice {\n",
+                    "    public function send(): void {}\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "src/Processor.php",
+                concat!(
+                    "<?php\n",
+                    "namespace App;\n",
+                    "class Processor {\n",
+                    "    /** @param list<string> $ids */\n",
+                    "    public function run(array $ids): void {\n",
+                    "        $invoice = null;\n",
+                    "        foreach ($ids as $id) {\n",
+                    "            $invoice = new Invoice();\n",
+                    "        }\n",
+                    "        if ($invoice) {\n",
+                    "            $invoice->\n",
+                    "        }\n",
+                    "    }\n",
+                    "}\n",
+                ),
+            ),
+        ],
+    );
+
+    let uri = Url::parse("file:///src/Processor.php").unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: std::fs::read_to_string(_dir.path().join("src/Processor.php")).unwrap(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 10,
+                    character: 24,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Should return completions for cross-file null-init + foreach reassign"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+            assert!(
+                names.contains(&"send"),
+                "Should include Invoice's send() after foreach reassign (cross-file), got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

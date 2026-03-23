@@ -127,6 +127,28 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
             }
             vec![]
         }
+        // ── Bare variable: `$a = $b` ────────────────────────────────
+        // Resolve the RHS variable's type by walking assignments before
+        // this point.  The caller (`check_expression_for_assignment`)
+        // already set `ctx.cursor_offset` to the assignment's start
+        // offset, so the recursive resolution only considers
+        // assignments *before* the current one, preventing cycles.
+        Expression::Variable(Variable::Direct(dv)) => {
+            let rhs_var = dv.name.to_string();
+            // Guard: never recurse into the same variable (self-assignment).
+            if rhs_var == ctx.var_name {
+                return vec![];
+            }
+            super::resolution::resolve_variable_types(
+                &rhs_var,
+                ctx.current_class,
+                ctx.all_classes,
+                ctx.content,
+                ctx.cursor_offset,
+                ctx.class_loader,
+                ctx.function_loader,
+            )
+        }
         _ => vec![],
     }
 }

@@ -3623,4 +3623,81 @@ class Service {
             "expected exactly one 'onlyOnA' diagnostic (after reassignment), got: {relevant:?}"
         );
     }
+
+    /// B11: `$found = null; foreach (...) { $found = $pen; } $found->write()`
+    /// must not produce a scalar_member_access diagnostic when the foreach
+    /// value variable has a known type.
+    #[test]
+    fn no_false_positive_null_init_foreach_var_to_var_reassign() {
+        let php = r#"<?php
+class Pen {
+    public function write(): void {}
+    public function color(): string { return ''; }
+}
+class Svc {
+    /** @param list<Pen> $pens */
+    public function find(array $pens): void {
+        $found = null;
+        foreach ($pens as $pen) {
+            if ($pen->color() === 'blue') {
+                $found = $pen;
+            }
+        }
+        if ($found) {
+            $found->write();
+        }
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        let scalar_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(NumberOrString::String("scalar_member_access".to_string())))
+            .collect();
+        assert!(
+            scalar_diags.is_empty(),
+            "should not flag scalar_member_access on $found->write() after foreach reassign, got: {scalar_diags:?}"
+        );
+        let unknown_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("write"))
+            .collect();
+        assert!(
+            unknown_diags.is_empty(),
+            "should not flag unknown member 'write' on $found after foreach reassign, got: {unknown_diags:?}"
+        );
+    }
+
+    /// B11: direct instantiation inside foreach body (no var-to-var).
+    #[test]
+    fn no_false_positive_null_init_foreach_direct_reassign() {
+        let php = r#"<?php
+class Transaction {
+    public function commit(): void {}
+}
+class Svc {
+    /** @param list<string> $items */
+    public function process(array $items): void {
+        $tx = null;
+        foreach ($items as $item) {
+            $tx = new Transaction();
+        }
+        if ($tx) {
+            $tx->commit();
+        }
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        let bad_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("commit") || d.message.contains("null"))
+            .collect();
+        assert!(
+            bad_diags.is_empty(),
+            "should not flag commit() or scalar null after foreach reassign, got: {bad_diags:?}"
+        );
+    }
 }

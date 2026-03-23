@@ -839,6 +839,48 @@ fn resolve_rhs_raw_type<'b>(rhs: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>)
             }
             combined
         }
+        // ── Bare variable: `$a = $b` ────────────────────────────────
+        // Resolve the RHS variable's raw type so that hover shows the
+        // propagated type.  Try the raw-type accumulator first (handles
+        // regular assignments); fall back to the completion pipeline
+        // which also handles foreach value/key bindings.
+        Expression::Variable(Variable::Direct(dv)) => {
+            let var_name = dv.name.to_string();
+            // Guard: never recurse into the same variable.
+            if var_name == ctx.var_name {
+                return None;
+            }
+            // Try raw type resolution first (cheap, same pipeline).
+            if let Some(raw) = resolve_variable_assignment_raw_type(
+                &var_name,
+                ctx.content,
+                ctx.cursor_offset,
+                Some(ctx.current_class),
+                ctx.all_classes,
+                ctx.class_loader,
+                ctx.function_loader,
+            ) {
+                return Some(raw);
+            }
+            // Fall back to the completion pipeline which handles foreach
+            // value/key bindings and other sources the raw-type pipeline
+            // cannot reach.
+            let classes = super::resolution::resolve_variable_types(
+                &var_name,
+                ctx.current_class,
+                ctx.all_classes,
+                ctx.content,
+                ctx.cursor_offset,
+                ctx.class_loader,
+                ctx.function_loader,
+            );
+            if !classes.is_empty() {
+                let names: Vec<&str> = classes.iter().map(|c| c.name.as_str()).collect();
+                return Some(names.join("|"));
+            }
+            // Last resort: docblock scan (e.g. `@var` inline annotation).
+            super::foreach_resolution::extract_rhs_iterable_raw_type(rhs, ctx)
+        }
         // ── Call / property access — delegate to iterable extractor,
         //    with a source-scan fallback for standalone function calls
         //    when no `function_loader` is available. ──

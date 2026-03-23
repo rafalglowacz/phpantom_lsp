@@ -53,39 +53,3 @@ check with exit should produce negative narrowing for subsequent code.
 issue that affects any code using the early-return-after-instanceof
 pattern.
 
----
-
-#### B11. Variables initialized to `null` and conditionally reassigned lose their type
-
-| | |
-|---|---|
-| **Impact** | Medium |
-| **Effort** | Medium |
-
-When a variable is initialized as `$x = null` and then conditionally
-reassigned inside a loop or branch (e.g. `$x = $transaction`), PHPantom
-resolves `$x` to `null` at the usage site even after a truthiness guard
-like `if (!$x) { continue; }` or `if ($x !== null)`.
-
-Three common patterns:
-
-1. **Null-init + loop assignment + guard:**
-   `$x = null; foreach (...) { if (cond) { $x = $expr; } } if ($x) { $x->method(); }`
-
-2. **Null coalesce + guard:**
-   `$x = $arr[$key] ?? null; if (!$x) { continue; } $x->property;`
-
-3. **assertNotNull:**
-   `$day = $arr['key'] ?? null; self::assertNotNull($day); $day->from;`
-
-The root cause is that PHPantom's variable resolution picks the first
-(or dominant) assignment and does not consider all assignment sites to
-build a union type. For pattern 1, only the `= null` is seen. For
-patterns 2 and 3, the `?? null` makes the type nullable but the
-subsequent guard or assertion is not recognized as narrowing.
-
-Pattern 3 overlaps with custom assert narrowing (`@phpstan-assert`) which
-requires recognizing `assertNotNull` as a type guard.
-
-**Triage count:** ~8 scalar_member_access diagnostics in luxplus/shared
-(AltapayGateway, PCNService, CustomerService, CoolrunnerClientTest).

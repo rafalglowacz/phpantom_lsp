@@ -1053,7 +1053,10 @@ fn walk_foreach_statement<'b>(
 ) {
     let body_span = foreach.body.span();
     let header_start = foreach.foreach.span().start.offset;
-    if ctx.cursor_offset >= header_start && ctx.cursor_offset <= body_span.end.offset {
+    let cursor_inside =
+        ctx.cursor_offset >= header_start && ctx.cursor_offset <= body_span.end.offset;
+
+    if cursor_inside {
         // ── Foreach value/key type from generic iterables ──
         // When the variable we're resolving is the foreach
         // *value* variable, try to infer its type from the
@@ -1081,14 +1084,21 @@ fn walk_foreach_statement<'b>(
             conditional,
         );
         super::foreach_resolution::try_resolve_foreach_key_type(foreach, ctx, results, conditional);
+    }
 
-        match &foreach.body {
-            ForeachBody::Statement(inner) => {
-                check_statement_for_assignments(inner, ctx, results, true);
-            }
-            ForeachBody::ColonDelimited(body) => {
-                walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
-            }
+    // Always walk the foreach body for variable assignments, even when
+    // the cursor is after the foreach.  A foreach body may execute zero
+    // or more times, so any assignment inside is conditional.
+    //
+    // Without this, `$x = null; foreach (...) { $x = new Foo(); }
+    // $x->method();` would lose the `Foo` assignment because the body
+    // was only walked when the cursor was inside the foreach (B11).
+    match &foreach.body {
+        ForeachBody::Statement(inner) => {
+            check_statement_for_assignments(inner, ctx, results, true);
+        }
+        ForeachBody::ColonDelimited(body) => {
+            walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
         }
     }
 }
