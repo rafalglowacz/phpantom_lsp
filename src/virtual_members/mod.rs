@@ -738,14 +738,45 @@ fn resolve_class_fully_inner(
         }
     }
 
-    for iface_name in &all_iface_names {
-        if let Some(iface) = class_loader(iface_name) {
+    // Use an index-based loop so that we can grow `all_iface_names`
+    // while iterating — each resolved interface may itself extend
+    // additional interfaces that need to be collected transitively.
+    let mut iface_idx = 0;
+    while iface_idx < all_iface_names.len() {
+        let iface_name = all_iface_names[iface_idx].clone();
+        iface_idx += 1;
+
+        if let Some(iface) = class_loader(&iface_name) {
+            // Collect interfaces that this interface itself extends.
+            // For example, CarbonInterface extends DateTimeInterface,
+            // JsonSerializable, UnitValue — all of those need to be
+            // resolved and their members merged transitively.
+            for child_iface in &iface.interfaces {
+                if !all_iface_names.contains(child_iface) {
+                    all_iface_names.push(child_iface.clone());
+                }
+            }
+
+            // Collect @extends / @implements generics from the
+            // interface so that template substitutions flow through
+            // transitive interface chains.
+            for (name, args) in &iface.extends_generics {
+                if !all_implements_generics.iter().any(|(n, _)| n == name) {
+                    all_implements_generics.push((name.clone(), args.clone()));
+                }
+            }
+            for (name, args) in &iface.implements_generics {
+                if !all_implements_generics.iter().any(|(n, _)| n == name) {
+                    all_implements_generics.push((name.clone(), args.clone()));
+                }
+            }
+
             // Build a substitution map from `@implements` generics for
             // this interface.  If the class (or a parent) declared
             // `@implements ThisInterface<Type1, Type2>`, map the
             // interface's template params to those concrete types.
             let iface_subs =
-                build_implements_substitution_map(iface_name, &iface, &all_implements_generics);
+                build_implements_substitution_map(&iface_name, &iface, &all_implements_generics);
 
             // When we have substitutions to apply, we cannot use a
             // cached bare-interface resolution because the cached version

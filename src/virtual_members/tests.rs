@@ -1,6 +1,6 @@
 use super::*;
 use crate::test_fixtures::{make_class, make_method, make_property};
-use crate::types::Visibility;
+use crate::types::{ClassLikeKind, ConstantInfo, Visibility};
 use std::sync::Arc;
 
 // ── VirtualMembers tests ────────────────────────────────────────────
@@ -1184,5 +1184,92 @@ fn evict_cast_class_chains_through_model_to_child() {
     assert!(
         cache.is_empty(),
         "cast eviction should chain: cast → model (via casts) → child (via parent)"
+    );
+}
+
+// ── B12: interface-extends-interface transitive member merging ───────
+
+#[test]
+fn resolve_class_fully_merges_transitive_interface_constants() {
+    // Simulates the Carbon scenario:
+    //   interface UnitValue       { const JANUARY = 1; }
+    //   interface JsonSerializable { function jsonSerialize(): mixed; }
+    //   interface DateTimeInterface { function format(string $f): string; }
+    //   interface CarbonInterface extends DateTimeInterface, JsonSerializable, UnitValue {}
+    //   class Carbon implements CarbonInterface {}
+    //
+    // Before the fix, only DateTimeInterface (the first extended
+    // interface, stored in `parent_class`) was merged.  Members from
+    // JsonSerializable and UnitValue were lost.
+
+    let mut unit_value = make_class("Carbon\\Constants\\UnitValue");
+    unit_value.kind = ClassLikeKind::Interface;
+    unit_value.constants.push(ConstantInfo {
+        name: "JANUARY".to_string(),
+        name_offset: 0,
+        type_hint: Some("int".to_string()),
+        visibility: Visibility::Public,
+        deprecation_message: None,
+        deprecated_replacement: None,
+        see_refs: Vec::new(),
+        description: None,
+        is_enum_case: false,
+        enum_value: None,
+        value: Some("1".to_string()),
+        is_virtual: false,
+    });
+
+    let mut json_serializable = make_class("JsonSerializable");
+    json_serializable.kind = ClassLikeKind::Interface;
+    json_serializable
+        .methods
+        .push(make_method("jsonSerialize", Some("mixed")));
+
+    let mut datetime_iface = make_class("DateTimeInterface");
+    datetime_iface.kind = ClassLikeKind::Interface;
+    datetime_iface
+        .methods
+        .push(make_method("format", Some("string")));
+
+    let mut carbon_iface = make_class("CarbonInterface");
+    carbon_iface.kind = ClassLikeKind::Interface;
+    carbon_iface.parent_class = Some("DateTimeInterface".to_string());
+    carbon_iface.interfaces = vec![
+        "DateTimeInterface".to_string(),
+        "JsonSerializable".to_string(),
+        "Carbon\\Constants\\UnitValue".to_string(),
+    ];
+
+    let mut carbon = make_class("Carbon");
+    carbon.interfaces = vec!["CarbonInterface".to_string()];
+
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        match name {
+            "CarbonInterface" => Some(Arc::new(carbon_iface.clone())),
+            "DateTimeInterface" => Some(Arc::new(datetime_iface.clone())),
+            "JsonSerializable" => Some(Arc::new(json_serializable.clone())),
+            "Carbon\\Constants\\UnitValue" => Some(Arc::new(unit_value.clone())),
+            _ => None,
+        }
+    };
+
+    let resolved = crate::virtual_members::resolve_class_fully(&carbon, &class_loader);
+
+    // DateTimeInterface::format — merged via CarbonInterface's parent_class chain
+    assert!(
+        resolved.methods.iter().any(|m| m.name == "format"),
+        "should have DateTimeInterface::format"
+    );
+
+    // JsonSerializable::jsonSerialize — merged via transitive interface collection
+    assert!(
+        resolved.methods.iter().any(|m| m.name == "jsonSerialize"),
+        "should have JsonSerializable::jsonSerialize (2nd extended interface)"
+    );
+
+    // UnitValue::JANUARY — merged via transitive interface collection
+    assert!(
+        resolved.constants.iter().any(|c| c.name == "JANUARY"),
+        "should have UnitValue::JANUARY constant (3rd extended interface)"
     );
 }
