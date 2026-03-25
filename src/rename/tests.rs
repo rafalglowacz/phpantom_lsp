@@ -1675,14 +1675,14 @@ async fn prepare_rename_enum_case_at_declaration() {
     let backend = Backend::new_test();
     let uri = Url::parse("file:///test.php").unwrap();
     let text = concat!(
-        "<?php\n",                                    // 0
-        "enum TaskType: int {\n",                     // 1
-        "    case Task  = 1;\n",                      // 2
-        "    case Issue = 2;\n",                      // 3
-        "    public function isIssue(): bool {\n",    // 4
-        "        return $this === self::Issue;\n",    // 5
-        "    }\n",                                    // 6
-        "}\n",                                        // 7
+        "<?php\n",                                 // 0
+        "enum TaskType: int {\n",                  // 1
+        "    case Task  = 1;\n",                   // 2
+        "    case Issue = 2;\n",                   // 3
+        "    public function isIssue(): bool {\n", // 4
+        "        return $this === self::Issue;\n", // 5
+        "    }\n",                                 // 6
+        "}\n",                                     // 7
     );
 
     open_file(&backend, &uri, text).await;
@@ -1695,7 +1695,10 @@ async fn prepare_rename_enum_case_at_declaration() {
     );
 
     if let Some(PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) = result {
-        assert_eq!(placeholder, "Issue", "Placeholder should be the enum case name");
+        assert_eq!(
+            placeholder, "Issue",
+            "Placeholder should be the enum case name"
+        );
     } else {
         panic!("Expected RangeWithPlaceholder, got {:?}", result);
     }
@@ -1706,14 +1709,14 @@ async fn prepare_rename_enum_case_at_reference() {
     let backend = Backend::new_test();
     let uri = Url::parse("file:///test.php").unwrap();
     let text = concat!(
-        "<?php\n",                                    // 0
-        "enum TaskType: int {\n",                     // 1
-        "    case Task  = 1;\n",                      // 2
-        "    case Issue = 2;\n",                      // 3
-        "    public function isIssue(): bool {\n",    // 4
-        "        return $this === self::Issue;\n",    // 5
-        "    }\n",                                    // 6
-        "}\n",                                        // 7
+        "<?php\n",                                 // 0
+        "enum TaskType: int {\n",                  // 1
+        "    case Task  = 1;\n",                   // 2
+        "    case Issue = 2;\n",                   // 3
+        "    public function isIssue(): bool {\n", // 4
+        "        return $this === self::Issue;\n", // 5
+        "    }\n",                                 // 6
+        "}\n",                                     // 7
     );
 
     open_file(&backend, &uri, text).await;
@@ -1726,7 +1729,10 @@ async fn prepare_rename_enum_case_at_reference() {
     );
 
     if let Some(PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) = result {
-        assert_eq!(placeholder, "Issue", "Placeholder should be the enum case name");
+        assert_eq!(
+            placeholder, "Issue",
+            "Placeholder should be the enum case name"
+        );
     } else {
         panic!("Expected RangeWithPlaceholder, got {:?}", result);
     }
@@ -1737,14 +1743,14 @@ async fn rename_enum_case_from_declaration() {
     let backend = Backend::new_test();
     let uri = Url::parse("file:///test.php").unwrap();
     let text = concat!(
-        "<?php\n",                                    // 0
-        "enum TaskType: int {\n",                     // 1
-        "    case Task  = 1;\n",                      // 2
-        "    case Issue = 2;\n",                      // 3
-        "    public function isIssue(): bool {\n",    // 4
-        "        return $this === self::Issue;\n",    // 5
-        "    }\n",                                    // 6
-        "}\n",                                        // 7
+        "<?php\n",                                 // 0
+        "enum TaskType: int {\n",                  // 1
+        "    case Task  = 1;\n",                   // 2
+        "    case Issue = 2;\n",                   // 3
+        "    public function isIssue(): bool {\n", // 4
+        "        return $this === self::Issue;\n", // 5
+        "    }\n",                                 // 6
+        "}\n",                                     // 7
     );
 
     open_file(&backend, &uri, text).await;
@@ -1796,14 +1802,14 @@ async fn rename_enum_case_from_reference() {
     let backend = Backend::new_test();
     let uri = Url::parse("file:///test.php").unwrap();
     let text = concat!(
-        "<?php\n",                                    // 0
-        "enum TaskType: int {\n",                     // 1
-        "    case Task  = 1;\n",                      // 2
-        "    case Issue = 2;\n",                      // 3
-        "    public function isIssue(): bool {\n",    // 4
-        "        return $this === self::Issue;\n",    // 5
-        "    }\n",                                    // 6
-        "}\n",                                        // 7
+        "<?php\n",                                 // 0
+        "enum TaskType: int {\n",                  // 1
+        "    case Task  = 1;\n",                   // 2
+        "    case Issue = 2;\n",                   // 3
+        "    public function isIssue(): bool {\n", // 4
+        "        return $this === self::Issue;\n", // 5
+        "    }\n",                                 // 6
+        "}\n",                                     // 7
     );
 
     open_file(&backend, &uri, text).await;
@@ -1844,17 +1850,17 @@ async fn rename_enum_case_does_not_affect_other_cases() {
     let backend = Backend::new_test();
     let uri = Url::parse("file:///test.php").unwrap();
     let text = concat!(
-        "<?php\n",                                    // 0
-        "enum TaskType: int {\n",                     // 1
-        "    case Task  = 1;\n",                      // 2
-        "    case Issue = 2;\n",                      // 3
-        "    public function isIssue(): bool {\n",    // 4
-        "        return $this === self::Issue;\n",    // 5
-        "    }\n",                                    // 6
-        "    public function isTask(): bool {\n",     // 7
-        "        return $this === self::Task;\n",     // 8
-        "    }\n",                                    // 9
-        "}\n",                                        // 10
+        "<?php\n",                                 // 0
+        "enum TaskType: int {\n",                  // 1
+        "    case Task  = 1;\n",                   // 2
+        "    case Issue = 2;\n",                   // 3
+        "    public function isIssue(): bool {\n", // 4
+        "        return $this === self::Issue;\n", // 5
+        "    }\n",                                 // 6
+        "    public function isTask(): bool {\n",  // 7
+        "        return $this === self::Task;\n",  // 8
+        "    }\n",                                 // 9
+        "}\n",                                     // 10
     );
 
     open_file(&backend, &uri, text).await;
@@ -1887,14 +1893,14 @@ async fn rename_unit_enum_case() {
     let backend = Backend::new_test();
     let uri = Url::parse("file:///test.php").unwrap();
     let text = concat!(
-        "<?php\n",                              // 0
-        "enum Color {\n",                       // 1
-        "    case Red;\n",                      // 2
-        "    case Blue;\n",                     // 3
-        "}\n",                                  // 4
-        "function demo(): void {\n",            // 5
-        "    $c = Color::Red;\n",               // 6
-        "}\n",                                  // 7
+        "<?php\n",                   // 0
+        "enum Color {\n",            // 1
+        "    case Red;\n",           // 2
+        "    case Blue;\n",          // 3
+        "}\n",                       // 4
+        "function demo(): void {\n", // 5
+        "    $c = Color::Red;\n",    // 6
+        "}\n",                       // 7
     );
 
     open_file(&backend, &uri, text).await;

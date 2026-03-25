@@ -211,6 +211,28 @@ fn type_hint_to_classes_depth(
             .collect();
     }
 
+    // ── `self<…>` / `static<…>` / `$this<…>` with generic args ────
+    // When a docblock writes e.g. `@return self<RuleError>`, the hint
+    // is `self<RuleError>` which doesn't match the bare `self` check
+    // above.  Parse generic args first, and if the base is one of the
+    // self-like keywords, resolve to the owning class so that the
+    // generic substitution path below can apply the type arguments.
+    {
+        let (base, _) = parse_generic_args(hint);
+        if base == "self" || base == "static" || base == "$this" {
+            // Rewrite the hint replacing the self-like keyword with the
+            // owning class name so the normal resolution path handles it.
+            let rewritten = format!("{}{}", owning_class_name, &hint[base.len()..]);
+            return type_hint_to_classes_depth(
+                &rewritten,
+                owning_class_name,
+                all_classes,
+                class_loader,
+                depth,
+            );
+        }
+    }
+
     // `parent` refers to the parent class of the owning class.
     if hint == "parent" {
         let parent_name = all_classes

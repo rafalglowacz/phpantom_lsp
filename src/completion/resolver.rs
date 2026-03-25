@@ -1035,11 +1035,7 @@ fn walk_property_narrowing_in_statements<'b>(
                 if ctx.cursor_offset >= blk_span.start.offset
                     && ctx.cursor_offset <= blk_span.end.offset
                 {
-                    walk_property_narrowing_in_statements(
-                        block.statements.iter(),
-                        ctx,
-                        results,
-                    );
+                    walk_property_narrowing_in_statements(block.statements.iter(), ctx, results);
                 }
             }
             _ => {}
@@ -1135,24 +1131,12 @@ fn walk_property_narrowing_stmts<'b>(
                 walk_property_narrowing_stmt(dw.statement, ctx, results);
             }
             Statement::Try(try_stmt) => {
-                walk_property_narrowing_stmts(
-                    try_stmt.block.statements.iter(),
-                    ctx,
-                    results,
-                );
+                walk_property_narrowing_stmts(try_stmt.block.statements.iter(), ctx, results);
                 for catch in try_stmt.catch_clauses.iter() {
-                    walk_property_narrowing_stmts(
-                        catch.block.statements.iter(),
-                        ctx,
-                        results,
-                    );
+                    walk_property_narrowing_stmts(catch.block.statements.iter(), ctx, results);
                 }
                 if let Some(finally) = &try_stmt.finally_clause {
-                    walk_property_narrowing_stmts(
-                        finally.block.statements.iter(),
-                        ctx,
-                        results,
-                    );
+                    walk_property_narrowing_stmts(finally.block.statements.iter(), ctx, results);
                 }
             }
             Statement::Switch(switch) => {

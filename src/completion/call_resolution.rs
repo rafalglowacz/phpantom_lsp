@@ -772,7 +772,10 @@ impl Backend {
                 // Returning class_info preserves any generic substitutions
                 // already applied (e.g. Builder<User> stays Builder<User>).
                 let trimmed = ret.trim();
-                if trimmed == "static" || trimmed == "self" || trimmed == "$this" {
+                // Match bare `self`/`static`/`$this` as well as generic
+                // forms like `self<RuleError>`, `static<T>`, etc.
+                let base = trimmed.split('<').next().unwrap_or(trimmed);
+                if base == "static" || base == "self" || base == "$this" {
                     return vec![Arc::new(class_info.clone())];
                 }
                 return super::type_resolution::type_hint_to_classes(
