@@ -1935,3 +1935,431 @@ async fn rename_unit_enum_case() {
         result
     );
 }
+
+// ─── Parameter Rename (closure / function / method) ─────────────────────────
+
+#[tokio::test]
+async fn rename_closure_parameter_from_param() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Factory {\n",
+        "    public function build(): void {\n",
+        "        $this->afterMaking(function (Box $item): void {\n",
+        "            $item->item_id ??= $item->segment_id\n",
+        "                ? $item->segment->run->item_id\n",
+        "                : Item::randomOrFactoryCreate()->getKey();\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$item` in the closure parameter list (line 3, col 44).
+    let edit = rename(&backend, &uri, 3, 44, "$box").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit for closure parameter rename"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // The parameter and all usages in the closure body should be renamed.
+    assert!(
+        result.contains("function (Box $box)"),
+        "Parameter declaration not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$box->item_id"),
+        "Body usage not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$box->segment_id"),
+        "Body usage not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$box->segment->run"),
+        "Chained body usage not renamed: {}",
+        result
+    );
+    // Old name should be gone.
+    assert!(
+        !result.contains("$item"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_closure_parameter_from_body_usage() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Factory {\n",
+        "    public function build(): void {\n",
+        "        $this->afterMaking(function (Box $item): void {\n",
+        "            $item->name = 'test';\n",
+        "            echo $item->name;\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$item` in the closure body (line 4, col 13).
+    let edit = rename(&backend, &uri, 4, 13, "$box").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit when renaming from body usage"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // Both the parameter and body usages should be renamed.
+    assert!(
+        result.contains("function (Box $box)"),
+        "Parameter declaration not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$box->name = 'test'"),
+        "Assignment usage not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("echo $box->name"),
+        "Echo usage not renamed: {}",
+        result
+    );
+    assert!(
+        !result.contains("$item"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_function_parameter_from_param() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function greet(string $name): string {\n",
+        "    return 'Hello, ' . $name . '!';\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$name` in the parameter list (line 1, col 23).
+    let edit = rename(&backend, &uri, 1, 23, "$who").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit for function parameter rename"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    assert!(
+        result.contains("string $who)"),
+        "Parameter not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$who . '!'"),
+        "Body usage not renamed: {}",
+        result
+    );
+    assert!(
+        !result.contains("$name"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_method_parameter_from_param() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Greeter {\n",
+        "    public function greet(string $name): string {\n",
+        "        return 'Hello, ' . $name . '!';\n",
+        "    }\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$name` in the parameter list (line 2, col 35).
+    let edit = rename(&backend, &uri, 2, 35, "$who").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit for method parameter rename"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    assert!(
+        result.contains("string $who)"),
+        "Parameter not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$who . '!'"),
+        "Body usage not renamed: {}",
+        result
+    );
+    assert!(
+        !result.contains("$name"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_parameter_includes_docblock_param_tag() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Greeter {\n",
+        "    /**\n",
+        "     * @param string $name The person's name.\n",
+        "     */\n",
+        "    public function greet(string $name): string {\n",
+        "        return 'Hello, ' . $name . '!';\n",
+        "    }\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$name` in the parameter list (line 5, col 35).
+    let edit = rename(&backend, &uri, 5, 35, "$who").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit for parameter rename with docblock"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    assert!(
+        result.contains("@param string $who"),
+        "Docblock @param not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("string $who)"),
+        "Parameter not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$who . '!'"),
+        "Body usage not renamed: {}",
+        result
+    );
+    assert!(
+        !result.contains("$name"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_parameter_includes_docblock_from_body_usage() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "/**\n",
+        " * @param string $name The person's name.\n",
+        " */\n",
+        "function greet(string $name): string {\n",
+        "    return 'Hello, ' . $name . '!';\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$name` in the function body (line 5, col 24).
+    let edit = rename(&backend, &uri, 5, 24, "$who").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit for parameter rename from body"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    assert!(
+        result.contains("@param string $who"),
+        "Docblock @param not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("string $who)"),
+        "Parameter not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$who . '!'"),
+        "Body usage not renamed: {}",
+        result
+    );
+    assert!(
+        !result.contains("$name"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_parameter_multiple_docblock_params() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Math {\n",
+        "    /**\n",
+        "     * @param int $a First operand.\n",
+        "     * @param int $b Second operand.\n",
+        "     */\n",
+        "    public function add(int $a, int $b): int {\n",
+        "        return $a + $b;\n",
+        "    }\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Rename $a (line 6, col 29).
+    let edit = rename(&backend, &uri, 6, 29, "$x").await;
+    assert!(edit.is_some());
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // Only $a should be renamed, not $b.
+    assert!(
+        result.contains("@param int $x First"),
+        "Docblock @param for $a not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("@param int $b Second"),
+        "Docblock @param for $b was wrongly renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("int $x, int $b)"),
+        "Parameter $a not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("return $x + $b"),
+        "Body usage not renamed correctly: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_arrow_function_parameter() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo(): void {\n",
+        "    $fn = fn(int $x) => $x * 2;\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Cursor on `$x` in the arrow function parameter (line 2, col 18).
+    let edit = rename(&backend, &uri, 2, 18, "$n").await;
+    assert!(
+        edit.is_some(),
+        "Expected a workspace edit for arrow function parameter rename"
+    );
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    assert!(
+        result.contains("fn(int $n)"),
+        "Arrow function parameter not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("$n * 2"),
+        "Arrow function body not renamed: {}",
+        result
+    );
+    assert!(
+        !result.contains("$x"),
+        "Old variable name still present: {}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn rename_closure_parameter_does_not_leak_to_outer_scope() {
+    let backend = Backend::new_test();
+    let uri = Url::parse("file:///test.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function demo(): void {\n",
+        "    $item = 'outer';\n",
+        "    $fn = function (string $item): string {\n",
+        "        return $item . '!';\n",
+        "    };\n",
+        "    echo $item;\n",
+        "}\n",
+    );
+
+    open_file(&backend, &uri, text).await;
+
+    // Rename `$item` in the closure parameter (line 3, col 28).
+    let edit = rename(&backend, &uri, 3, 28, "$inner").await;
+    assert!(edit.is_some());
+
+    let file_edits = edits_for_uri(&edit.unwrap(), &uri);
+    let result = apply_edits(text, &file_edits);
+
+    // Closure parameter and body should be renamed.
+    assert!(
+        result.contains("function (string $inner)"),
+        "Closure parameter not renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("return $inner . '!'"),
+        "Closure body not renamed: {}",
+        result
+    );
+    // Outer scope $item should NOT be renamed.
+    assert!(
+        result.contains("$item = 'outer'"),
+        "Outer scope was wrongly renamed: {}",
+        result
+    );
+    assert!(
+        result.contains("echo $item"),
+        "Outer scope echo was wrongly renamed: {}",
+        result
+    );
+}

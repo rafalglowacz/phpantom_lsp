@@ -10,7 +10,8 @@ use mago_syntax::ast::sequence::TokenSeparatedSequence;
 use mago_syntax::ast::*;
 
 use super::docblock::{
-    class_ref_span, extract_docblock_symbols, get_docblock_text_with_offset, is_navigable_type,
+    class_ref_span, extract_docblock_symbols, extract_param_var_spans,
+    get_docblock_text_with_offset, is_navigable_type,
 };
 use super::{
     CallSite, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, VarDefKind, VarDefSite,
@@ -908,10 +909,11 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
     // Attributes (PHP 8) on the method.
     extract_from_attribute_lists(&method.attribute_lists, ctx, 0);
 
-    // Docblock on the method.
-    if let Some((doc_text, doc_offset)) =
-        get_docblock_text_with_offset(ctx.trivias, ctx.content, method)
-    {
+    // Docblock on the method.  We extract type spans and template params
+    // now, but defer `@param $var` variable spans until after we know
+    // `method_scope_start` (the body's opening-brace offset).
+    let method_docblock = get_docblock_text_with_offset(ctx.trivias, ctx.content, method);
+    if let Some((doc_text, doc_offset)) = method_docblock {
         let tpl_params = extract_docblock_symbols(doc_text, doc_offset, &mut ctx.spans);
         // Method-level template params: scope extends from the docblock to
         // the end of the method body (or the end of the docblock for
@@ -944,6 +946,29 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
     } else {
         0
     };
+
+    // Emit Variable spans and VarDefSite markers for `@param $varName`
+    // tokens in the docblock so that rename and find-references cover
+    // them.  The VarDefSite with `DocblockParam` kind lets
+    // `find_variable_scope` map the pre-body offset to the correct
+    // function body scope.
+    if let Some((doc_text, doc_offset)) = method_docblock {
+        for (name, file_offset) in extract_param_var_spans(doc_text, doc_offset) {
+            let end = file_offset + 1 + name.len() as u32;
+            ctx.spans.push(SymbolSpan {
+                start: file_offset,
+                end,
+                kind: SymbolKind::Variable { name: name.clone() },
+            });
+            ctx.var_defs.push(VarDefSite {
+                offset: file_offset,
+                name,
+                kind: VarDefKind::DocblockParam,
+                scope_start: method_scope_start,
+                effective_from: file_offset,
+            });
+        }
+    }
 
     // Parameter type hints, variable spans, and variable definition sites.
     for param in method.parameter_list.parameters.iter() {
@@ -1131,10 +1156,11 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
         },
     });
 
-    // Docblock.
-    if let Some((doc_text, doc_offset)) =
-        get_docblock_text_with_offset(ctx.trivias, ctx.content, func)
-    {
+    // Docblock.  We extract type spans and template params now, but
+    // defer `@param $var` variable spans until after we know
+    // `func_scope_start` (the body's opening-brace offset).
+    let func_docblock = get_docblock_text_with_offset(ctx.trivias, ctx.content, func);
+    if let Some((doc_text, doc_offset)) = func_docblock {
         let tpl_params = extract_docblock_symbols(doc_text, doc_offset, &mut ctx.spans);
         let scope_end = func.body.right_brace.end.offset;
         for (name, name_offset, bound, variance) in tpl_params {
@@ -1153,6 +1179,29 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
     let func_scope_start = func.body.left_brace.start.offset;
     let func_scope_end = func.body.right_brace.end.offset;
     ctx.scopes.push((func_scope_start, func_scope_end));
+
+    // Emit Variable spans and VarDefSite markers for `@param $varName`
+    // tokens in the docblock so that rename and find-references cover
+    // them.  The VarDefSite with `DocblockParam` kind lets
+    // `find_variable_scope` map the pre-body offset to the correct
+    // function body scope.
+    if let Some((doc_text, doc_offset)) = func_docblock {
+        for (name, file_offset) in extract_param_var_spans(doc_text, doc_offset) {
+            let end = file_offset + 1 + name.len() as u32;
+            ctx.spans.push(SymbolSpan {
+                start: file_offset,
+                end,
+                kind: SymbolKind::Variable { name: name.clone() },
+            });
+            ctx.var_defs.push(VarDefSite {
+                offset: file_offset,
+                name,
+                kind: VarDefKind::DocblockParam,
+                scope_start: func_scope_start,
+                effective_from: file_offset,
+            });
+        }
+    }
 
     // Parameter type hints, variable spans, and variable definition sites.
     for param in func.parameter_list.parameters.iter() {

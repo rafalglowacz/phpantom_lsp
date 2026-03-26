@@ -254,6 +254,11 @@ pub(crate) enum VarDefKind {
     ArrayDestructuring,
     ListDestructuring,
     ClosureCapture,
+    /// A `@param $varName` mention in a docblock.  Not a real variable
+    /// definition, but recorded so that `find_variable_scope` can map
+    /// the pre-body offset to the correct function body scope for
+    /// rename and find-references.
+    DocblockParam,
 }
 
 /// Per-file symbol location index.
@@ -349,6 +354,42 @@ impl SymbolMap {
             }
         }
         best
+    }
+
+    /// Determine the effective scope for a variable reference at `offset`.
+    ///
+    /// For most variable spans this is the same as
+    /// [`find_enclosing_scope`].  However, **parameters** and
+    /// **docblock `@param $var` mentions** sit physically before the
+    /// opening `{` of the function/method/closure body, so
+    /// `find_enclosing_scope` returns the *parent* scope for them.
+    ///
+    /// This method detects those cases and returns the correct body
+    /// scope instead:
+    ///
+    /// 1. If `offset` is on a `VarDefSite` with `VarDefKind::Parameter`,
+    ///    return that definition's `scope_start`.
+    /// 2. Otherwise, if `offset` is before a scope boundary and there is
+    ///    a parameter `VarDefSite` for `var_name` whose `scope_start` is
+    ///    the next scope after `offset`, return that scope.  This covers
+    ///    docblock `@param` variable tokens that precede the parameter
+    ///    list.
+    /// 3. Otherwise, fall back to `find_enclosing_scope`.
+    pub fn find_variable_scope(&self, var_name: &str, offset: u32) -> u32 {
+        // Case 1: cursor is directly on a parameter or docblock @param
+        // definition token.  Both sit physically before the body `{`,
+        // but their `VarDefSite.scope_start` points to the correct
+        // body scope.
+        if let Some(def) = self.var_defs.iter().find(|d| {
+            d.name == var_name
+                && (d.kind == VarDefKind::Parameter || d.kind == VarDefKind::DocblockParam)
+                && offset >= d.offset
+                && offset < d.offset + 1 + d.name.len() as u32
+        }) {
+            return def.scope_start;
+        }
+
+        self.find_enclosing_scope(offset)
     }
 
     /// Find the innermost narrowing block (if/elseif/else body, match

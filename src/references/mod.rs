@@ -243,8 +243,13 @@ impl Backend {
             None => return locations,
         };
 
-        // Determine the enclosing scope for the variable.
-        let scope_start = symbol_map.find_enclosing_scope(cursor_offset);
+        // Determine the effective scope for this variable.
+        //
+        // `find_variable_scope` handles the tricky cases where the
+        // cursor is on a parameter (physically before the `{`) or on
+        // a docblock `@param $var` mention, returning the body scope
+        // those tokens logically belong to.
+        let scope_start = symbol_map.find_variable_scope(var_name, cursor_offset);
 
         let parsed_uri = match Url::parse(uri) {
             Ok(u) => u,
@@ -257,7 +262,10 @@ impl Backend {
                     continue;
                 }
                 // Check that this variable is in the same scope.
-                let span_scope = symbol_map.find_enclosing_scope(span.start);
+                // `find_variable_scope` correctly handles parameter
+                // spans and docblock `@param` mentions that sit before
+                // the body `{`.
+                let span_scope = symbol_map.find_variable_scope(name, span.start);
                 if span_scope != scope_start {
                     continue;
                 }

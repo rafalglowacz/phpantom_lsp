@@ -114,7 +114,7 @@ impl Backend {
         var_name: &str,
         cursor_offset: u32,
     ) -> Vec<DocumentHighlight> {
-        let scope_start = symbol_map.find_enclosing_scope(cursor_offset);
+        let scope_start = symbol_map.find_variable_scope(var_name, cursor_offset);
         let mut highlights = Vec::new();
         let mut seen_offsets = std::collections::HashSet::new();
 
@@ -124,7 +124,7 @@ impl Backend {
                 if name != var_name {
                     continue;
                 }
-                let span_scope = symbol_map.find_enclosing_scope(span.start);
+                let span_scope = symbol_map.find_variable_scope(name, span.start);
                 if span_scope != scope_start {
                     continue;
                 }

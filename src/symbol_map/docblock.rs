@@ -327,6 +327,57 @@ pub(super) fn extract_docblock_symbols(
     template_params
 }
 
+/// Scan a docblock for `@param $varName` tokens and return
+/// `(name_without_dollar, file_byte_offset_of_dollar)` pairs.
+///
+/// These are used by the symbol-map extraction to emit
+/// [`SymbolKind::Variable`] spans so that rename and find-references
+/// cover parameter names mentioned in docblocks.
+pub(super) fn extract_param_var_spans(docblock: &str, base_offset: u32) -> Vec<(String, u32)> {
+    let mut results = Vec::new();
+    let mut line_start: usize = 0;
+
+    for line in docblock.split('\n') {
+        if let Some(at_pos) = line.find('@')
+            && is_tag_position(line, at_pos)
+        {
+            let after_at = &line[at_pos..];
+            let tag_end = after_at
+                .find(|c: char| c.is_whitespace())
+                .unwrap_or(after_at.len());
+            let tag = &after_at[..tag_end];
+            let tag_lower = tag.to_ascii_lowercase();
+
+            if tag_lower == "@param" || tag_lower == "@phpstan-param" || tag_lower == "@psalm-param"
+            {
+                // Format: `@param TypeHint $varName description`
+                // The $varName may appear right after the tag (when the
+                // type hint is omitted) or after a type token.  We scan
+                // the remainder for the first `$` token.
+                let after_tag = &after_at[tag_end..];
+                if let Some(dollar_in_after) = after_tag.find('$') {
+                    let dollar_pos_in_line = at_pos + tag_end + dollar_in_after;
+                    let rest = &line[dollar_pos_in_line..];
+                    // Extract the variable name: `$` followed by
+                    // identifier chars.
+                    let name_end = rest[1..]
+                        .find(|c: char| !c.is_alphanumeric() && c != '_')
+                        .map(|i| i + 1)
+                        .unwrap_or(rest.len());
+                    if name_end > 1 {
+                        let name = rest[1..name_end].to_string();
+                        let file_offset = base_offset + (line_start + dollar_pos_in_line) as u32;
+                        results.push((name, file_offset));
+                    }
+                }
+            }
+        }
+        line_start += line.len() + 1;
+    }
+
+    results
+}
+
 // ─── Type span emission ─────────────────────────────────────────────────────
 
 /// Check whether `@` at byte position `at_pos` in a docblock line is

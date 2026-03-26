@@ -690,6 +690,146 @@ is restructured for other reasons (e.g. P13 tiered storage).
 
 ---
 
+## P16. Pre-parsed stub format (eliminate raw PHP embedding)
+
+**Impact: High · Effort: Medium-High**
+
+The 630 phpstorm-stubs PHP files are embedded as raw source via
+`include_str!` (~9.8 MB in `.rodata`). This has three costs:
+
+1. **Permanent RSS.** The 9.8 MB is memory-mapped into every
+   process regardless of how many stubs are actually accessed.
+   That is ~17% of the current 59 MB baseline and will become a
+   larger relative share as vendor indexing grows the working set.
+
+2. **Parse cost on first access.** Each stub is parsed with the
+   full mago parser on first use (`parse_and_cache_content_versioned`).
+   Large files like `intl.php` (296 KB) take several milliseconds.
+   A Symfony project can trigger hundreds of stub parses as vendor
+   classes extend built-in types.
+
+3. **Duplicate data.** After parsing, the `Arc<ClassInfo>` lives in
+   `ast_map` and `fqn_index`, but the raw PHP source stays resident
+   in `.rodata` forever. Both copies exist simultaneously.
+
+### Indexing order: stubs → vendor → user
+
+Background indexing will load data in dependency order:
+
+1. **Stubs** (built-in PHP classes, functions, constants)
+2. **Vendor** (Composer dependencies)
+3. **User** (project source)
+
+This ordering means every layer's parent types are already
+resolved before it starts. Vendor classes that extend `ArrayAccess`,
+`Iterator`, `JsonSerializable`, etc. find pre-populated
+`fqn_index` entries instead of triggering on-demand stub parses.
+User classes that extend vendor classes find those already indexed
+too.
+
+With the current raw-PHP stubs, the stubs phase itself involves
+parsing ~530 PHP files through the full mago pipeline. In a
+pre-parsed format, this phase becomes a single deserialization
+step (~5-10 ms), making the stubs layer essentially free and
+letting vendor indexing start immediately.
+
+### Cascade cost during first-file-open
+
+When the user opens a file before background indexing completes,
+the completion/hover path walks type chains synchronously. A
+typical Laravel file triggers a cascade like:
+
+- Model → `find_or_load_class` → classmap → parse vendor PHP
+- Model implements `ArrayAccess`, `JsonSerializable`, `Countable`,
+  uses `Traversable`, `Iterator`, `Stringable`, etc.
+- Each of these hits Phase 3 (stub lookup) → full mago parse of
+  the stub file containing it
+- Stub files contain multiple classes, so parsing `SPL/SPL.php`
+  for `ArrayAccess` also parses `Iterator`, `Countable`,
+  `SeekableIterator`, etc.
+
+A realistic first-open cascade triggers 20-40 stub file parses,
+costing 40-200 ms of CPU time on the critical path. With
+pre-parsed stubs, each stub lookup becomes a `HashMap::get`
+returning an `Arc<ClassInfo>` in nanoseconds, eliminating this
+cost entirely.
+
+### Solution
+
+Parse all stubs at build time in `build.rs` (mago becomes a build
+dependency) and serialize the extracted `ClassInfo`, `FunctionInfo`,
+and constant data into a compact binary blob using postcard (or
+bincode). Embed the blob via `include_bytes!`. At startup,
+deserialize the blob and populate `fqn_index` directly.
+
+**Version filtering.** Add `since: Option<PhpVersion>` and
+`until: Option<PhpVersion>` fields to `MethodInfo`, `ParameterInfo`,
+`FunctionInfo`, `ClassInfo`, and `ConstantInfo`. Embed one
+"maximal" blob containing all version variants. After
+deserialization, filter elements whose version range excludes the
+target PHP version. This replaces both the current byte-level
+`@removed` scanning at startup and the `is_available_for_version`
+AST filtering at parse time.
+
+**Serde on the type hierarchy.** Add `#[derive(Serialize, Deserialize)]`
+to the core structs (`ClassInfo`, `MethodInfo`, `PropertyInfo`,
+`ConstantInfo`, `FunctionInfo`, `ParameterInfo`, and their
+supporting enums). `SharedVec<T>` needs a custom serde impl that
+serializes as `Vec<T>` and deserializes into `SharedVec::from(vec)`.
+
+**What gets removed:**
+
+- The `STUB_FILES` array (raw PHP source embedding)
+- The `phpantom-stub://` URI scheme and associated `ast_map` entries
+- The `parse_and_cache_content_versioned` path for stubs
+- The `is_stub_function_removed` / `is_stub_class_removed` byte
+  scanners (replaced by version fields on deserialized structs)
+- The `set_php_version` retain-based eviction (replaced by
+  post-deserialize filtering)
+
+**Go-to-definition.** Stubs are in-memory-only; the IDE cannot
+navigate to them anyway. No raw source needs to be preserved.
+
+**Hover.** The extracted fields (`class_docblock`, `deprecation_message`,
+`links`, `see_refs`, parameter type hints and names) are all
+carried in the serialized structs. Hover quality is preserved.
+
+### Estimated impact
+
+- **Binary:** −9.8 MB raw PHP, +2-3 MB serialized blob = net −7 MB
+- **RSS:** 9.8 MB `.rodata` no longer mapped; stubs loaded as
+  heap-allocated structs filtered to the target PHP version
+- **First-file-open:** 40-200 ms of stub parse time on the
+  critical path eliminated; stub lookups drop to nanoseconds
+- **Background indexing:** stubs phase drops from seconds (parsing
+  530 PHP files) to <10 ms (deserializing one blob), letting
+  vendor indexing start immediately
+- **Vendor indexing cascade:** every vendor class that extends a
+  built-in type no longer triggers a stub parse; the parent
+  `ClassInfo` is already in `fqn_index`
+- **Build time:** clean builds gain 10-30 s for the mago parse
+  step; incremental builds unaffected (`write_if_changed` caching)
+
+### Prerequisites
+
+- `serde` derive on the core type hierarchy (already in `Cargo.toml`)
+- `build.rs` already downloads stubs and generates code; extending
+  it to parse PHP is incremental
+- Interacts with P15 (stub index `RwLock` elimination): if stubs
+  are deserialized eagerly, the two-phase construction in P15
+  becomes the natural approach
+
+### When to implement
+
+High priority. This is a prerequisite for efficient stubs → vendor
+→ user indexing. The 9.8 MB static cost is already meaningful and
+will become the dominant fixed overhead once vendor indexing is
+deferred. Implementing this before full vendor indexing lands
+avoids hitting the memory ceiling and ensures the stubs layer is
+essentially free for both eager and deferred indexing paths.
+
+---
+
 ## Appendix: Profiling
 
 ### Commands

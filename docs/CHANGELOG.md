@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Rename and find references for parameters.** Renaming a parameter in a function, method, or closure now correctly updates all usages in the body and the `@param` tag in the docblock. Previously, parameters were scoped incorrectly because they sit physically before the opening `{` of the body, causing rename and find references to miss body usages when triggered from the parameter (and vice versa). Document highlight is also fixed.
 - **Constant type inference.** Variables assigned from global constants (`$a = MY_CONST`) or class constants without type hints (`$b = Config::TIMEOUT`) now resolve to the type implied by the constant's initializer value. Integer, float, string, bool, null, and array literals are all recognised. Typed class constants (`public const string NAME = '...'`) continue to use their declared type hint.
 - **False positive on namespaced constants.** Standalone namespaced constant references (e.g. `\PHPStan\PHP_VERSION_ID`) no longer produce a spurious "Class not found" diagnostic. Previously the symbol map classified them as class references instead of constant references.
 - **Removed PHP symbols in stubs.** Functions, methods, and classes annotated with `@removed X.Y` in phpstorm-stubs are now filtered out when the target PHP version is at or above the removal version. Previously symbols like `mysql_tablename` (removed in PHP 7.0) and `each` (removed in PHP 8.0) appeared in completions and resolved without warnings.
