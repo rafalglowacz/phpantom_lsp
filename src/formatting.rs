@@ -95,7 +95,7 @@ pub(crate) enum FormattingStrategy {
 pub(crate) fn resolve_strategy(
     workspace_root: Option<&Path>,
     config: &FormattingConfig,
-    composer_json: Option<&serde_json::Value>,
+    composer_json: Option<&crate::composer::ComposerPackage>,
     bin_dir: Option<&str>,
 ) -> FormattingStrategy {
     if config.is_disabled() {
@@ -131,7 +131,7 @@ pub(crate) fn resolve_strategy(
     }
 
     // No explicit config — check composer.json require-dev.
-    if let Some(json) = composer_json {
+    if let Some(package) = composer_json {
         let mut tools = Vec::new();
         let bin = bin_dir.unwrap_or("vendor/bin");
 
@@ -141,14 +141,14 @@ pub(crate) fn resolve_strategy(
         let phpcbf_disabled = config.phpcbf.as_deref() == Some("");
 
         if !fixer_disabled
-            && crate::composer::has_require_dev(json, "friendsofphp/php-cs-fixer")
+            && crate::composer::has_require_dev(package, "friendsofphp/php-cs-fixer")
             && let Some(tool) = resolve_from_bin_dir("php-cs-fixer", workspace_root, bin)
         {
             tools.push(tool);
         }
 
         if !phpcbf_disabled
-            && crate::composer::has_require_dev(json, "squizlabs/php_codesniffer")
+            && crate::composer::has_require_dev(package, "squizlabs/php_codesniffer")
             && let Some(tool) = resolve_from_bin_dir("phpcbf", workspace_root, bin)
         {
             tools.push(tool);
@@ -624,11 +624,13 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "friendsofphp/php-cs-fixer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "friendsofphp/php-cs-fixer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(Some(dir.path()), &config, Some(&composer), None);
@@ -656,11 +658,13 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "squizlabs/php_codesniffer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "squizlabs/php_codesniffer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(Some(dir.path()), &config, Some(&composer), None);
@@ -690,12 +694,14 @@ mod tests {
             }
         }
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "friendsofphp/php-cs-fixer": "^3.0",
-                "squizlabs/php_codesniffer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "friendsofphp/php-cs-fixer": "^3.0",
+                    "squizlabs/php_codesniffer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(Some(dir.path()), &config, Some(&composer), None);
@@ -716,11 +722,13 @@ mod tests {
         let vendor_bin = dir.path().join("vendor/bin");
         std::fs::create_dir_all(&vendor_bin).unwrap();
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "friendsofphp/php-cs-fixer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "friendsofphp/php-cs-fixer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(Some(dir.path()), &config, Some(&composer), None);
@@ -745,11 +753,13 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "friendsofphp/php-cs-fixer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "friendsofphp/php-cs-fixer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         // User explicitly set a different path.
         let config = FormattingConfig {
@@ -781,11 +791,13 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "friendsofphp/php-cs-fixer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "friendsofphp/php-cs-fixer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(Some(dir.path()), &config, Some(&composer), Some("bin"));
@@ -816,11 +828,13 @@ mod tests {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        let composer: serde_json::Value = serde_json::json!({
-            "require-dev": {
-                "friendsofphp/php-cs-fixer": "^3.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require-dev": {
+                    "friendsofphp/php-cs-fixer": "^3.0"
+                }
+            }))
+            .unwrap();
 
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(
@@ -840,11 +854,13 @@ mod tests {
     #[test]
     fn strategy_no_require_dev_no_config_is_builtin() {
         // composer.json exists but has no require-dev.
-        let composer: serde_json::Value = serde_json::json!({
-            "require": {
-                "php": "^8.0"
-            }
-        });
+        let composer: crate::composer::ComposerPackage =
+            serde_json::from_value(serde_json::json!({
+                "require": {
+                    "php": "^8.0"
+                }
+            }))
+            .unwrap();
         let config = FormattingConfig::default();
         let strategy = resolve_strategy(None, &config, Some(&composer), None);
         assert!(matches!(strategy, FormattingStrategy::BuiltIn));

@@ -15,7 +15,6 @@ long-term maintenance burden.
 
 | Crate              | Replaces                                               | Effort      |
 | ------------------ | ------------------------------------------------------ | ----------- |
-| `mago-composer`    | `src/composer.rs` (652 lines)                          | Low         |
 | `mago-docblock`    | `src/docblock/tags.rs` + tag extraction logic           | Medium      |
 | `mago-type-syntax` | `src/docblock/{type_strings,generics,shapes,callable_types,conditional}.rs` + string-based type pipeline | Very High |
 | `mago-names`       | `src/parser/use_statements.rs` + `use_map` resolution   | Medium-High |
@@ -74,7 +73,6 @@ Add to `docs/todo.md` after Sprint 4:
 | #   | Item                                                        | Impact | Effort      |
 | --- | ----------------------------------------------------------- | ------ | ----------- |
 |     | Clear [refactoring gate](todo/refactor.md)                  | —      | —           |
-| M1  | [Migrate to mago-composer](todo/mago.md#m1-mago-composer)   | Low    | Low         |
 | M2  | [Migrate to mago-docblock](todo/mago.md#m2-mago-docblock)   | High   | Medium      |
 | M3  | [Migrate to mago-names](todo/mago.md#m3-mago-names)         | High   | Medium-High |
 
@@ -85,53 +83,6 @@ Add to `docs/todo.md` after Sprint 4:
 |     | Clear [refactoring gate](todo/refactor.md)                        | —        | —         |
 | M4  | [Migrate to mago-type-syntax](todo/mago.md#m4-mago-type-syntax)  | Critical | Very High |
 ```
-
----
-
-## M1. Migrate to `mago-composer`
-
-**What it replaces:** `src/composer.rs` (652 lines) — hand-rolled
-`composer.json` parsing using raw `serde_json::Value` access.
-
-**Why:** `mago-composer` provides typed Rust structs for the full
-`composer.json` schema. Eliminates manual JSON field access, gives us
-correct handling of edge cases (multiple PSR-4 paths per namespace,
-`config.vendor-dir`, platform requirements), and is maintained
-upstream.
-
-**Risk:** Minimal. Isolated subsystem, parsed once at startup, no
-interaction with the type system or Laravel extension.
-
-### Steps
-
-1. **Add `mago-composer` to `Cargo.toml`.**
-   Pin to the same version family as the other mago crates (currently
-   1.14; upgrade all together if needed).
-
-2. **Write an adapter module `src/composer_mago.rs`.**
-   This module calls `mago-composer`'s parse function and maps its
-   output to our existing `Psr4Mapping` struct and vendor-dir string.
-   The rest of the codebase sees no change.
-
-3. **Replace call sites.**
-   `parse_composer_json()` in `src/composer.rs` is called from
-   `server.rs` (workspace init) and `ast_update.rs` (PSR-4
-   resolution). Point both to the new adapter.
-
-4. **Delete `src/composer.rs`.**
-
-5. **Run existing tests.** The fixture runner and any tests that
-   exercise PSR-4 resolution or classmap loading verify correctness.
-
-6. **Verify `autoload_files.php` parsing still works.** This is
-   currently in `composer.rs` too — either keep that function
-   standalone (it's a simple regex over a generated PHP file, not
-   JSON parsing) or move it to a small utility module.
-
-7. **Verify `php_version` extraction still works.** `composer.rs`
-   currently parses `require.php` constraints into our `PhpVersion`
-   struct. Either keep that logic in a small utility or extend the
-   adapter to do the mapping.
 
 ---
 

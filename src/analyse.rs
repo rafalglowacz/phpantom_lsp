@@ -113,15 +113,24 @@ pub async fn run(options: AnalyseOptions) -> i32 {
     *backend.workspace_root().write() = Some(root.to_path_buf());
     *backend.config.lock() = cfg.clone();
 
+    let composer_package = composer::read_composer_package(root);
+
     let php_version = cfg
         .php
         .version
         .as_deref()
         .and_then(crate::types::PhpVersion::from_composer_constraint)
-        .unwrap_or_else(|| composer::detect_php_version(root).unwrap_or_default());
+        .unwrap_or_else(|| {
+            composer_package
+                .as_ref()
+                .and_then(composer::detect_php_version_from_package)
+                .unwrap_or_default()
+        });
     backend.set_php_version(php_version);
 
-    backend.init_single_project(root, php_version, None).await;
+    backend
+        .init_single_project(root, php_version, composer_package, None)
+        .await;
 
     // ── 3. Locate user files (via PSR-4) and crop to path ───────────
     let files = discover_user_files(&backend, root, options.path_filter.as_deref());

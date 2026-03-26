@@ -17,10 +17,15 @@
 //!   4. Prepending the mapped base directory
 //!
 //! Result: `<workspace>/src/Klarna/Customer.php`
+//!
+//! Composer JSON parsing is delegated to the [`mago_composer`] crate,
+//! which provides typed Rust structs for the full `composer.json` schema.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+pub use mago_composer::ComposerPackage;
 
 use crate::types::PhpVersion;
 
@@ -55,64 +60,120 @@ pub struct Psr4Mapping {
 /// Returns an empty `Vec` and `"vendor"` if the file doesn't exist, can't
 /// be read, or contains no PSR-4 mappings.
 pub fn parse_composer_json(workspace_root: &Path) -> (Vec<Psr4Mapping>, String) {
+    let package = match read_composer_package(workspace_root) {
+        Some(p) => p,
+        None => return (Vec::new(), "vendor".to_string()),
+    };
+
+    let vendor_dir = get_vendor_dir(&package);
+    let mappings = extract_psr4_mappings_from_package(&package);
+
+    (mappings, vendor_dir)
+}
+
+/// Read and parse the `composer.json` at the given workspace root into a
+/// typed [`ComposerPackage`].
+///
+/// Returns `None` if the file does not exist, cannot be read, or fails
+/// to parse.
+pub fn read_composer_package(workspace_root: &Path) -> Option<ComposerPackage> {
     let composer_path = workspace_root.join("composer.json");
-    let content = match fs::read_to_string(&composer_path) {
-        Ok(c) => c,
-        Err(_) => return (Vec::new(), "vendor".to_string()),
-    };
+    let content = fs::read_to_string(&composer_path).ok()?;
+    content.parse::<ComposerPackage>().ok()
+}
 
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return (Vec::new(), "vendor".to_string()),
-    };
-
-    let vendor_dir = get_vendor_dir(&json);
-
+/// Extract all PSR-4 autoload mappings from both `autoload` and
+/// `autoload-dev` sections of a parsed [`ComposerPackage`].
+///
+/// Returns the mappings sorted by prefix length descending so that
+/// longest-prefix-first matching works correctly.
+pub fn extract_psr4_mappings_from_package(package: &ComposerPackage) -> Vec<Psr4Mapping> {
     let mut mappings = Vec::new();
 
-    // Extract from both "autoload" and "autoload-dev" sections
-    for section_key in &["autoload", "autoload-dev"] {
-        if let Some(section) = json.get(section_key)
-            && let Some(psr4) = section.get("psr-4")
-            && let Some(psr4_obj) = psr4.as_object()
-        {
-            for (prefix, paths) in psr4_obj {
-                extract_psr4_entries(prefix, paths, &mut mappings);
-            }
+    // Extract from "autoload" section
+    if let Some(autoload) = &package.autoload {
+        for (prefix, paths) in &autoload.psr_4 {
+            collect_psr4_entries(prefix, paths, &mut mappings);
+        }
+    }
+
+    // Extract from "autoload-dev" section
+    if let Some(autoload_dev) = &package.autoload_dev {
+        for (prefix, paths) in &autoload_dev.psr_4 {
+            collect_psr4_entries(prefix, paths, &mut mappings);
         }
     }
 
     // Sort by prefix length descending so longest-prefix-first matching works
     mappings.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
 
-    (mappings, vendor_dir)
+    mappings
 }
 
-/// Read the configured vendor directory from a parsed `composer.json` value.
+/// Directories that `build_self_scan_composer` needs from a parsed
+/// `composer.json`.  Returned by [`extract_scan_dirs`].
+pub struct ScanDirs {
+    /// `(normalised_prefix, directory_path_string)` pairs from both
+    /// `autoload.psr-4` and `autoload-dev.psr-4`.
+    pub psr4: Vec<(String, String)>,
+    /// Directory/file paths from both `autoload.classmap` and
+    /// `autoload-dev.classmap`.
+    pub classmap: Vec<String>,
+}
+
+/// Extract the PSR-4 and classmap directory lists from a
+/// [`ComposerPackage`] for workspace scanning.
+///
+/// This keeps mago types private to this module — callers receive
+/// plain strings and don't need to depend on `mago_composer`.
+pub fn extract_scan_dirs(package: &ComposerPackage) -> ScanDirs {
+    let mut psr4 = Vec::new();
+    let mut classmap = Vec::new();
+
+    if let Some(autoload) = &package.autoload {
+        for (prefix, paths) in &autoload.psr_4 {
+            let normalised = normalise_prefix(prefix);
+            paths.for_each_path(|dir| {
+                psr4.push((normalised.clone(), dir.to_owned()));
+            });
+        }
+        classmap.extend(autoload.classmap.iter().cloned());
+    }
+
+    if let Some(autoload_dev) = &package.autoload_dev {
+        for (prefix, paths) in &autoload_dev.psr_4 {
+            let normalised = normalise_prefix(prefix);
+            paths.for_each_path(|dir| {
+                psr4.push((normalised.clone(), dir.to_owned()));
+            });
+        }
+        classmap.extend(autoload_dev.classmap.iter().cloned());
+    }
+
+    ScanDirs { psr4, classmap }
+}
+
+/// Read the configured vendor directory from a parsed [`ComposerPackage`].
 ///
 /// Looks at `config.vendor-dir`; defaults to `"vendor"` when absent.
-pub(crate) fn get_vendor_dir(composer_json: &serde_json::Value) -> String {
-    composer_json
-        .get("config")
-        .and_then(|c| c.get("vendor-dir"))
-        .and_then(|v| v.as_str())
+pub(crate) fn get_vendor_dir(package: &ComposerPackage) -> String {
+    package
+        .config
+        .as_ref()
+        .and_then(|c| c.vendor_dir.as_deref())
         .map(|s| s.trim_end_matches('/').to_string())
         .unwrap_or_else(|| "vendor".to_string())
 }
 
-/// Read the configured bin directory from a parsed `composer.json` value.
+/// Read the configured bin directory from a parsed [`ComposerPackage`].
 ///
 /// Looks at `config.bin-dir`; defaults to `"<vendor-dir>/bin"` when absent,
 /// where `<vendor-dir>` is itself resolved via [`get_vendor_dir`].
-pub(crate) fn get_bin_dir(composer_json: &serde_json::Value) -> String {
-    if let Some(explicit) = composer_json
-        .get("config")
-        .and_then(|c| c.get("bin-dir"))
-        .and_then(|v| v.as_str())
-    {
+pub(crate) fn get_bin_dir(package: &ComposerPackage) -> String {
+    if let Some(explicit) = package.config.as_ref().and_then(|c| c.bin_dir.as_deref()) {
         explicit.trim_end_matches('/').to_string()
     } else {
-        format!("{}/bin", get_vendor_dir(composer_json))
+        format!("{}/bin", get_vendor_dir(package))
     }
 }
 
@@ -255,40 +316,58 @@ pub fn parse_autoload_files(workspace_root: &Path, vendor_dir: &str) -> Vec<Path
     files
 }
 
-/// Extract PSR-4 entries from a single prefix → path(s) pair.
-///
-/// The value can be either a string (`"src/"`) or an array of strings
-/// (`["src/", "lib/"]`).
-fn extract_psr4_entries(prefix: &str, paths: &serde_json::Value, mappings: &mut Vec<Psr4Mapping>) {
-    // Normalise the prefix: ensure it ends with `\`
-    let normalised_prefix = if prefix.ends_with('\\') {
+// ── PSR-4 path abstraction ─────────────────────────────────────────
+//
+// `mago-composer` emits two structurally identical but nominally
+// distinct enums for `autoload.psr-4` and `autoload-dev.psr-4`.
+// The trait + macro below erase the difference so a single generic
+// function handles both.
+
+/// Uniform access to the path strings inside a PSR-4 value, regardless
+/// of whether it came from `autoload` or `autoload-dev`.
+trait Psr4Paths {
+    /// Call `f` for each directory path in this value.
+    fn for_each_path(&self, f: impl FnMut(&str));
+}
+
+macro_rules! impl_psr4_paths {
+    ($ty:ty) => {
+        impl Psr4Paths for $ty {
+            fn for_each_path(&self, mut f: impl FnMut(&str)) {
+                match self {
+                    Self::String(s) => f(s),
+                    Self::Array(arr) => arr.iter().for_each(|s| f(s)),
+                }
+            }
+        }
+    };
+}
+
+impl_psr4_paths!(mago_composer::AutoloadPsr4value);
+impl_psr4_paths!(mago_composer::ComposerPackageAutoloadDevPsr4value);
+
+/// Normalise a PSR-4 namespace prefix: ensure it ends with `\` unless
+/// it is the empty root-namespace prefix.
+fn normalise_prefix(prefix: &str) -> String {
+    if prefix.ends_with('\\') {
         prefix.to_string()
     } else if prefix.is_empty() {
         // Empty prefix means "fallback" / root namespace
         String::new()
     } else {
         format!("{}\\", prefix)
-    };
-
-    match paths {
-        serde_json::Value::String(path) => {
-            mappings.push(Psr4Mapping {
-                prefix: normalised_prefix.clone(),
-                base_path: normalise_path(path),
-            });
-        }
-        serde_json::Value::Array(arr) => {
-            for entry in arr {
-                if let Some(path) = entry.as_str() {
-                    mappings.push(Psr4Mapping {
-                        prefix: normalised_prefix.clone(),
-                        base_path: normalise_path(path),
-                    });
-                }
-            }
-        }
-        _ => {}
     }
+}
+
+/// Collect PSR-4 entries from any value that implements [`Psr4Paths`].
+fn collect_psr4_entries<P: Psr4Paths>(prefix: &str, paths: &P, mappings: &mut Vec<Psr4Mapping>) {
+    let normalised_prefix = normalise_prefix(prefix);
+    paths.for_each_path(|path| {
+        mappings.push(Psr4Mapping {
+            prefix: normalised_prefix.clone(),
+            base_path: normalise_path(path),
+        });
+    });
 }
 
 /// Normalise a directory path: ensure it uses forward slashes and ends with `/`.
@@ -695,16 +774,9 @@ pub fn discover_subproject_roots(workspace_root: &Path) -> Vec<(PathBuf, String)
         }
 
         // Read the vendor dir name from this subproject's composer.json
-        let composer_path = candidate.join("composer.json");
-        let vendor_dir = if let Ok(content) = fs::read_to_string(&composer_path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                get_vendor_dir(&json)
-            } else {
-                "vendor".to_string()
-            }
-        } else {
-            "vendor".to_string()
-        };
+        let vendor_dir = read_composer_package(candidate)
+            .map(|pkg| get_vendor_dir(&pkg))
+            .unwrap_or_else(|| "vendor".to_string());
 
         root_set.insert(candidate.clone());
         roots.push((candidate.clone(), vendor_dir));
@@ -725,26 +797,32 @@ pub fn discover_subproject_roots(workspace_root: &Path) -> Vec<(PathBuf, String)
 /// not contain a PHP version constraint.  The caller should fall back to
 /// [`PhpVersion::default`] in that case.
 pub fn detect_php_version(workspace_root: &Path) -> Option<PhpVersion> {
-    let composer_path = workspace_root.join("composer.json");
-    let content = fs::read_to_string(composer_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let package = read_composer_package(workspace_root)?;
+    detect_php_version_from_package(&package)
+}
 
+/// Extract the target PHP version from a parsed [`ComposerPackage`].
+///
+/// Checks two locations in order:
+///   1. `config.platform.php` — an explicit platform override
+///      (e.g. `"8.3.1"` → 8.3).
+///   2. `require.php` — the version constraint from the dependency
+///      list (e.g. `"^8.4"` → 8.4).
+///
+/// Returns `None` when the package does not contain a PHP version
+/// constraint.  The caller should fall back to [`PhpVersion::default`]
+/// in that case.
+pub fn detect_php_version_from_package(package: &ComposerPackage) -> Option<PhpVersion> {
     // 1. config.platform.php — exact version string like "8.3.1"
-    if let Some(platform_php) = json
-        .get("config")
-        .and_then(|c| c.get("platform"))
-        .and_then(|p| p.get("php"))
-        .and_then(|v| v.as_str())
-        && let Some(ver) = PhpVersion::from_composer_constraint(platform_php)
+    if let Some(platform_val) = package.config.as_ref().and_then(|c| c.platform.get("php"))
+        && let mago_composer::ComposerPackageConfigPlatformValue::String(s) = platform_val
+        && let Some(ver) = PhpVersion::from_composer_constraint(s)
     {
         return Some(ver);
     }
 
     // 2. require.php — constraint string like "^8.4", ">=8.0"
-    if let Some(require_php) = json
-        .get("require")
-        .and_then(|r| r.get("php"))
-        .and_then(|v| v.as_str())
+    if let Some(require_php) = package.require.get("php")
         && let Some(ver) = PhpVersion::from_composer_constraint(require_php)
     {
         return Some(ver);
@@ -757,73 +835,66 @@ pub fn detect_php_version(workspace_root: &Path) -> Option<PhpVersion> {
 ///
 /// Matches the package name exactly (e.g.
 /// `"friendsofphp/php-cs-fixer"`, `"squizlabs/php_codesniffer"`).
-pub(crate) fn has_require_dev(composer_json: &serde_json::Value, package: &str) -> bool {
-    composer_json
-        .get("require-dev")
-        .and_then(|rd| rd.as_object())
-        .is_some_and(|rd| rd.contains_key(package))
+pub(crate) fn has_require_dev(package: &ComposerPackage, dep: &str) -> bool {
+    package.require_dev.contains_key(dep)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Helper: parse a JSON string into a [`ComposerPackage`].
+    fn pkg(json: &str) -> ComposerPackage {
+        json.parse::<ComposerPackage>().unwrap()
+    }
+
     // ── get_vendor_dir ──────────────────────────────────────────────
 
     #[test]
     fn vendor_dir_default() {
-        let json: serde_json::Value = serde_json::from_str("{}").unwrap();
-        assert_eq!(get_vendor_dir(&json), "vendor");
+        assert_eq!(get_vendor_dir(&pkg("{}")), "vendor");
     }
 
     #[test]
     fn vendor_dir_explicit() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"config": {"vendor-dir": "lib"}}"#).unwrap();
-        assert_eq!(get_vendor_dir(&json), "lib");
+        let p = pkg(r#"{"config": {"vendor-dir": "lib"}}"#);
+        assert_eq!(get_vendor_dir(&p), "lib");
     }
 
     #[test]
     fn vendor_dir_strips_trailing_slash() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"config": {"vendor-dir": "lib/"}}"#).unwrap();
-        assert_eq!(get_vendor_dir(&json), "lib");
+        let p = pkg(r#"{"config": {"vendor-dir": "lib/"}}"#);
+        assert_eq!(get_vendor_dir(&p), "lib");
     }
 
     // ── get_bin_dir ─────────────────────────────────────────────────
 
     #[test]
     fn bin_dir_default_follows_vendor_dir() {
-        let json: serde_json::Value = serde_json::from_str("{}").unwrap();
-        assert_eq!(get_bin_dir(&json), "vendor/bin");
+        assert_eq!(get_bin_dir(&pkg("{}")), "vendor/bin");
     }
 
     #[test]
     fn bin_dir_default_with_custom_vendor_dir() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"config": {"vendor-dir": "lib"}}"#).unwrap();
-        assert_eq!(get_bin_dir(&json), "lib/bin");
+        let p = pkg(r#"{"config": {"vendor-dir": "lib"}}"#);
+        assert_eq!(get_bin_dir(&p), "lib/bin");
     }
 
     #[test]
     fn bin_dir_explicit() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"config": {"bin-dir": "bin"}}"#).unwrap();
-        assert_eq!(get_bin_dir(&json), "bin");
+        let p = pkg(r#"{"config": {"bin-dir": "bin"}}"#);
+        assert_eq!(get_bin_dir(&p), "bin");
     }
 
     #[test]
     fn bin_dir_explicit_overrides_vendor_dir() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"config": {"vendor-dir": "lib", "bin-dir": "tools/bin"}}"#)
-                .unwrap();
-        assert_eq!(get_bin_dir(&json), "tools/bin");
+        let p = pkg(r#"{"config": {"vendor-dir": "lib", "bin-dir": "tools/bin"}}"#);
+        assert_eq!(get_bin_dir(&p), "tools/bin");
     }
 
     #[test]
     fn bin_dir_strips_trailing_slash() {
-        let json: serde_json::Value =
-            serde_json::from_str(r#"{"config": {"bin-dir": "bin/"}}"#).unwrap();
-        assert_eq!(get_bin_dir(&json), "bin");
+        let p = pkg(r#"{"config": {"bin-dir": "bin/"}}"#);
+        assert_eq!(get_bin_dir(&p), "bin");
     }
 }

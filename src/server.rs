@@ -225,6 +225,11 @@ impl LanguageServer for Backend {
                 }
             }
 
+            // Parse composer.json once up front.  The result is used for
+            // PHP version detection and passed into init_single_project
+            // so the file is never re-read during startup.
+            let composer_package = composer::read_composer_package(&root);
+
             // Detect the target PHP version.  The config file override
             // takes precedence; otherwise fall back to composer.json.
             let php_version = self
@@ -233,10 +238,15 @@ impl LanguageServer for Backend {
                 .version
                 .as_deref()
                 .and_then(crate::types::PhpVersion::from_composer_constraint)
-                .unwrap_or_else(|| composer::detect_php_version(&root).unwrap_or_default());
+                .unwrap_or_else(|| {
+                    composer_package
+                        .as_ref()
+                        .and_then(composer::detect_php_version_from_package)
+                        .unwrap_or_default()
+                });
             self.set_php_version(php_version);
 
-            let has_composer_json = root.join("composer.json").is_file();
+            let has_composer_json = composer_package.is_some();
 
             // ── Create a progress token for indexing feedback ────────
             let progress_token = self.progress_create("phpantom/indexing").await;
@@ -247,8 +257,13 @@ impl LanguageServer for Backend {
 
             if has_composer_json {
                 // ── Single-project path (root composer.json exists) ──────
-                self.init_single_project(&root, php_version, progress_token.as_ref())
-                    .await;
+                self.init_single_project(
+                    &root,
+                    php_version,
+                    composer_package,
+                    progress_token.as_ref(),
+                )
+                .await;
             } else {
                 // ── Monorepo / non-Composer path ────────────────────────
                 let subprojects = composer::discover_subproject_roots(&root);
@@ -735,10 +750,9 @@ impl LanguageServer for Backend {
 
         // Read Composer metadata for require-dev detection and bin-dir.
         let workspace_root = self.workspace_root.read().clone();
-        let composer_json: Option<serde_json::Value> = workspace_root.as_deref().and_then(|root| {
-            let content = std::fs::read_to_string(root.join("composer.json")).ok()?;
-            serde_json::from_str(&content).ok()
-        });
+        let composer_json: Option<composer::ComposerPackage> = workspace_root
+            .as_deref()
+            .and_then(composer::read_composer_package);
         let bin_dir: Option<String> = composer_json.as_ref().map(composer::get_bin_dir);
 
         // Resolve the formatting strategy: external tools, built-in, or disabled.
@@ -1006,6 +1020,7 @@ impl Backend {
         &self,
         root: &std::path::Path,
         php_version: crate::types::PhpVersion,
+        composer_json: Option<composer::ComposerPackage>,
         progress_token: Option<&NumberOrString>,
     ) {
         if let Some(tok) = progress_token {
@@ -1013,14 +1028,14 @@ impl Backend {
                 .await;
         }
 
-        let (mappings, vendor_dir) = composer::parse_composer_json(root);
-
-        // Parse the raw composer.json once so that build_self_scan_composer
-        // can reuse it without redundant I/O.
-        let composer_json: Option<serde_json::Value> =
-            std::fs::read_to_string(root.join("composer.json"))
-                .ok()
-                .and_then(|c| serde_json::from_str(&c).ok());
+        let (mappings, vendor_dir) = match &composer_json {
+            Some(pkg) => {
+                let mappings = composer::extract_psr4_mappings_from_package(pkg);
+                let vendor_dir = composer::get_vendor_dir(pkg);
+                (mappings, vendor_dir)
+            }
+            None => (Vec::new(), "vendor".to_string()),
+        };
 
         // Cache the vendor dir path so cross-file scans can skip it
         // without re-reading composer.json on every request.
@@ -1552,21 +1567,18 @@ impl Backend {
         &self,
         project_root: &std::path::Path,
         vendor_dir: &str,
-        preloaded_json: Option<&serde_json::Value>,
+        preloaded_package: Option<&composer::ComposerPackage>,
         skip_paths: &HashSet<PathBuf>,
     ) -> WorkspaceScanResult {
-        // Use the pre-parsed JSON when available; only read from disk
+        // Use the pre-parsed package when available; only read from disk
         // as a fallback (e.g. monorepo subproject calls).
-        let owned_json;
-        let json = match preloaded_json {
-            Some(j) => j,
+        let owned_package;
+        let package = match preloaded_package {
+            Some(p) => p,
             None => {
-                let composer_path = project_root.join("composer.json");
-                owned_json = std::fs::read_to_string(&composer_path)
-                    .ok()
-                    .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok());
-                match owned_json.as_ref() {
-                    Some(j) => j,
+                owned_package = composer::read_composer_package(project_root);
+                match owned_package.as_ref() {
+                    Some(p) => p,
                     None => {
                         let skip_dirs = HashSet::new();
                         return classmap_scanner::scan_workspace_fallback_full(
@@ -1578,39 +1590,19 @@ impl Backend {
             }
         };
 
-        let mut psr4_dirs: Vec<(String, PathBuf)> = Vec::new();
-        let mut classmap_dirs: Vec<PathBuf> = Vec::new();
+        let scan_dirs = composer::extract_scan_dirs(package);
 
-        // Extract from both "autoload" and "autoload-dev" sections.
-        for section_key in &["autoload", "autoload-dev"] {
-            if let Some(section) = json.get(section_key) {
-                // PSR-4 entries
-                if let Some(psr4) = section.get("psr-4").and_then(|p| p.as_object()) {
-                    for (prefix, paths) in psr4 {
-                        let normalised = if prefix.is_empty() {
-                            String::new()
-                        } else if prefix.ends_with('\\') {
-                            prefix.clone()
-                        } else {
-                            format!("{prefix}\\")
-                        };
-                        for dir_str in json_value_to_strings(paths) {
-                            let dir = project_root.join(&dir_str);
-                            psr4_dirs.push((normalised.clone(), dir));
-                        }
-                    }
-                }
+        let psr4_dirs: Vec<(String, PathBuf)> = scan_dirs
+            .psr4
+            .iter()
+            .map(|(prefix, dir)| (prefix.clone(), project_root.join(dir)))
+            .collect();
 
-                // Classmap entries
-                if let Some(cm) = section.get("classmap").and_then(|c| c.as_array()) {
-                    for entry in cm {
-                        if let Some(dir_str) = entry.as_str() {
-                            classmap_dirs.push(project_root.join(dir_str));
-                        }
-                    }
-                }
-            }
-        }
+        let classmap_dirs: Vec<PathBuf> = scan_dirs
+            .classmap
+            .iter()
+            .map(|dir| project_root.join(dir))
+            .collect();
 
         // Scan user source directories (classes only for PSR-4).
         let vendor_dir_paths = vec![project_root.join(vendor_dir)];
@@ -1659,16 +1651,5 @@ impl Backend {
                 idx.entry(name.clone()).or_insert_with(|| path.clone());
             }
         }
-    }
-}
-
-fn json_value_to_strings(value: &serde_json::Value) -> Vec<String> {
-    match value {
-        serde_json::Value::String(s) => vec![s.clone()],
-        serde_json::Value::Array(arr) => arr
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect(),
-        _ => Vec::new(),
     }
 }

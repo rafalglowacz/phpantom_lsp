@@ -1055,6 +1055,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mago-composer"
+version = "1.15.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e70e8b8b26963c145d2935bfb4de6bb42bcce98dbd792075267f5d82423e957"
+dependencies = [
+ "foldhash 0.2.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mago-database"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,6 +1341,7 @@ dependencies = [
  "etcetera",
  "flate2",
  "ignore",
+ "mago-composer",
  "mago-database",
  "mago-formatter",
  "mago-php-version",

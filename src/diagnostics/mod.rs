@@ -898,11 +898,8 @@ impl Backend {
                 None => continue,
             };
 
-            let bin_dir: Option<String> =
-                std::fs::read_to_string(workspace_root.join("composer.json"))
-                    .ok()
-                    .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-                    .map(|json| crate::composer::get_bin_dir(&json));
+            let bin_dir: Option<String> = crate::composer::read_composer_package(&workspace_root)
+                .map(|pkg| crate::composer::get_bin_dir(&pkg));
 
             let resolved = match phpstan::resolve_phpstan(
                 Some(&workspace_root),
