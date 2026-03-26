@@ -1088,7 +1088,12 @@ function test($a, $b, $c) {
     let scope_map = collect_from_function(php);
 
     assert_eq!(scope_map.accesses.len(), 3);
-    assert!(scope_map.accesses.iter().all(|a| a.kind == AccessKind::Write));
+    assert!(
+        scope_map
+            .accesses
+            .iter()
+            .all(|a| a.kind == AccessKind::Write)
+    );
 }
 
 #[test]

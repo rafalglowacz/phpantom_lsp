@@ -2432,8 +2432,8 @@ class ArgumentCountDemo
 
 class GenerateConstructorDemo
 {
-    public string $name;
     public int $age;
+    public string $name;
     public string $status = 'active';
     public ?string $email;
     public readonly string $id;

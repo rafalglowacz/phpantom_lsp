@@ -52,6 +52,16 @@ fn find_generate_action(actions: &[CodeActionOrCommand]) -> Option<&CodeAction> 
     })
 }
 
+/// Find the "Generate promoted constructor" code action from a list.
+fn find_promoted_action(actions: &[CodeActionOrCommand]) -> Option<&CodeAction> {
+    actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) if ca.title == "Generate promoted constructor" => {
+            Some(ca)
+        }
+        _ => None,
+    })
+}
+
 /// Apply a workspace edit to the content and return the result.
 fn apply_edit(content: &str, edit: &WorkspaceEdit) -> String {
     let changes = edit.changes.as_ref().expect("edit should have changes");
@@ -480,7 +490,26 @@ class Foo {
 }
 
 #[test]
-fn action_offered_on_class_brace() {
+fn no_action_on_static_property() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+    public static int $count;
+}
+";
+    // Cursor on the static property (line 3).
+    let actions = get_code_actions(&backend, uri, content, 3, 10);
+    assert!(
+        find_generate_action(&actions).is_none(),
+        "should not offer action when cursor is on a static property"
+    );
+}
+
+#[test]
+fn no_action_on_class_brace() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let content = "\
@@ -489,11 +518,33 @@ class Foo {
     public string $name;
 }
 ";
-    // Cursor on the class keyword line.
+    // Cursor on the class keyword line — not on a property.
     let actions = get_code_actions(&backend, uri, content, 1, 0);
     assert!(
-        find_generate_action(&actions).is_some(),
-        "should offer action when cursor is on class declaration"
+        find_generate_action(&actions).is_none(),
+        "should not offer action when cursor is on class declaration"
+    );
+}
+
+#[test]
+fn no_action_inside_method_body() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+
+    public function greet(): string {
+        return 'hello';
+    }
+}
+";
+    // Cursor inside the method body (line 5, on "return").
+    let actions = get_code_actions(&backend, uri, content, 5, 8);
+    assert!(
+        find_generate_action(&actions).is_none(),
+        "should not offer action when cursor is inside a method body"
     );
 }
 
@@ -759,5 +810,303 @@ class Foo {
     assert!(
         result.contains("array $items = []"),
         "should carry over array default: {result}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Promoted constructor tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn promoted_action_offered_alongside_traditional() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    assert!(
+        find_generate_action(&actions).is_some(),
+        "traditional action should be offered"
+    );
+    assert!(
+        find_promoted_action(&actions).is_some(),
+        "promoted action should be offered"
+    );
+}
+
+#[test]
+fn promoted_removes_properties_and_creates_promoted_params() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+    private int $age;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    // Property declarations should be removed.
+    assert!(
+        !result.contains("public string $name;"),
+        "property declaration should be removed: {result}"
+    );
+    assert!(
+        !result.contains("private int $age;"),
+        "property declaration should be removed: {result}"
+    );
+
+    // Promoted parameters should be present.
+    assert!(
+        result.contains("public string $name"),
+        "should have promoted public param: {result}"
+    );
+    assert!(
+        result.contains("private int $age"),
+        "should have promoted private param: {result}"
+    );
+
+    // No assignment body.
+    assert!(
+        !result.contains("$this->"),
+        "promoted constructor should not have assignments: {result}"
+    );
+
+    // Empty body.
+    assert!(result.contains(") {}"), "should have empty body: {result}");
+}
+
+#[test]
+fn promoted_preserves_readonly() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public readonly string $id;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    assert!(
+        result.contains("public readonly string $id"),
+        "should preserve readonly modifier: {result}"
+    );
+}
+
+#[test]
+fn promoted_carries_default_values() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+    protected string $status = 'active';
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    assert!(
+        result.contains("protected string $status = 'active'"),
+        "should carry over default value: {result}"
+    );
+
+    // Required param before optional.
+    let name_pos = result.find("$name").unwrap();
+    let status_pos = result.find("$status").unwrap();
+    assert!(
+        name_pos < status_pos,
+        "required $name before optional $status: {result}"
+    );
+}
+
+#[test]
+fn promoted_skips_static_properties() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+    public static int $count;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    // Static property should remain (not deleted, not promoted).
+    assert!(
+        result.contains("public static int $count;"),
+        "static property should remain: {result}"
+    );
+    assert!(
+        !result.contains("public static int $count,"),
+        "static property should not be in constructor: {result}"
+    );
+}
+
+#[test]
+fn promoted_preserves_visibility_variants() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+    protected int $age;
+    private float $score;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    assert!(
+        result.contains("public string $name"),
+        "should preserve public: {result}"
+    );
+    assert!(
+        result.contains("protected int $age"),
+        "should preserve protected: {result}"
+    );
+    assert!(
+        result.contains("private float $score"),
+        "should preserve private: {result}"
+    );
+}
+
+#[test]
+fn promoted_no_action_when_constructor_exists() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+
+    public function __construct(string $name) {
+        $this->name = $name;
+    }
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    assert!(
+        find_promoted_action(&actions).is_none(),
+        "should not offer promoted action when constructor exists"
+    );
+}
+
+#[test]
+fn promoted_trailing_comma_on_params() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    // Trailing comma for clean diffs.
+    assert!(
+        result.contains("$name,\n"),
+        "should have trailing comma: {result}"
+    );
+}
+
+#[test]
+fn promoted_preserves_nullable_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public ?string $label;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    assert!(
+        result.contains("public ?string $label"),
+        "should preserve nullable type: {result}"
+    );
+}
+
+#[test]
+fn promoted_works_in_namespace() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+namespace App\\Models;
+
+class User {
+    public string $name;
+    private string $email;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 4, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    assert!(
+        result.contains("public string $name"),
+        "should promote name: {result}"
+    );
+    assert!(
+        result.contains("private string $email"),
+        "should promote email: {result}"
+    );
+    assert!(
+        !result.contains("public string $name;"),
+        "property declaration should be removed: {result}"
+    );
+}
+
+#[test]
+fn promoted_static_properties_stay_above_constructor() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = "\
+<?php
+class Foo {
+    public string $name;
+    public int $age;
+    public static int $instanceCount;
+    public readonly string $id;
+}
+";
+    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let action = find_promoted_action(&actions).expect("should offer promoted action");
+    let result = apply_edit(content, action.edit.as_ref().unwrap());
+
+    // Static property should remain and appear before the constructor.
+    let static_pos = result
+        .find("public static int $instanceCount;")
+        .expect("static property should remain: {result}");
+    let constructor_pos = result
+        .find("public function __construct(")
+        .expect("constructor should exist: {result}");
+    assert!(
+        static_pos < constructor_pos,
+        "static property should appear above the constructor:\n{result}"
     );
 }

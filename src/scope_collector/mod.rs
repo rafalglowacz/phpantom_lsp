@@ -179,11 +179,7 @@ impl ScopeMap {
     /// Return all accesses of variable `name` within the given frame,
     /// excluding accesses that fall inside a nested frame (closure or
     /// arrow function).
-    pub(crate) fn accesses_in_frame<'a>(
-        &'a self,
-        name: &str,
-        frame: &Frame,
-    ) -> Vec<&'a VarAccess> {
+    pub(crate) fn accesses_in_frame<'a>(&'a self, name: &str, frame: &Frame) -> Vec<&'a VarAccess> {
         self.accesses
             .iter()
             .filter(|a| a.name == name && a.offset >= frame.start && a.offset <= frame.end)
@@ -281,11 +277,10 @@ impl ScopeMap {
                 .max_by_key(|a| a.offset);
 
             // Variable whose entire lifetime is within [start, end).
-            let entirely_inside =
-                first_write.is_some_and(|w| w.offset >= start && w.offset < end)
-                    && last_read.map_or(true, |r| r.offset < end)
-                    && !has_write_before
-                    && !has_read_after;
+            let entirely_inside = first_write.is_some_and(|w| w.offset >= start && w.offset < end)
+                && last_read.map_or(true, |r| r.offset < end)
+                && !has_write_before
+                && !has_read_after;
 
             if entirely_inside {
                 result.locals.push(var_name.clone());
@@ -864,7 +859,11 @@ fn walk_expression(expr: &Expression<'_>, collector: &mut Collector) {
         // ── self / static / parent keywords ──
         Expression::Self_(_) => {
             collector.has_this_or_self = true;
-            collector.push_access("self".to_string(), expr.span().start.offset, AccessKind::Read);
+            collector.push_access(
+                "self".to_string(),
+                expr.span().start.offset,
+                AccessKind::Read,
+            );
         }
         Expression::Static(_) => {
             collector.has_this_or_self = true;

@@ -1,11 +1,15 @@
 //! "Generate constructor" code action.
 //!
-//! When the cursor is inside a class that has non-static properties but
-//! no `__construct` method, this module offers a code action to generate
-//! a constructor that accepts each qualifying property as a parameter
-//! and assigns it in the body.
+//! When the cursor is on a property declaration inside a class that has
+//! no `__construct` method, this module offers two code actions:
 //!
-//! **Code action kind:** `refactor.rewrite`.
+//! 1. **Generate constructor** — inserts a traditional `__construct`
+//!    with parameters and `$this->name = $name;` assignments.
+//! 2. **Generate promoted constructor** — removes the property
+//!    declarations and inserts a constructor with promoted parameters
+//!    (`public string $name`, etc.), requiring no body assignments.
+//!
+//! **Code action kind:** `refactor.rewrite` (both).
 
 use std::collections::HashMap;
 
@@ -17,7 +21,7 @@ use mago_syntax::ast::modifier::Modifier;
 use mago_syntax::ast::*;
 use tower_lsp::lsp_types::*;
 
-use super::cursor_context::{CursorContext, find_cursor_context};
+use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
 use crate::Backend;
 use crate::docblock::{extract_var_type, get_docblock_text_for_node};
 use crate::parser::extract_hint_string;
@@ -33,16 +37,26 @@ struct QualifyingProperty {
     type_hint: Option<String>,
     /// Default value text (e.g. `'active'`, `[]`), if the property has one.
     default_value: Option<String>,
+    /// Visibility keyword (`"public"`, `"protected"`, `"private"`).
+    /// Falls back to `"public"` when none is declared.
+    visibility: &'static str,
+    /// Whether the property has the `readonly` modifier.
+    is_readonly: bool,
+    /// Byte span of the entire property declaration (for deletion in the
+    /// promoted variant).  `(start, end)` where `end` is past the trailing
+    /// newline so that removing the declaration leaves no blank line.
+    declaration_span: (usize, usize),
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
 impl Backend {
-    /// Collect "Generate constructor" code actions for the cursor position.
+    /// Collect "Generate constructor" and "Generate promoted constructor"
+    /// code actions for the cursor position.
     ///
-    /// When the cursor is inside a class body that has at least one
-    /// non-static property and no existing `__construct` method, this
-    /// produces a single code action that inserts a constructor.
+    /// When the cursor is on a non-static property declaration inside a
+    /// class body that has no existing `__construct` method, this produces
+    /// up to two code actions that insert a constructor.
     pub(crate) fn collect_generate_constructor_actions(
         &self,
         uri: &str,
@@ -64,7 +78,17 @@ impl Backend {
         let ctx = find_cursor_context(&program.statements, cursor_offset);
 
         let all_members = match &ctx {
-            CursorContext::InClassLike { all_members, .. } => *all_members,
+            CursorContext::InClassLike {
+                member: MemberContext::Property(prop),
+                all_members,
+            } => {
+                // Only offer on non-static properties — static properties
+                // won't be included in the generated constructor.
+                if prop.modifiers().iter().any(|m| m.is_static()) {
+                    return;
+                }
+                *all_members
+            }
             _ => return,
         };
 
@@ -85,41 +109,91 @@ impl Backend {
         // Detect indentation from existing class members.
         let indent = detect_indent_from_members(all_members, content);
 
-        // Build the constructor text.
-        let constructor_text = build_constructor(&props, &indent);
-
         // Find the insertion point: after the last property declaration,
         // before any methods or other members.
         let insert_offset = find_insertion_offset(all_members, content);
         let insert_pos = offset_to_position(content, insert_offset);
 
-        let title = "Generate constructor".to_string();
+        // ── Traditional constructor ─────────────────────────────────────
+        {
+            let constructor_text = build_constructor(&props, &indent);
 
-        let edit = TextEdit {
-            range: Range {
-                start: insert_pos,
-                end: insert_pos,
-            },
-            new_text: constructor_text,
-        };
+            let edit = TextEdit {
+                range: Range {
+                    start: insert_pos,
+                    end: insert_pos,
+                },
+                new_text: constructor_text,
+            };
 
-        let mut changes = HashMap::new();
-        changes.insert(doc_uri, vec![edit]);
+            let mut changes = HashMap::new();
+            changes.insert(doc_uri.clone(), vec![edit]);
 
-        out.push(CodeActionOrCommand::CodeAction(CodeAction {
-            title,
-            kind: Some(CodeActionKind::REFACTOR_REWRITE),
-            diagnostics: None,
-            edit: Some(WorkspaceEdit {
-                changes: Some(changes),
-                document_changes: None,
-                change_annotations: None,
-            }),
-            command: None,
-            is_preferred: Some(false),
-            disabled: None,
-            data: None,
-        }));
+            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: "Generate constructor".to_string(),
+                kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                diagnostics: None,
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                command: None,
+                is_preferred: Some(false),
+                disabled: None,
+                data: None,
+            }));
+        }
+
+        // ── Promoted constructor ────────────────────────────────────────
+        {
+            let constructor_text = build_promoted_constructor(&props, &indent);
+
+            // Build the list of edits: one deletion per property
+            // declaration, plus one insertion for the constructor.
+            // Sort deletions back-to-front so byte offsets stay valid.
+            let mut edits: Vec<TextEdit> = Vec::new();
+
+            // Delete each qualifying property declaration.
+            for prop in props.iter().rev() {
+                let start = offset_to_position(content, prop.declaration_span.0);
+                let end = offset_to_position(content, prop.declaration_span.1);
+                edits.push(TextEdit {
+                    range: Range { start, end },
+                    new_text: String::new(),
+                });
+            }
+
+            // Insert the constructor after all property declarations
+            // (same position as the traditional constructor).  This
+            // keeps static properties above the constructor rather
+            // than displacing them below it.
+            edits.push(TextEdit {
+                range: Range {
+                    start: insert_pos,
+                    end: insert_pos,
+                },
+                new_text: constructor_text,
+            });
+
+            let mut changes = HashMap::new();
+            changes.insert(doc_uri, edits);
+
+            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: "Generate promoted constructor".to_string(),
+                kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                diagnostics: None,
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                command: None,
+                is_preferred: Some(false),
+                disabled: None,
+                data: None,
+            }));
+        }
     }
 }
 
@@ -147,15 +221,23 @@ fn collect_qualifying_properties<'a>(
     let mut result = Vec::new();
 
     for member in members.iter() {
-        let plain = match member {
-            ClassLikeMember::Property(Property::Plain(p)) => p,
+        let member_prop = match member {
+            ClassLikeMember::Property(p) => p,
+            _ => continue,
+        };
+        let plain = match member_prop {
+            Property::Plain(p) => p,
             _ => continue,
         };
 
         // Skip static properties.
-        if is_static(plain.modifiers.iter()) {
+        if is_static(member_prop) {
             continue;
         }
+
+        // Extract visibility and readonly from modifiers.
+        let visibility = extract_visibility(plain.modifiers.iter());
+        let is_readonly = has_readonly(plain.modifiers.iter());
 
         // Extract the native type hint for the property.
         let native_hint = plain.hint.as_ref().map(|h| extract_hint_string(h));
@@ -164,6 +246,13 @@ fn collect_qualifying_properties<'a>(
         // or if we want to use it as a fallback.
         let docblock_type =
             get_docblock_text_for_node(trivia, content, plain).and_then(extract_var_type);
+
+        // Compute the declaration span for deletion (promoted variant).
+        // Start from the beginning of the line containing the property
+        // (to include leading whitespace), end past the trailing newline.
+        let prop_span = member.span();
+        let decl_start = find_line_start(content, prop_span.start.offset as usize);
+        let decl_end = find_line_end(content, prop_span.end.offset as usize);
 
         for item in plain.items.iter() {
             let var_name = item.variable().name;
@@ -198,6 +287,9 @@ fn collect_qualifying_properties<'a>(
                 name: bare_name.to_string(),
                 type_hint,
                 default_value,
+                visibility,
+                is_readonly,
+                declaration_span: (decl_start, decl_end),
             });
         }
     }
@@ -273,6 +365,14 @@ fn find_insertion_offset<'a>(members: &Sequence<'a, ClassLikeMember<'a>>, conten
     }
 }
 
+/// Find the start of the line containing the given offset.
+fn find_line_start(content: &str, offset: usize) -> usize {
+    content[..offset]
+        .rfind('\n')
+        .map(|pos| pos + 1)
+        .unwrap_or(0)
+}
+
 /// Find the end of the line at or after the given offset (past the newline).
 fn find_line_end(content: &str, offset: usize) -> usize {
     if let Some(nl) = content[offset..].find('\n') {
@@ -294,10 +394,7 @@ fn detect_indent_from_members<'a>(
     if let Some(first) = members.first() {
         let offset = first.span().start.offset as usize;
         // Walk backwards from the member's start to find the beginning of the line.
-        let line_start = content[..offset]
-            .rfind('\n')
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
+        let line_start = find_line_start(content, offset);
         let line_prefix = &content[line_start..offset];
         let indent: String = line_prefix
             .chars()
@@ -312,7 +409,9 @@ fn detect_indent_from_members<'a>(
     "    ".to_string()
 }
 
-/// Build the constructor source text from the qualifying properties.
+/// Build the traditional constructor source text from the qualifying
+/// properties.  Each property becomes a parameter with matching type
+/// hint and an assignment in the body.
 fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
     let mut result = String::new();
 
@@ -376,11 +475,90 @@ fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
     result
 }
 
-/// Check if any modifier is `static`.
-fn is_static<'a>(modifiers: impl Iterator<Item = &'a Modifier<'a>>) -> bool {
+/// Build the promoted constructor source text.  Each property becomes a
+/// promoted parameter (`visibility [readonly] type $name [= default]`)
+/// and the property declarations are removed by the caller.
+fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> String {
+    let mut result = String::new();
+
+    result.push('\n');
+    result.push_str(indent);
+    result.push_str("public function __construct(\n");
+
+    // Parameters with default values must come after required parameters.
+    let mut required_params = Vec::new();
+    let mut optional_params = Vec::new();
+
+    for prop in props {
+        let mut param = String::new();
+        param.push_str(indent);
+        param.push_str(indent);
+
+        // Visibility modifier.
+        param.push_str(prop.visibility);
+
+        // Readonly modifier.
+        if prop.is_readonly {
+            param.push_str(" readonly");
+        }
+
+        // Type hint.
+        if let Some(ref hint) = prop.type_hint {
+            param.push(' ');
+            param.push_str(hint);
+        }
+
+        param.push_str(" $");
+        param.push_str(&prop.name);
+
+        if let Some(ref default) = prop.default_value {
+            param.push_str(" = ");
+            param.push_str(default);
+            optional_params.push(param);
+        } else {
+            required_params.push(param);
+        }
+    }
+
+    let all_params: Vec<&str> = required_params
+        .iter()
+        .chain(optional_params.iter())
+        .map(|s| s.as_str())
+        .collect();
+
+    result.push_str(&all_params.join(",\n"));
+    result.push_str(",\n");
+
+    result.push_str(indent);
+    result.push_str(") {}\n");
+
+    result
+}
+
+/// Extract the visibility keyword from a modifier list, defaulting to
+/// `"public"` if none is present.
+fn extract_visibility<'a>(modifiers: impl Iterator<Item = &'a Modifier<'a>>) -> &'static str {
+    for m in modifiers {
+        match m {
+            Modifier::Public(_) => return "public",
+            Modifier::Protected(_) => return "protected",
+            Modifier::Private(_) => return "private",
+            _ => continue,
+        }
+    }
+    "public"
+}
+
+/// Check if the modifier list includes `readonly`.
+fn has_readonly<'a>(modifiers: impl Iterator<Item = &'a Modifier<'a>>) -> bool {
     modifiers
         .into_iter()
-        .any(|m| matches!(m, Modifier::Static(_)))
+        .any(|m| matches!(m, Modifier::Readonly(_)))
+}
+
+/// Check if any modifier is `static`.
+fn is_static(property: &Property<'_>) -> bool {
+    property.modifiers().iter().any(|m| m.is_static())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -438,19 +616,22 @@ mod tests {
 
     // ── build_constructor ───────────────────────────────────────────────
 
+    fn prop(name: &str, type_hint: Option<&str>, default: Option<&str>) -> QualifyingProperty {
+        QualifyingProperty {
+            name: name.to_string(),
+            type_hint: type_hint.map(|s| s.to_string()),
+            default_value: default.map(|s| s.to_string()),
+            visibility: "public",
+            is_readonly: false,
+            declaration_span: (0, 0),
+        }
+    }
+
     #[test]
     fn builds_basic_constructor() {
         let props = vec![
-            QualifyingProperty {
-                name: "name".to_string(),
-                type_hint: Some("string".to_string()),
-                default_value: None,
-            },
-            QualifyingProperty {
-                name: "age".to_string(),
-                type_hint: Some("int".to_string()),
-                default_value: None,
-            },
+            prop("name", Some("string"), None),
+            prop("age", Some("int"), None),
         ];
 
         let result = build_constructor(&props, "    ");
@@ -462,16 +643,8 @@ mod tests {
     #[test]
     fn builds_constructor_with_defaults() {
         let props = vec![
-            QualifyingProperty {
-                name: "name".to_string(),
-                type_hint: Some("string".to_string()),
-                default_value: None,
-            },
-            QualifyingProperty {
-                name: "status".to_string(),
-                type_hint: Some("string".to_string()),
-                default_value: Some("'active'".to_string()),
-            },
+            prop("name", Some("string"), None),
+            prop("status", Some("string"), Some("'active'")),
         ];
 
         let result = build_constructor(&props, "    ");
@@ -484,16 +657,8 @@ mod tests {
     #[test]
     fn defaults_reordered_before_required() {
         let props = vec![
-            QualifyingProperty {
-                name: "status".to_string(),
-                type_hint: Some("string".to_string()),
-                default_value: Some("'draft'".to_string()),
-            },
-            QualifyingProperty {
-                name: "name".to_string(),
-                type_hint: Some("string".to_string()),
-                default_value: None,
-            },
+            prop("status", Some("string"), Some("'draft'")),
+            prop("name", Some("string"), None),
         ];
 
         let result = build_constructor(&props, "    ");
@@ -508,11 +673,7 @@ mod tests {
 
     #[test]
     fn builds_constructor_without_type_hints() {
-        let props = vec![QualifyingProperty {
-            name: "data".to_string(),
-            type_hint: None,
-            default_value: None,
-        }];
+        let props = vec![prop("data", None, None)];
 
         let result = build_constructor(&props, "    ");
         assert!(
@@ -523,11 +684,7 @@ mod tests {
 
     #[test]
     fn builds_constructor_with_nullable_type() {
-        let props = vec![QualifyingProperty {
-            name: "label".to_string(),
-            type_hint: Some("?string".to_string()),
-            default_value: None,
-        }];
+        let props = vec![prop("label", Some("?string"), None)];
 
         let result = build_constructor(&props, "    ");
         assert!(
@@ -538,11 +695,7 @@ mod tests {
 
     #[test]
     fn builds_constructor_with_union_type() {
-        let props = vec![QualifyingProperty {
-            name: "id".to_string(),
-            type_hint: Some("int|string".to_string()),
-            default_value: None,
-        }];
+        let props = vec![prop("id", Some("int|string"), None)];
 
         let result = build_constructor(&props, "    ");
         assert!(
@@ -553,11 +706,7 @@ mod tests {
 
     #[test]
     fn respects_tab_indentation() {
-        let props = vec![QualifyingProperty {
-            name: "name".to_string(),
-            type_hint: Some("string".to_string()),
-            default_value: None,
-        }];
+        let props = vec![prop("name", Some("string"), None)];
 
         let result = build_constructor(&props, "\t");
         assert!(
@@ -567,6 +716,136 @@ mod tests {
         assert!(
             result.contains("\t\t$this->name = $name;"),
             "body should use double tab: {result}"
+        );
+    }
+
+    // ── build_promoted_constructor ───────────────────────────────────────
+
+    fn pprop(
+        name: &str,
+        type_hint: Option<&str>,
+        default: Option<&str>,
+        visibility: &'static str,
+        is_readonly: bool,
+    ) -> QualifyingProperty {
+        QualifyingProperty {
+            name: name.to_string(),
+            type_hint: type_hint.map(|s| s.to_string()),
+            default_value: default.map(|s| s.to_string()),
+            visibility,
+            is_readonly,
+            declaration_span: (0, 0),
+        }
+    }
+
+    #[test]
+    fn builds_promoted_constructor_basic() {
+        let props = vec![
+            pprop("name", Some("string"), None, "public", false),
+            pprop("age", Some("int"), None, "private", false),
+        ];
+
+        let result = build_promoted_constructor(&props, "    ");
+        assert!(
+            result.contains("public string $name"),
+            "should have public visibility: {result}"
+        );
+        assert!(
+            result.contains("private int $age"),
+            "should have private visibility: {result}"
+        );
+        assert!(result.contains(") {}"), "should have empty body: {result}");
+        assert!(
+            !result.contains("$this->"),
+            "should not have assignments: {result}"
+        );
+    }
+
+    #[test]
+    fn builds_promoted_constructor_with_readonly() {
+        let props = vec![pprop("id", Some("string"), None, "public", true)];
+
+        let result = build_promoted_constructor(&props, "    ");
+        assert!(
+            result.contains("public readonly string $id"),
+            "should have readonly modifier: {result}"
+        );
+    }
+
+    #[test]
+    fn builds_promoted_constructor_with_defaults() {
+        let props = vec![
+            pprop("name", Some("string"), None, "public", false),
+            pprop(
+                "status",
+                Some("string"),
+                Some("'active'"),
+                "protected",
+                false,
+            ),
+        ];
+
+        let result = build_promoted_constructor(&props, "    ");
+        // Required comes before optional.
+        let name_pos = result.find("$name").unwrap();
+        let status_pos = result.find("$status").unwrap();
+        assert!(name_pos < status_pos, "required before optional: {result}");
+        assert!(
+            result.contains("protected string $status = 'active'"),
+            "should carry over default: {result}"
+        );
+    }
+
+    #[test]
+    fn builds_promoted_constructor_trailing_comma() {
+        let props = vec![pprop("name", Some("string"), None, "public", false)];
+
+        let result = build_promoted_constructor(&props, "    ");
+        // Should have a trailing comma after the last parameter.
+        assert!(
+            result.contains("$name,\n"),
+            "should have trailing comma: {result}"
+        );
+    }
+
+    #[test]
+    fn builds_promoted_constructor_multiline() {
+        let props = vec![
+            pprop("name", Some("string"), None, "public", false),
+            pprop("age", Some("int"), None, "private", false),
+        ];
+
+        let result = build_promoted_constructor(&props, "    ");
+        // Each parameter should be on its own line.
+        assert!(
+            result.contains("        public string $name,\n        private int $age,\n"),
+            "parameters should be on separate lines: {result}"
+        );
+    }
+
+    #[test]
+    fn promoted_constructor_tabs() {
+        let props = vec![pprop("name", Some("string"), None, "public", false)];
+
+        let result = build_promoted_constructor(&props, "\t");
+        assert!(
+            result.contains("\tpublic function __construct(\n"),
+            "should use tab indent: {result}"
+        );
+        assert!(
+            result.contains("\t\tpublic string $name,\n"),
+            "params should use double tab: {result}"
+        );
+    }
+
+    #[test]
+    fn promoted_constructor_no_type_hint() {
+        let props = vec![pprop("data", None, None, "private", false)];
+
+        let result = build_promoted_constructor(&props, "    ");
+        assert!(
+            result.contains("private $data"),
+            "untyped param should have no type hint: {result}"
         );
     }
 
@@ -633,8 +912,10 @@ mod tests {
             assert_eq!(props.len(), 2);
             assert_eq!(props[0].name, "name");
             assert_eq!(props[0].type_hint.as_deref(), Some("string"));
+            assert_eq!(props[0].visibility, "public");
             assert_eq!(props[1].name, "age");
             assert_eq!(props[1].type_hint.as_deref(), Some("int"));
+            assert_eq!(props[1].visibility, "private");
         } else {
             panic!("should find class");
         }
@@ -669,8 +950,10 @@ mod tests {
             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
             assert_eq!(props.len(), 2);
             assert_eq!(props[0].name, "name");
+            assert!(!props[0].is_readonly);
             assert_eq!(props[1].name, "id");
             assert_eq!(props[1].type_hint.as_deref(), Some("int"));
+            assert!(props[1].is_readonly);
         } else {
             panic!("should find class");
         }
@@ -762,6 +1045,28 @@ mod tests {
             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
             assert_eq!(props.len(), 1);
             assert_eq!(props[0].type_hint.as_deref(), Some("int|string"));
+        } else {
+            panic!("should find class");
+        }
+    }
+
+    #[test]
+    fn captures_declaration_span() {
+        let arena = Box::leak(Box::new(Bump::new()));
+        let file_id = mago_database::file::FileId::new("input.php");
+        let php = "<?php\nclass Foo {\n    public string $name;\n}\n";
+        let program = mago_syntax::parser::parse_file_content(arena, file_id, php);
+
+        let ctx = find_cursor_context(&program.statements, 20);
+        if let CursorContext::InClassLike { all_members, .. } = &ctx {
+            let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
+            assert_eq!(props.len(), 1);
+            let (start, end) = props[0].declaration_span;
+            let deleted = &php[start..end];
+            assert!(
+                deleted.contains("public string $name;"),
+                "span should cover property declaration: {deleted:?}"
+            );
         } else {
             panic!("should find class");
         }
