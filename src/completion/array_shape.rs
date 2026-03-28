@@ -303,6 +303,7 @@ impl Backend {
                     classes: patched_classes_storage.clone(),
                     use_map: file_ctx.use_map.clone(),
                     namespace: file_ctx.namespace.clone(),
+                    resolved_names: file_ctx.resolved_names.clone(),
                 };
                 match self.resolve_variable_raw_type(
                     &ctx.var_name,

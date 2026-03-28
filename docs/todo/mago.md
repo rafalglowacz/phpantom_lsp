@@ -68,97 +68,108 @@ Requires restructuring how we store per-file name resolution data.
 
 ### Steps
 
-1. **Add `mago-names` to `Cargo.toml`.**
+1. ✅ **Add `mago-names` to `Cargo.toml`.**
    This also brings in `foldhash` as a transitive dependency.
+   *Done — resolved to v1.15.2.*
 
-2. **Run the name resolver in `update_ast_inner`.**
+2. ✅ **Run the name resolver in `update_ast_inner`.**
    After parsing the `Program`, call
    `mago_names::resolver::NameResolver::new(&arena).resolve(program)`
    to produce a `ResolvedNames`. This happens in the same arena as
    the parse.
+   *Done — resolver runs right after `parse_file_content`, while
+   the arena is still alive.*
 
-3. **Store resolved names per file.**
-   `ResolvedNames<'arena>` borrows from the arena, but our arenas
-   are dropped at the end of `update_ast_inner`. Two options:
+3. ✅ **Store resolved names per file.**
+   Used Option A (copy to owned storage).  Added
+   `resolved_names: Arc<RwLock<HashMap<String, Arc<OwnedResolvedNames>>>>`
+   to `Backend`.  Populated in `update_ast_inner` for files open in the
+   editor.  Not populated for vendor/stub files loaded via
+   `parse_and_cache_content_versioned` (those files are never queried
+   by byte offset).  Shared via `Arc::clone` in
+   `clone_for_diagnostic_worker`, cleaned up in `clear_file_maps`.
 
-   **Option A — Copy to owned storage.** Extract the resolved names
-   into an owned `HashMap<u32, (String, bool)>` (offset → FQN +
-   imported flag) and store that on `Backend` in a new
-   `DashMap<String, Arc<OwnedResolvedNames>>`. This is the simpler
-   approach and keeps the existing lifetime model.
+4. ✅ **Build an `OwnedResolvedNames` wrapper.**
+   Created `src/names.rs` with `OwnedResolvedNames` providing:
+   - `get(offset) -> Option<&str>` — FQN lookup by byte offset
+   - `is_imported(offset) -> bool` — was the name from a `use` stmt
+   - `iter()` — iterate all `(offset, fqn, imported)` triples
+   - `to_use_map()` — transitional helper building `HashMap<String, String>`
 
-   **Option B — Keep arenas alive.** Store the `Bump` arena
-   alongside the `ResolvedNames` in an `Arc`-wrapped struct. This
-   avoids the copy but requires more careful lifetime management.
+   Also added `FileContext::resolve_name_at(name, offset)` as a
+   convenience method that tries `resolved_names` first and falls
+   back to the legacy `resolve_to_fqn` logic.
 
-   Start with Option A. It's simpler to reason about and the copy
-   cost is bounded (one `HashMap` insert per identifier per file,
-   done once per re-parse). Optimise to Option B later if profiling
-   shows it matters.
+5. 🔶 **Replace `use_map` reads incrementally.** *(in progress)*
 
-4. **Build an `OwnedResolvedNames` wrapper.**
-   Create a `src/names.rs` module with a struct that mirrors the
-   `ResolvedNames` API but owns its data:
+   **Migrated to byte-offset lookups (`resolved_names`):**
+   - `src/diagnostics/unknown_classes.rs` — `ClassReference` FQN
+     resolution and `is_imported` check
+   - `src/diagnostics/deprecated.rs` — `ClassReference` FQN resolution
+   - `src/definition/resolve.rs` — `FunctionCall`, `ConstantReference`,
+     and `ClassReference` resolution via `ctx.resolve_name_at()`
+   - `src/definition/implementation.rs` — `resolve_class_implementation`
+   - `src/highlight/mod.rs` — `ClassReference` FQN resolution
+   - `src/references/mod.rs` — `ClassReference` and `FunctionCall`
+     resolution
+   - `src/rename/mod.rs` — `ClassReference` FQN resolution
+   - `src/type_hierarchy.rs` — `ClassReference`, `ClassDeclaration`,
+     and `SelfStaticParent` resolution
 
-   ```
-   pub struct OwnedResolvedNames {
-       names: HashMap<u32, (String, bool)>,
-   }
-
-   impl OwnedResolvedNames {
-       pub fn get(&self, offset: u32) -> Option<&str>;
-       pub fn is_imported(&self, offset: u32) -> bool;
-   }
-   ```
-
-   Populate it from `ResolvedNames` at the end of `update_ast_inner`.
-
-5. **Replace `use_map` reads incrementally.**
-   The `use_map` is read in:
-   - `src/resolution.rs` — `resolve_class_name`, `resolve_function_name`
+   **Switched to `self.file_use_map(uri)` helper** (still reads the
+   legacy `use_map`, but funnelled through a single method for future
+   replacement):
+   - `src/diagnostics/deprecated.rs`
    - `src/diagnostics/unknown_classes.rs`
    - `src/diagnostics/unknown_functions.rs`
    - `src/diagnostics/unknown_members.rs`
    - `src/diagnostics/unused_imports.rs`
-   - `src/completion/` (various modules)
-   - `src/definition/` (various modules)
-   - `src/references/`
-   - `src/rename/`
    - `src/code_actions/import_class.rs`
+   - `src/code_actions/phpstan/add_override.rs`
+   - `src/code_actions/phpstan/add_throws.rs`
+   - `src/code_actions/replace_deprecated.rs`
 
-   For each call site:
-   - If the call site has access to the AST node's byte offset, use
-     `resolved_names.get(offset)` to get the FQN directly. This
-     eliminates the manual "look up short name in use_map, prepend
-     namespace" dance.
-   - If the call site only has a string name (no offset), keep the
-     existing `resolve_class_name` / `resolve_function_name` helper
-     but rewrite it to query `OwnedResolvedNames` instead of the raw
-     use map.
+   **Not yet migrated** (still reading `use_map` through `FileContext`
+   or `file_use_map`):
+   - `src/resolution.rs` — `resolve_class_name`, `resolve_function_name`
+     (used by loader closures that resolve names without byte offsets)
+   - `src/completion/` (various modules, via `FileContext`)
+   - Cross-file reference scanning in `src/references/mod.rs`
+     (`find_class_references`, `find_function_references`)
 
-   Do this incrementally — one module per commit.
+   **Key finding:** The legacy `use_map` cannot be fully replaced by
+   `to_use_map()` because `resolved_names` only contains names that
+   are actually *referenced* in the code, not all *declared* imports.
+   The unused-imports diagnostic and import-class code action need
+   the full set of declared imports.  The `use_map` must remain until
+   a proper declared-imports structure (possibly from `mago-names`
+   scope data) is introduced.
 
-6. **Deprecate and remove `use_map`.**
+6. **Deprecate and remove `use_map`.** *(blocked on step 5)*
    Once all consumers use `OwnedResolvedNames`, remove the
    `use_map: DashMap<String, HashMap<String, String>>` from
    `Backend`. Also remove `extract_use_items` and
    `extract_use_statements_from_statements` from
    `src/parser/use_statements.rs`.
 
-7. **Keep `namespace_map` for now.**
+7. ✅ **Keep `namespace_map` for now.**
    The per-file namespace is still needed for PSR-4 resolution and
    class index construction. `mago-names` doesn't expose the file's
    namespace as a standalone value, so keep `namespace_map` or extract
    the namespace from the AST directly (it's trivial — first
    `Statement::Namespace` node).
 
-8. **Update unused-import diagnostics.**
+8. **Update unused-import diagnostics.** *(deferred)*
    `mago-names` provides `is_imported()` for each resolved name. An
    unused import is a `use` statement whose imported names never
    appear in `ResolvedNames` with `imported = true`. This may
-   simplify the current `unused_imports.rs` logic.
+   simplify the current `unused_imports.rs` logic.  However, as noted
+   in step 5, `resolved_names` only tracks *referenced* names, so
+   detecting *unreferenced* imports requires cross-referencing with
+   the declared-import list (still sourced from `use_map`).
 
-9. **Run the full test suite.**
+9. ✅ **Run the full test suite.**
+   All 2735 unit tests + 254 fixture tests pass after each step.
 
 ### Interaction with M4
 

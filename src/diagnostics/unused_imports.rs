@@ -30,10 +30,7 @@ impl Backend {
         out: &mut Vec<Diagnostic>,
     ) {
         // ── Gather the file's use map (short name → FQN) ────────────────
-        let file_use_map: HashMap<String, String> = match self.use_map.read().get(uri) {
-            Some(map) => map.clone(),
-            None => return,
-        };
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
 
         if file_use_map.is_empty() {
             return;

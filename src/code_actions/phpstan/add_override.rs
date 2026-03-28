@@ -47,6 +47,7 @@ impl Backend {
             cache.get(uri).cloned().unwrap_or_default()
         };
 
+
         for diag in &phpstan_diags {
             if !ranges_overlap(&diag.range, &params.range) {
                 continue;
@@ -129,8 +130,7 @@ impl Backend {
         }
 
         // Look up the use_map and namespace_map for the URI.
-        let file_use_map: HashMap<String, String> =
-            self.use_map.read().get(uri).cloned().unwrap_or_default();
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
         let file_namespace: Option<String> = self.namespace_map.read().get(uri).cloned().flatten();
 
         // Decide whether to use the short form `#[Override]` with a

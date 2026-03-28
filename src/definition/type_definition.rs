@@ -121,7 +121,7 @@ impl Backend {
             }
 
             SymbolKind::FunctionCall { name, .. } => {
-                self.resolve_function_return_type_names(name, &ctx, &function_loader)
+                self.resolve_function_return_type_names(name, &ctx, &function_loader, symbol.start)
             }
 
             SymbolKind::ClassDeclaration { .. }
@@ -213,8 +213,9 @@ impl Backend {
         name: &str,
         ctx: &FileContext,
         function_loader: &dyn Fn(&str) -> Option<FunctionInfo>,
+        offset: u32,
     ) -> Vec<String> {
-        let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
+        let fqn = ctx.resolve_name_at(name, offset);
         let candidates = [fqn, name.to_string()];
 
         for candidate in &candidates {

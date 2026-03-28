@@ -22,6 +22,7 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::completion::resolver::Loaders;
 use crate::completion::variable::resolution::resolve_variable_types;
+use crate::names::OwnedResolvedNames;
 use crate::symbol_map::SymbolKind;
 use crate::types::{ClassInfo, ResolvedType};
 use crate::virtual_members::resolve_class_fully_cached;
@@ -57,8 +58,10 @@ impl Backend {
             }
         };
 
-        let file_use_map: HashMap<String, String> =
-            self.use_map.read().get(uri).cloned().unwrap_or_default();
+        let file_resolved_names: Option<Arc<OwnedResolvedNames>> =
+            self.resolved_names.read().get(uri).cloned();
+
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
 
         let file_namespace: Option<String> = self.namespace_map.read().get(uri).cloned().flatten();
 
@@ -74,10 +77,16 @@ impl Backend {
             match &span.kind {
                 // ── Class references (type hints, new Foo, extends, etc.) ─
                 SymbolKind::ClassReference { name, is_fqn } => {
+                    // Prefer mago-names byte-offset lookup when available —
+                    // it applies PHP's full name resolution rules.  Fall
+                    // back to the legacy resolve_to_fqn helper otherwise.
                     let resolved_name = if *is_fqn {
                         name.to_string()
+                    } else if let Some(ref rn) = file_resolved_names {
+                        rn.get(span.start)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| resolve_to_fqn(name, &file_use_map, &file_namespace))
                     } else {
-                        // Resolve through use map / namespace like resolve_class_name
                         resolve_to_fqn(name, &file_use_map, &file_namespace)
                     };
 

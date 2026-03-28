@@ -35,12 +35,12 @@ impl Backend {
                     name.trim_start_matches('\\').to_string()
                 } else {
                     let ctx = self.file_context(uri);
-                    Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+                    ctx.resolve_name_at(name, span.start)
                 }
             }
             MapSymbolKind::ClassDeclaration { name } => {
                 let ctx = self.file_context(uri);
-                Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+                ctx.resolve_name_at(name, span.start)
             }
             MapSymbolKind::SelfStaticParent { keyword } => {
                 let classes: Vec<std::sync::Arc<ClassInfo>> =
@@ -50,7 +50,7 @@ impl Backend {
                 if keyword == "parent" {
                     let parent_name = current_class.parent_class.as_ref()?;
                     let ctx = self.file_context(uri);
-                    Self::resolve_to_fqn(parent_name, &ctx.use_map, &ctx.namespace)
+                    ctx.resolve_name_at(parent_name, span.start)
                 } else {
                     // self or static
                     Self::build_fqn(&current_class.name, &current_class.file_namespace)

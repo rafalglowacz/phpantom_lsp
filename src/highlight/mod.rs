@@ -63,7 +63,7 @@ impl Backend {
                 let fqn = if *is_fqn {
                     name.clone()
                 } else {
-                    Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+                    ctx.resolve_name_at(name, span.start)
                 };
                 self.highlight_class(symbol_map, content, &fqn, &ctx.use_map, &ctx.namespace)
             }

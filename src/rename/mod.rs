@@ -119,7 +119,7 @@ impl Backend {
         }
 
         // Detect whether this is a class rename and resolve the FQN.
-        let class_rename_fqn = self.resolve_class_rename_fqn(&span.kind, uri);
+        let class_rename_fqn = self.resolve_class_rename_fqn(&span.kind, uri, span.start);
 
         // Find all references (including the declaration).
         let locations = self.find_references(uri, content, position, true)?;
@@ -201,14 +201,19 @@ impl Backend {
     ///
     /// Returns `Some(fqn)` when the symbol being renamed is a class
     /// reference or class declaration, `None` otherwise.
-    fn resolve_class_rename_fqn(&self, kind: &SymbolKind, uri: &str) -> Option<String> {
+    fn resolve_class_rename_fqn(
+        &self,
+        kind: &SymbolKind,
+        uri: &str,
+        offset: u32,
+    ) -> Option<String> {
         match kind {
             SymbolKind::ClassReference { name, is_fqn } => {
                 let ctx = self.file_context(uri);
                 let fqn = if *is_fqn {
                     name.clone()
                 } else {
-                    Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+                    ctx.resolve_name_at(name, offset)
                 };
                 Some(fqn.strip_prefix('\\').unwrap_or(&fqn).to_string())
             }

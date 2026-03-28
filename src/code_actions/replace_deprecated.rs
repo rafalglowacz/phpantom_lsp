@@ -57,8 +57,7 @@ impl Backend {
             }
         };
 
-        let file_use_map: HashMap<String, String> =
-            self.use_map.read().get(uri).cloned().unwrap_or_default();
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
         let file_namespace: Option<String> = self.namespace_map.read().get(uri).cloned().flatten();
         let local_classes: Vec<Arc<ClassInfo>> =
             self.ast_map.read().get(uri).cloned().unwrap_or_default();

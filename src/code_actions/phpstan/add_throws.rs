@@ -57,8 +57,7 @@ impl Backend {
             cache.get(uri).cloned().unwrap_or_default()
         };
 
-        let file_use_map: HashMap<String, String> =
-            self.use_map.read().get(uri).cloned().unwrap_or_default();
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
         let file_namespace: Option<String> = self.namespace_map.read().get(uri).cloned().flatten();
 
         for diag in &phpstan_diags {
@@ -168,8 +167,7 @@ impl Backend {
         let short_name = crate::util::short_name(&exception_fqn);
 
         // Look up the use_map and namespace_map for the URI.
-        let file_use_map: HashMap<String, String> =
-            self.use_map.read().get(uri).cloned().unwrap_or_default();
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
         let file_namespace: Option<String> = self.namespace_map.read().get(uri).cloned().flatten();
 
         // Determine if an import is needed.

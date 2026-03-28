@@ -408,6 +408,7 @@ impl Backend {
                         classes: patched_classes,
                         use_map: ctx.use_map.clone(),
                         namespace: ctx.namespace.clone(),
+                        resolved_names: ctx.resolved_names.clone(),
                     };
                     if let Some(result) =
                         self.resolve_signature(&site, &patched, position, &patched_ctx)

@@ -705,6 +705,7 @@ impl Backend {
                         classes: patched_classes,
                         use_map: ctx.use_map.clone(),
                         namespace: ctx.namespace.clone(),
+                        resolved_names: ctx.resolved_names.clone(),
                     };
                     params =
                         self.resolve_named_arg_params(&na_ctx, &patched, position, &patched_ctx);

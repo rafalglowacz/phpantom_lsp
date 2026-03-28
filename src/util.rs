@@ -789,15 +789,40 @@ impl Backend {
     pub(crate) fn file_context(&self, uri: &str) -> FileContext {
         let classes = self.ast_map.read().get(uri).cloned().unwrap_or_default();
 
+        // The legacy use_map (short name → FQN from `use` statements)
+        // remains the canonical import table.  `resolved_names` is a
+        // supplementary data source for consumers that can query by
+        // byte offset — it must NOT replace the use_map because
+        // `to_use_map()` only contains names that are actually
+        // *referenced* in the code, not all *declared* imports.
+        // The unused-imports diagnostic relies on seeing declared-but-
+        // unreferenced imports.
         let use_map = self.use_map.read().get(uri).cloned().unwrap_or_default();
 
         let namespace = self.namespace_map.read().get(uri).cloned().flatten();
+
+        let resolved_names = self.resolved_names.read().get(uri).cloned();
 
         FileContext {
             classes,
             use_map,
             namespace,
+            resolved_names,
         }
+    }
+
+    /// Return the import table (short name → FQN) for a file.
+    ///
+    /// Returns the legacy `use_map` which contains all *declared*
+    /// imports from `use` statements, regardless of whether they are
+    /// actually referenced in the code.  This is the correct source
+    /// for consumers that need the full import table (unused-import
+    /// detection, import-class code actions, name resolution helpers).
+    ///
+    /// For consumers that can resolve names by byte offset, prefer
+    /// querying `resolved_names` directly via [`file_context`] instead.
+    pub(crate) fn file_use_map(&self, uri: &str) -> std::collections::HashMap<String, String> {
+        self.use_map.read().get(uri).cloned().unwrap_or_default()
     }
 
     /// Remove a file's entries from `ast_map`, `use_map`, and `namespace_map`.
@@ -827,6 +852,7 @@ impl Backend {
         self.ast_map.write().remove(uri);
         self.symbol_maps.write().remove(uri);
         self.use_map.write().remove(uri);
+        self.resolved_names.write().remove(uri);
         self.namespace_map.write().remove(uri);
         // Remove class_index entries that belonged to this file so
         // stale FQNs don't linger after the file is closed.

@@ -253,7 +253,7 @@ impl Backend {
                 // Build FQN candidates: the resolved name, the raw name,
                 // and (if namespaced) the namespace-qualified version.
                 let ctx = self.file_context(uri);
-                let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
+                let fqn = ctx.resolve_name_at(name, cursor_offset);
                 let mut candidates = vec![fqn];
                 if name.contains('\\') && !candidates.contains(name) {
                     candidates.push(name.clone());
@@ -266,7 +266,7 @@ impl Backend {
 
             SymbolKind::ConstantReference { name } => {
                 let ctx = self.file_context(uri);
-                let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
+                let fqn = ctx.resolve_name_at(name, cursor_offset);
                 let mut candidates = vec![fqn];
                 if !candidates.contains(name) {
                     candidates.push(name.clone());
@@ -299,7 +299,7 @@ impl Backend {
             vec![name.to_string()]
         } else {
             let ctx = self.file_context(uri);
-            let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
+            let fqn = ctx.resolve_name_at(name, cursor_offset);
             let mut c = vec![fqn];
             if name.contains('\\') && !c.contains(&name.to_string()) {
                 c.push(name.to_string());
@@ -801,7 +801,7 @@ impl Backend {
         // Resolve the parent class name to a FQN using use-map / namespace.
         let ctx = self.file_context(uri);
 
-        let fqn = Self::resolve_to_fqn(parent_name, &ctx.use_map, &ctx.namespace);
+        let fqn = ctx.resolve_name_at(parent_name, cursor_offset);
 
         // Try class_index / ast_map lookup via find_class_file_content.
         if let Some((class_uri, class_content)) = self.find_class_file_content(&fqn, uri, content) {

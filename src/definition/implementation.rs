@@ -82,7 +82,7 @@ impl Backend {
                 // Class reference or declaration — resolve as a class/interface name.
                 SymbolKind::ClassReference { name, .. } | SymbolKind::ClassDeclaration { name } => {
                     let ctx = self.file_context(uri);
-                    return self.resolve_class_implementation(uri, content, name, &ctx);
+                    return self.resolve_class_implementation(uri, content, name, &ctx, sym.start);
                 }
                 // self/static/parent — resolve the keyword to the current
                 // class and check whether it is an interface/abstract.
@@ -97,7 +97,7 @@ impl Backend {
                         _ => current_class.cloned(),
                     };
                     if let Some(ref t) = target {
-                        return self.resolve_class_implementation(uri, content, &t.name, &ctx);
+                        return self.resolve_class_implementation(uri, content, &t.name, &ctx, sym.start);
                     }
                     return None;
                 }
@@ -140,10 +140,11 @@ impl Backend {
         content: &str,
         name: &str,
         ctx: &FileContext,
+        name_offset: u32,
     ) -> Option<Vec<Location>> {
         let class_loader = self.class_loader(ctx);
 
-        let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
+        let fqn = ctx.resolve_name_at(name, name_offset);
         let target = class_loader(&fqn)
             .or_else(|| class_loader(name))
             .map(Arc::unwrap_or_clone)?;

@@ -1114,6 +1114,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mago-names"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4409b7779af4714fc7c06b79fb61899fd81aaa00454e6d1c00303ca6a1c8df8e"
+dependencies = [
+ "bumpalo",
+ "foldhash 0.2.0",
+ "mago-span",
+ "mago-syntax",
+ "serde",
+ "strum 0.28.0",
+]
+
+[[package]]
 name = "mago-php-version"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1357,6 +1371,7 @@ dependencies = [
  "mago-database",
  "mago-docblock",
  "mago-formatter",
+ "mago-names",
  "mago-php-version",
  "mago-span",
  "mago-syntax",

@@ -18,10 +18,12 @@
 //! because they are import declarations, not actual usages.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
+use crate::names::OwnedResolvedNames;
 use crate::symbol_map::SymbolKind;
 use crate::types::ClassInfo;
 
@@ -54,8 +56,10 @@ impl Backend {
             }
         };
 
-        let file_use_map: HashMap<String, String> =
-            self.use_map.read().get(uri).cloned().unwrap_or_default();
+        let file_resolved_names: Option<Arc<OwnedResolvedNames>> =
+            self.resolved_names.read().get(uri).cloned();
+
+        let file_use_map: HashMap<String, String> = self.file_use_map(uri);
 
         let file_namespace: Option<String> = self.namespace_map.read().get(uri).cloned().flatten();
 
@@ -107,8 +111,17 @@ impl Backend {
 
             // Resolve the name to a fully-qualified form, then check
             // whether PHPantom can find the class.
+            //
+            // Prefer the mago-names resolved name (byte-offset lookup)
+            // when available — it applies PHP's full name resolution
+            // rules in a single pass.  Fall back to the legacy
+            // `resolve_to_fqn` helper for files without resolved names.
             let fqn = if is_fqn {
                 ref_name.to_string()
+            } else if let Some(ref rn) = file_resolved_names {
+                rn.get(span.start)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| resolve_to_fqn(ref_name, &file_use_map, &file_namespace))
             } else {
                 resolve_to_fqn(ref_name, &file_use_map, &file_namespace)
             };
@@ -163,9 +176,17 @@ impl Backend {
 
             // 3. For unqualified names without a use-map entry and without
             //    a namespace, try the raw name as a global class.
+            //
+            // When resolved_names is available, use `is_imported` to
+            // check whether the name came from a `use` statement instead
+            // of the legacy `contains_key` on the use_map.
+            let is_imported = file_resolved_names
+                .as_ref()
+                .map(|rn| rn.is_imported(span.start))
+                .unwrap_or_else(|| file_use_map.contains_key(ref_name));
             if !is_fqn
                 && !ref_name.contains('\\')
-                && !file_use_map.contains_key(ref_name)
+                && !is_imported
                 && file_namespace.is_none()
                 && self.find_or_load_class(ref_name).is_some()
             {

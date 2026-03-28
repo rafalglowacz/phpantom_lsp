@@ -128,3 +128,114 @@ impl Backend {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Grouped `use` statement: `use Foo\{Bar, Baz};`
+    ///
+    /// This is the syntax reported in issue #42 — verify that both the
+    /// legacy `extract_use_items` path and the new `mago-names` resolver
+    /// produce correct mappings.
+    #[test]
+    fn grouped_use_populates_use_map_and_resolved_names() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = r#"<?php
+namespace Controllers\Registration;
+
+use Models\Common\{Disciplines, TeamMembers, TournamentLeagueRosters, TournamentsLeagues};
+
+class RegistrationController {
+    public function foo(Disciplines $d): TeamMembers {
+    }
+}
+"#;
+        backend.update_ast(uri, content);
+
+        // ── Legacy use_map ──────────────────────────────────────────
+        let use_map = backend.use_map.read();
+        let file_map = use_map
+            .get(uri)
+            .expect("use_map should have an entry for the file");
+
+        assert_eq!(
+            file_map.get("Disciplines"),
+            Some(&"Models\\Common\\Disciplines".to_string()),
+            "Disciplines should be in the use_map"
+        );
+        assert_eq!(
+            file_map.get("TeamMembers"),
+            Some(&"Models\\Common\\TeamMembers".to_string()),
+            "TeamMembers should be in the use_map"
+        );
+        assert_eq!(
+            file_map.get("TournamentLeagueRosters"),
+            Some(&"Models\\Common\\TournamentLeagueRosters".to_string()),
+            "TournamentLeagueRosters should be in the use_map"
+        );
+        assert_eq!(
+            file_map.get("TournamentsLeagues"),
+            Some(&"Models\\Common\\TournamentsLeagues".to_string()),
+            "TournamentsLeagues should be in the use_map"
+        );
+        drop(use_map);
+
+        // ── mago-names resolved_names ───────────────────────────────
+        let resolved = backend.resolved_names.read();
+        let rn = resolved
+            .get(uri)
+            .expect("resolved_names should have an entry for the file");
+
+        // The `Disciplines` type hint in `foo(Disciplines $d)` should
+        // resolve to its FQN via the grouped import.
+        let hint_offset = content
+            .find("Disciplines $d")
+            .expect("should find Disciplines type hint") as u32;
+        assert_eq!(
+            rn.get(hint_offset),
+            Some("Models\\Common\\Disciplines"),
+            "mago-names should resolve Disciplines type hint to FQN"
+        );
+
+        // The `TeamMembers` return type should also resolve.
+        let ret_offset = content
+            .find("): TeamMembers")
+            .map(|p| p + "): ".len())
+            .expect("should find TeamMembers return type") as u32;
+        assert_eq!(
+            rn.get(ret_offset),
+            Some("Models\\Common\\TeamMembers"),
+            "mago-names should resolve TeamMembers return type to FQN"
+        );
+    }
+
+    /// Aliased grouped `use`: `use Foo\{Bar as B, Baz};`
+    #[test]
+    fn grouped_use_with_alias() {
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = "<?php\nuse Models\\Common\\{Disciplines as Disc, TeamMembers};\n\nclass X extends Disc {}\n";
+
+        backend.update_ast(uri, content);
+
+        let use_map = backend.use_map.read();
+        let file_map = use_map.get(uri).expect("use_map entry");
+
+        assert_eq!(
+            file_map.get("Disc"),
+            Some(&"Models\\Common\\Disciplines".to_string()),
+            "aliased short name should map to the full FQN"
+        );
+        assert_eq!(
+            file_map.get("TeamMembers"),
+            Some(&"Models\\Common\\TeamMembers".to_string()),
+        );
+        // The original name should NOT appear — only the alias.
+        assert!(
+            !file_map.contains_key("Disciplines"),
+            "original name should not be in the use_map when aliased"
+        );
+    }
+}

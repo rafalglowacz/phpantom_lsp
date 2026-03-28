@@ -1777,6 +1777,54 @@ pub(crate) struct FileContext {
     pub use_map: HashMap<String, String>,
     /// The file's declared namespace, if any (from `namespace_map`).
     pub namespace: Option<String>,
+    /// Per-file resolved names from `mago-names` (byte offset → FQN).
+    ///
+    /// `None` for files that were loaded via `parse_and_cache_content`
+    /// (vendor/stub files) which don't run the name resolver.
+    pub resolved_names: Option<Arc<crate::names::OwnedResolvedNames>>,
+}
+
+impl FileContext {
+    /// Resolve a name to its FQN using the best available data source.
+    ///
+    /// When `resolved_names` is available and contains an entry at
+    /// `offset`, returns the mago-names result directly (it applies
+    /// PHP's full name resolution rules in a single pass).
+    ///
+    /// Falls back to the legacy `resolve_to_fqn` logic (use-map +
+    /// namespace prefix) when `resolved_names` is not populated or
+    /// has no entry at the given offset.
+    ///
+    /// `name` is the raw identifier text (used for the fallback path).
+    /// `offset` is the starting byte offset of the identifier in the
+    /// source file.
+    pub fn resolve_name_at(&self, name: &str, offset: u32) -> String {
+        if let Some(ref rn) = self.resolved_names {
+            if let Some(fqn) = rn.get(offset) {
+                return fqn.to_string();
+            }
+        }
+        // Fallback: replicate resolve_to_fqn logic inline to avoid
+        // a cross-module dependency on diagnostics::helpers.
+        if !name.contains('\\') {
+            if let Some(fqn) = self.use_map.get(name) {
+                return fqn.clone();
+            }
+            if let Some(ref ns) = self.namespace {
+                return format!("{}\\{}", ns, name);
+            }
+            return name.to_string();
+        }
+        let first_segment = name.split('\\').next().unwrap_or(name);
+        if let Some(fqn_prefix) = self.use_map.get(first_segment) {
+            let rest = &name[first_segment.len()..];
+            return format!("{}{}", fqn_prefix, rest);
+        }
+        if let Some(ref ns) = self.namespace {
+            return format!("{}\\{}", ns, name);
+        }
+        name.to_string()
+    }
 }
 
 // ─── Eloquent Constants ─────────────────────────────────────────────────────

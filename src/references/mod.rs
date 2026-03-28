@@ -131,7 +131,7 @@ impl Backend {
                 let fqn = if *is_fqn {
                     name.clone()
                 } else {
-                    Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+                    ctx.resolve_name_at(name, span_start)
                 };
                 self.find_class_references(&fqn, include_declaration)
             }
@@ -163,7 +163,7 @@ impl Backend {
             }
             SymbolKind::FunctionCall { name, .. } => {
                 let ctx = self.file_context(uri);
-                let fqn = Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
+                let fqn = ctx.resolve_name_at(name, span_start);
                 self.find_function_references(&fqn, name, include_declaration)
             }
             SymbolKind::ConstantReference { name } => {
@@ -906,14 +906,14 @@ impl Backend {
                 if let Some(cc) = find_class_at_offset(&ctx.classes, access_offset)
                     && let Some(ref parent) = cc.parent_class
                 {
-                    let fqn = Self::resolve_to_fqn(parent, &ctx.use_map, &ctx.namespace);
+                    let fqn = ctx.resolve_name_at(parent, access_offset);
                     return vec![normalize_fqn(&fqn)];
                 }
                 Vec::new()
             }
             _ if is_static && !trimmed.starts_with('$') => {
                 // Bare class name for static access: `ClassName::method()`.
-                let fqn = Self::resolve_to_fqn(trimmed, &ctx.use_map, &ctx.namespace);
+                let fqn = ctx.resolve_name_at(trimmed, access_offset);
                 vec![normalize_fqn(&fqn)]
             }
             _ if trimmed.starts_with('$') => {

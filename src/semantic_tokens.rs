@@ -167,8 +167,8 @@ impl Backend {
                     if self.is_template_param(name, span.start, symbol_map) {
                         (TT_TYPE_PARAMETER, 0)
                     } else {
-                        let tt = self.resolve_class_token_type(name, *is_fqn, ctx);
-                        let mods = self.resolve_class_modifiers(name, *is_fqn, ctx);
+                        let tt = self.resolve_class_token_type(name, *is_fqn, ctx, span.start);
+                        let mods = self.resolve_class_modifiers(name, *is_fqn, ctx, span.start);
                         (tt, mods)
                     }
                 }
@@ -246,11 +246,11 @@ impl Backend {
                         (TT_VARIABLE, TM_READONLY | TM_DEFAULT_LIBRARY)
                     } else if keyword == "parent" {
                         // Resolve to the parent class kind when possible.
-                        let tt = self.resolve_self_static_parent_token_type(keyword, uri, ctx);
+                        let tt = self.resolve_self_static_parent_token_type(keyword, uri, ctx, span.start);
                         (tt, TM_DEFAULT_LIBRARY)
                     } else {
                         // self, static — resolve to enclosing class kind.
-                        let tt = self.resolve_self_static_parent_token_type(keyword, uri, ctx);
+                        let tt = self.resolve_self_static_parent_token_type(keyword, uri, ctx, span.start);
                         (tt, TM_DEFAULT_LIBRARY)
                     }
                 }
@@ -289,11 +289,12 @@ impl Backend {
         name: &str,
         is_fqn: bool,
         ctx: &crate::types::FileContext,
+        offset: u32,
     ) -> u32 {
         let fqn = if is_fqn {
             name.to_string()
         } else {
-            Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+            ctx.resolve_name_at(name, offset)
         };
 
         // First check in-file classes (fast path).
@@ -322,11 +323,12 @@ impl Backend {
         name: &str,
         is_fqn: bool,
         ctx: &crate::types::FileContext,
+        offset: u32,
     ) -> u32 {
         let fqn = if is_fqn {
             name.to_string()
         } else {
-            Self::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
+            ctx.resolve_name_at(name, offset)
         };
 
         // Check in-file classes.
@@ -490,13 +492,14 @@ impl Backend {
         keyword: &str,
         _uri: &str,
         ctx: &crate::types::FileContext,
+        offset: u32,
     ) -> u32 {
         if keyword == "parent" {
             // Try to resolve the parent class kind.
             if let Some(class) = ctx.classes.first()
                 && let Some(ref parent_name) = class.parent_class
             {
-                let fqn = Self::resolve_to_fqn(parent_name, &ctx.use_map, &ctx.namespace);
+                let fqn = ctx.resolve_name_at(parent_name, offset);
                 if let Some(parent_info) = self.find_or_load_class(&fqn) {
                     return kind_to_token_type(parent_info.kind);
                 }

@@ -113,6 +113,7 @@ mod highlight;
 mod hover;
 pub(crate) mod inheritance;
 mod inlay_hints;
+pub(crate) mod names;
 mod parser;
 pub(crate) mod phar;
 mod phpstan;
@@ -208,6 +209,15 @@ pub struct Backend {
     /// Maps a file URI to its `use` statement mappings (short name → fully qualified name).
     /// For example, `use Klarna\Rest\Resource;` produces `"Resource" → "Klarna\Rest\Resource"`.
     pub(crate) use_map: Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    /// Per-file name resolution data produced by `mago-names`.
+    ///
+    /// Maps a file URI to an [`OwnedResolvedNames`](names::OwnedResolvedNames)
+    /// that provides byte-offset → FQN lookups for every identifier in the
+    /// file.  Populated during `update_ast_inner` for files that are open
+    /// in the editor.  Not populated for vendor/stub files loaded via
+    /// `parse_and_cache_content_versioned` (those files are never queried
+    /// by byte offset).
+    pub(crate) resolved_names: Arc<RwLock<HashMap<String, Arc<names::OwnedResolvedNames>>>>,
     /// Maps a file URI to its declared namespace (e.g. `"Klarna\Rest\Checkout"`).
     /// Files without a namespace declaration map to `None`.
     pub(crate) namespace_map: Arc<RwLock<HashMap<String, Option<String>>>>,
@@ -531,6 +541,7 @@ impl Backend {
             vendor_dir_paths: Mutex::new(Vec::new()),
             psr4_mappings: Arc::new(RwLock::new(Vec::new())),
             use_map: Arc::new(RwLock::new(HashMap::new())),
+            resolved_names: Arc::new(RwLock::new(HashMap::new())),
             namespace_map: Arc::new(RwLock::new(HashMap::new())),
             global_functions: Arc::new(RwLock::new(HashMap::new())),
             global_defines: Arc::new(RwLock::new(HashMap::new())),
@@ -749,6 +760,7 @@ impl Backend {
             workspace_root: Arc::clone(&self.workspace_root),
             psr4_mappings: Arc::clone(&self.psr4_mappings),
             use_map: Arc::clone(&self.use_map),
+            resolved_names: Arc::clone(&self.resolved_names),
             namespace_map: Arc::clone(&self.namespace_map),
             global_functions: Arc::clone(&self.global_functions),
             global_defines: Arc::clone(&self.global_defines),
