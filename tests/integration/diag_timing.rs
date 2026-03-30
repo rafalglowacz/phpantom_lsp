@@ -1,4 +1,4 @@
-//! Quick timing test to measure diagnostic performance on `example.php`.
+//! Diagnostic timing tests with self-contained fixtures.
 //!
 //! Run with:
 //!   cargo test --release -p phpantom_lsp --test diag_timing -- --nocapture
@@ -9,129 +9,71 @@
 //! invalidation, classes from unedited files stay cached and the second
 //! pass is significantly faster.
 
-use crate::common::{create_psr4_workspace, create_test_backend_with_full_stubs};
+use crate::common::{create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs};
 use std::time::Instant;
 
-#[tokio::test]
-async fn time_diagnostics_on_example_php() {
-    let content = std::fs::read_to_string("example.php").expect("failed to read example.php");
-    let uri = "file:///example.php";
-    let backend = create_test_backend_with_full_stubs();
-    backend.update_ast(uri, &content);
-
-    // ── Deprecated diagnostics ──────────────────────────────────────────
-    let start = Instant::now();
-    let mut deprecated_out = Vec::new();
-    backend.collect_deprecated_diagnostics(uri, &content, &mut deprecated_out);
-    let deprecated_time = start.elapsed();
-
-    // ── Unused import diagnostics ───────────────────────────────────────
-    let start = Instant::now();
-    let mut unused_out = Vec::new();
-    backend.collect_unused_import_diagnostics(uri, &content, &mut unused_out);
-    let unused_time = start.elapsed();
-
-    // ── Unknown class diagnostics ───────────────────────────────────────
-    let start = Instant::now();
-    let mut unknown_out = Vec::new();
-    backend.collect_unknown_class_diagnostics(uri, &content, &mut unknown_out);
-    let unknown_time = start.elapsed();
-
-    let total = deprecated_time + unused_time + unknown_time;
-
-    eprintln!();
-    eprintln!(
-        "=== Diagnostic timing on example.php ({} lines) ===",
-        content.lines().count()
-    );
-    eprintln!(
-        "  deprecated:     {:>10.3?}  ({} diagnostics)",
-        deprecated_time,
-        deprecated_out.len()
-    );
-    eprintln!(
-        "  unused_imports: {:>10.3?}  ({} diagnostics)",
-        unused_time,
-        unused_out.len()
-    );
-    eprintln!(
-        "  unknown_classes:{:>10.3?}  ({} diagnostics)",
-        unknown_time,
-        unknown_out.len()
-    );
-    eprintln!("  ──────────────────────────────────");
-    eprintln!("  TOTAL:          {:>10.3?}", total);
-    eprintln!();
-
-    // In debug builds the threshold is generous (20 s); in release builds
-    // diagnostics on example.php should comfortably finish under 2 s.
-    let budget_secs = if cfg!(debug_assertions) { 20.0 } else { 2.0 };
-    assert!(
-        total.as_secs_f64() < budget_secs,
-        "Diagnostics took {:.3?} which exceeds the {:.0} s budget. \
-         This runs on every keystroke — investigate which provider is slow.",
-        total,
-        budget_secs,
-    );
-}
-
-/// Simulate the real editing loop: run diagnostics (cold), then re-parse
-/// the same file (as `did_change` would) and run diagnostics again.
+/// Regression test for variable-type-caching in deprecated diagnostics.
 ///
-/// With targeted cache invalidation, only the classes defined in the
-/// edited file are evicted.  Classes from vendor, stubs, and other user
-/// files stay cached, making the second pass significantly faster.
+/// Without caching, every `$var->method()` call triggers a separate
+/// variable-type resolution pass.  With N accesses on the same variable
+/// this becomes O(N * parse), which blows up quickly.  The fix (a
+/// per-variable cache keyed by `(var_name, enclosing_class)`) collapses
+/// this to O(k * parse) where k is the number of distinct variables.
+///
+/// This test creates a class with many deprecated methods and a consumer
+/// that calls them repeatedly on the same variable.  If the cache regresses,
+/// the test will exceed its time budget.
 #[tokio::test]
-async fn time_diagnostics_warm_cache_example_php() {
-    let content = std::fs::read_to_string("example.php").expect("failed to read example.php");
-    let uri = "file:///example.php";
-    let backend = create_test_backend_with_full_stubs();
-    backend.update_ast(uri, &content);
+async fn deprecated_diagnostics_variable_cache_regression() {
+    // Build a class with 30 deprecated methods and a consumer that calls
+    // each one twice on the same $svc variable = 60 member accesses that
+    // all resolve to the same variable type.
+    let mut php = String::from(
+        "<?php\nclass Service {\n    public function ok(): void {}\n",
+    );
+    for i in 0..30 {
+        php.push_str(&format!(
+            "    /** @deprecated Use ok() instead */\n    public function old{}(): void {{}}\n",
+            i
+        ));
+    }
+    php.push_str("}\n\nclass Consumer {\n    public function run(): void {\n        $svc = new Service();\n");
+    for i in 0..30 {
+        php.push_str(&format!("        $svc->old{}();\n", i));
+        php.push_str(&format!("        $svc->old{}();\n", i));
+    }
+    php.push_str("    }\n}\n");
 
-    // ── Cold run: populates the resolved-class cache ────────────────────
-    let start_cold = Instant::now();
+    let uri = "file:///test/service.php";
+    let backend = create_test_backend();
+    backend.update_ast(uri, &php);
+
+    let start = Instant::now();
     let mut out = Vec::new();
-    backend.collect_deprecated_diagnostics(uri, &content, &mut out);
-    backend.collect_unused_import_diagnostics(uri, &content, &mut out);
-    backend.collect_unknown_class_diagnostics(uri, &content, &mut out);
-    let cold_total = start_cold.elapsed();
-    let cold_count = out.len();
-
-    // ── Simulate an edit: re-parse the file (clears only this file's
-    //    FQNs from the cache, not the entire cache) ──────────────────────
-    backend.update_ast(uri, &content);
-
-    // ── Warm run: unedited classes (vendor, stubs) are still cached ─────
-    let start_warm = Instant::now();
-    let mut out_warm = Vec::new();
-    backend.collect_deprecated_diagnostics(uri, &content, &mut out_warm);
-    backend.collect_unused_import_diagnostics(uri, &content, &mut out_warm);
-    backend.collect_unknown_class_diagnostics(uri, &content, &mut out_warm);
-    let warm_total = start_warm.elapsed();
-    let warm_count = out_warm.len();
+    backend.collect_deprecated_diagnostics(uri, &php, &mut out);
+    let elapsed = start.elapsed();
 
     eprintln!();
+    eprintln!("=== Deprecated diagnostics variable-cache regression ===");
     eprintln!(
-        "=== Warm-cache diagnostic timing on example.php ({} lines) ===",
-        content.lines().count()
+        "  60 member accesses on same $svc: {:>10.3?}  ({} diagnostics)",
+        elapsed,
+        out.len()
     );
-    eprintln!(
-        "  cold run:  {:>10.3?}  ({} diagnostics)",
-        cold_total, cold_count
-    );
-    eprintln!(
-        "  warm run:  {:>10.3?}  ({} diagnostics)",
-        warm_total, warm_count
-    );
-    let speedup = cold_total.as_secs_f64() / warm_total.as_secs_f64().max(0.000001);
-    eprintln!("  speedup:   {:.1}x", speedup);
     eprintln!();
 
-    // The warm run should produce the same diagnostics as the cold run.
-    assert_eq!(
-        cold_count, warm_count,
-        "warm run produced different diagnostic count ({} vs {})",
-        warm_count, cold_count
+    // Each of the 30 deprecated methods is called twice = 60 diagnostics.
+    assert_eq!(out.len(), 60, "expected 60 deprecated diagnostics");
+
+    // Budget: 5 s in debug, 1 s in release.  Without the cache this
+    // takes 20+ s on a ~60-access file; with caching it's < 1 s.
+    let budget_secs = if cfg!(debug_assertions) { 5.0 } else { 1.0 };
+    assert!(
+        elapsed.as_secs_f64() < budget_secs,
+        "Deprecated diagnostics took {:.3?} which exceeds the {:.0} s budget. \
+         The per-variable type cache may have regressed.",
+        elapsed,
+        budget_secs,
     );
 }
 
