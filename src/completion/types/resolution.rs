@@ -41,7 +41,7 @@ pub(crate) fn resolve_property_types(
     // the merged class will have `$value` with type `Config`.
     let type_hint =
         match crate::inheritance::resolve_property_type_hint(class_info, prop_name, class_loader) {
-            Some(h) => h,
+            Some(h) => h.to_string(),
             None => return vec![],
         };
     type_hint_to_classes(&type_hint, &class_info.name, all_classes, class_loader)

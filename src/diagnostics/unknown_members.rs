@@ -848,11 +848,11 @@ fn resolve_scalar_subject_type(
             let base_classes = resolve_target_classes_expr(base, access_kind, rctx);
             for cls in &base_classes {
                 let resolved = resolve_class_fully_maybe_cached(cls, class_loader, Some(cache));
-                if let Some(hint) = resolve_property_type_hint(&resolved, property, class_loader) {
+                if let Some(parsed) = resolve_property_type_hint(&resolved, property, class_loader)
+                {
                     // Check each union branch — if ALL branches are scalar, the
                     // type is scalar.  If any branch is a class, resolve_target_classes
                     // would have returned it, so we wouldn't be here.
-                    let parsed = crate::php_type::PhpType::parse(&hint);
                     if parsed.all_members_primitive_scalar() {
                         let display = parsed
                             .non_null_type()

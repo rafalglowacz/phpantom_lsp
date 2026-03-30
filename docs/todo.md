@@ -23,7 +23,6 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                             | Impact   | Effort      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | ----------- |
-| M4  | [Migrate to mago-type-syntax](todo/mago.md#m4-mago-type-syntax)                                                                                 | Critical | Very High   |
 | H11 | [`method.visibility` / `property.visibility` — fix overriding visibility](todo/phpstan-actions.md#h11-methodvisibility--propertyvisibility--fix-overriding-visibility) | Medium | Low |
 |     | **Release 0.7.0**                                                                                                                                |          |             |
 

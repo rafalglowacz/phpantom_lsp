@@ -2102,7 +2102,7 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
         // `list<User>`, `array{name: string}`, `int[]`), emit a
         // type-string-only entry so that downstream consumers like
         // foreach resolution can still extract element types via
-        // `extract_generic_value_type`.  Skip non-informative types
+        // `PhpType::extract_value_type`.  Skip non-informative types
         // (`array`, `mixed`, etc.) so normal resolution can provide
         // more precise information.
         if crate::completion::variable::rhs_resolution::is_informative_type_string(&eff_type) {
@@ -2486,8 +2486,9 @@ fn merge_push_type(base: &str, value_type: &str) -> String {
     let mut elem_types: Vec<String> = Vec::new();
 
     // Extract existing element types from the base.
-    if let Some(existing_elem) = docblock::types::extract_iterable_element_type(base) {
-        for part in existing_elem.split('|') {
+    if let Some(existing_elem) = crate::php_type::PhpType::parse(base).extract_element_type() {
+        let existing_str = existing_elem.to_string();
+        for part in existing_str.split('|') {
             let trimmed = part.trim();
             if !trimmed.is_empty() {
                 elem_types.push(trimmed.to_string());

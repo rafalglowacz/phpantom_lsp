@@ -1485,9 +1485,12 @@ fn extract_callable_params_at(
     let param = params.get(arg_idx);
     if let Some(p) = param
         && let Some(ref hint) = p.type_hint
-        && let Some(types) = crate::docblock::extract_callable_param_types(&hint.to_string())
+        && let Some(callable_params) = hint.callable_param_types()
     {
-        return types;
+        return callable_params
+            .iter()
+            .map(|cp| cp.type_hint.to_string())
+            .collect();
     }
     vec![]
 }

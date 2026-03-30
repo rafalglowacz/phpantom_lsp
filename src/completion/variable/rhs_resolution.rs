@@ -191,8 +191,10 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
         // the enclosing function's `@return Generator<K, V, TSend, R>`.
         Expression::Yield(_) => {
             if let Some(ref ret_type) = ctx.enclosing_return_type
-                && let Some(send_type) = crate::docblock::extract_generator_send_type(ret_type)
+                && let Some(send_php_type) =
+                    crate::php_type::PhpType::parse(ret_type).generator_send_type(true)
             {
+                let send_type = send_php_type.to_string();
                 return ResolvedType::from_classes_with_hint(
                     crate::completion::type_resolution::type_hint_to_classes(
                         &send_type,
@@ -1190,16 +1192,16 @@ fn resolve_rhs_function_call<'b>(
                 if !subs.is_empty()
                     && let Some(ref ret) = func_info.return_type
                 {
-                    let ret_str = ret.to_string();
-                    let substituted = crate::inheritance::apply_substitution(&ret_str, &subs);
+                    let substituted = ret.substitute(&subs);
+                    let substituted_str = substituted.to_string();
                     let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                        &substituted,
+                        &substituted_str,
                         current_class_name,
                         all_classes,
                         class_loader,
                     );
                     if !resolved.is_empty() {
-                        return ResolvedType::from_classes_with_hint(resolved, &substituted);
+                        return ResolvedType::from_classes_with_hint(resolved, &substituted_str);
                     }
                 }
             }
@@ -1270,8 +1272,10 @@ fn resolve_rhs_function_call<'b>(
         //    `@param callable(int): Response $fn`
         if let Some(raw_type) =
             crate::docblock::find_iterable_raw_type_in_source(content, offset, &var_name)
-            && let Some(ret) = crate::docblock::extract_callable_return_type(&raw_type)
+            && let Some(ret_type) =
+                crate::php_type::PhpType::parse(&raw_type).callable_return_type()
         {
+            let ret = ret_type.to_string();
             let resolved = crate::completion::type_resolution::type_hint_to_classes(
                 &ret,
                 current_class_name,
@@ -1351,7 +1355,7 @@ fn resolve_rhs_function_call<'b>(
                 // type (e.g. `Item[]` where the `[]` suffix prevents
                 // class lookup), emit a type-string-only entry so that
                 // callers like foreach resolution can still extract the
-                // element type via `extract_generic_value_type`.
+                // element type via `PhpType::extract_value_type`.
                 if !ret_str.is_empty() {
                     return vec![ResolvedType::from_type_string(ret_str)];
                 }
@@ -1486,15 +1490,12 @@ fn resolve_rhs_method_call_inner<'b>(
             .find(|m| m.name == method_name)
             .and_then(|m| m.return_type.as_ref())
             .map(|ret| {
-                let ret_str = ret.to_string();
                 let substituted = if !template_subs.is_empty() {
-                    crate::inheritance::apply_substitution(&ret_str, &template_subs).into_owned()
+                    ret.substitute(&template_subs)
                 } else {
-                    ret_str
+                    ret.clone()
                 };
-                crate::php_type::PhpType::parse(&substituted)
-                    .replace_self(&owner.name)
-                    .to_string()
+                substituted.replace_self(&owner.name).to_string()
             });
 
         let results = Backend::resolve_method_return_types_with_args(
@@ -1609,16 +1610,12 @@ fn resolve_rhs_static_call(
                 .find(|m| m.name == method_name)
                 .and_then(|m| m.return_type.as_ref())
                 .map(|ret| {
-                    let ret_str = ret.to_string();
                     let substituted = if !template_subs.is_empty() {
-                        crate::inheritance::apply_substitution(&ret_str, &template_subs)
-                            .into_owned()
+                        ret.substitute(&template_subs)
                     } else {
-                        ret_str
+                        ret.clone()
                     };
-                    crate::php_type::PhpType::parse(&substituted)
-                        .replace_self(&owner.name)
-                        .to_string()
+                    substituted.replace_self(&owner.name).to_string()
                 });
 
             let results = Backend::resolve_method_return_types_with_args(
@@ -1674,7 +1671,8 @@ fn resolve_rhs_property_access(
     ) -> Vec<ResolvedType> {
         // Get the type hint string before resolving to ClassInfo.
         let type_hint =
-            crate::inheritance::resolve_property_type_hint(owner, prop_name, class_loader);
+            crate::inheritance::resolve_property_type_hint(owner, prop_name, class_loader)
+                .map(|t| t.to_string());
         let resolved = crate::completion::type_resolution::resolve_property_types(
             prop_name,
             owner,

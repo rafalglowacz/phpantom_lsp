@@ -282,13 +282,13 @@ pub(crate) fn resolve_method_return_type(
     class: &ClassInfo,
     method_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let merged = crate::virtual_members::resolve_class_fully(class, class_loader);
     merged
         .methods
         .iter()
         .find(|m| m.name == method_name)
-        .and_then(|m| m.return_type_str())
+        .and_then(|m| m.return_type.clone())
 }
 
 /// Look up a property's type hint through the inheritance chain.
@@ -306,13 +306,13 @@ pub(crate) fn resolve_property_type_hint(
     class: &ClassInfo,
     prop_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let merged = crate::virtual_members::resolve_class_fully(class, class_loader);
     merged
         .properties
         .iter()
         .find(|p| p.name == prop_name)
-        .and_then(|p| p.type_hint_str())
+        .and_then(|p| p.type_hint.clone())
 }
 
 /// Recursively merge members from the given traits into `merged`.

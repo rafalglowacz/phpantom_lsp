@@ -523,11 +523,11 @@ impl Backend {
                         if !subs.is_empty()
                             && let Some(ref ret) = func_info.return_type
                         {
-                            let ret_str = ret.to_string();
-                            let substituted = apply_substitution(&ret_str, &subs);
+                            let substituted = ret.substitute(&subs);
+                            let substituted_str = substituted.to_string();
                             let classes: Vec<Arc<ClassInfo>> =
                                 super::type_resolution::type_hint_to_classes(
-                                    &substituted,
+                                    &substituted_str,
                                     "",
                                     ctx.all_classes,
                                     ctx.class_loader,
@@ -568,8 +568,10 @@ impl Backend {
                     content,
                     cursor_offset as usize,
                     var_name,
-                ) && let Some(ret) = crate::docblock::extract_callable_return_type(&raw_type)
+                ) && let Some(ret_type) =
+                    crate::php_type::PhpType::parse(&raw_type).callable_return_type()
                 {
+                    let ret = ret_type.to_string();
                     let classes: Vec<Arc<ClassInfo>> =
                         super::type_resolution::type_hint_to_classes(
                             &ret,
@@ -768,12 +770,12 @@ impl Backend {
             if !template_subs.is_empty()
                 && let Some(ref ret) = method.return_type
             {
-                let ret_str = ret.to_string();
-                let substituted = apply_substitution(&ret_str, template_subs);
-                if substituted.as_ref() != ret_str.as_str() {
+                let substituted = ret.substitute(template_subs);
+                if &substituted != ret {
+                    let substituted_str = substituted.to_string();
                     let classes: Vec<Arc<ClassInfo>> =
                         super::type_resolution::type_hint_to_classes(
-                            &substituted,
+                            &substituted_str,
                             &class_info.name,
                             all_classes,
                             class_loader,
@@ -1068,7 +1070,7 @@ impl Backend {
                         method_name,
                         class_loader,
                     ) {
-                        return Some(rt);
+                        return Some(rt.to_string());
                     }
                 }
             }
@@ -1092,7 +1094,7 @@ impl Backend {
                         class_loader,
                     )
                 {
-                    return Some(rt);
+                    return Some(rt.to_string());
                 }
             }
         }
@@ -1110,6 +1112,7 @@ impl Backend {
                 for cls in &lhs_classes {
                     if let Some(rt) =
                         crate::inheritance::resolve_property_type_hint(cls, prop_name, class_loader)
+                            .map(|t| t.to_string())
                     {
                         return Some(rt);
                     }

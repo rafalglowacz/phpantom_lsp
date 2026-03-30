@@ -507,9 +507,8 @@ impl PhpType {
     ///   - `int`                           → `None`
     ///
     /// When `skip_scalar` is true, returns `None` if the extracted type
-    /// is a scalar (matching `extract_generic_value_type` behaviour for
-    /// class-based completion). When false, returns any element type
-    /// (matching `extract_iterable_element_type` behaviour).
+    /// is a scalar (for class-based completion). When false, returns any
+    /// element type (matching `extract_iterable_element_type` behaviour).
     pub fn extract_value_type(&self, skip_scalar: bool) -> Option<&PhpType> {
         match self {
             PhpType::Array(inner) => {
@@ -550,7 +549,7 @@ impl PhpType {
     ///   - `User[]`               → `None` (shorthand → implicit int key)
     ///
     /// When `skip_scalar` is true, returns `None` if the key type is
-    /// scalar (matching `extract_generic_key_type` behaviour).
+    /// scalar.
     pub fn extract_key_type(&self, skip_scalar: bool) -> Option<&PhpType> {
         match self {
             PhpType::Generic(_, args) if args.len() >= 2 => {
@@ -573,6 +572,83 @@ impl PhpType {
     /// Unlike `extract_value_type(true)`, this never skips scalars.
     pub fn extract_element_type(&self) -> Option<&PhpType> {
         self.extract_value_type(false)
+    }
+
+    /// Extract parameter types from a `Callable` variant.
+    ///
+    /// Returns the parameter list for callable/Closure types without
+    /// round-tripping through string serialization.
+    ///
+    ///   - `callable(int, string): bool` → `Some(&[CallableParam { .. }, ..])`
+    ///   - `?Closure(int): void`         → `Some(&[CallableParam { .. }])`
+    ///   - `Closure(int)|null`           → `Some(&[CallableParam { .. }])`
+    ///   - `int`                         → `None`
+    pub fn callable_param_types(&self) -> Option<&[CallableParam]> {
+        match self {
+            PhpType::Callable { params, .. } => Some(params.as_slice()),
+            PhpType::Nullable(inner) => inner.callable_param_types(),
+            PhpType::Union(members) => {
+                for member in members {
+                    if let Some(params) = member.callable_param_types() {
+                        return Some(params);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract the return type from a `Callable` variant.
+    ///
+    /// Returns the return type for callable/Closure types without
+    /// round-tripping through string serialization.
+    ///
+    ///   - `callable(int): User`  → `Some(Named("User"))`
+    ///   - `Closure(): void`      → `Some(Named("void"))`
+    ///   - `?Closure(): User`     → `Some(Named("User"))`
+    ///   - `callable`             → `None` (no return type specified)
+    ///   - `int`                  → `None`
+    pub fn callable_return_type(&self) -> Option<&PhpType> {
+        match self {
+            PhpType::Callable { return_type, .. } => return_type.as_deref(),
+            PhpType::Nullable(inner) => inner.callable_return_type(),
+            PhpType::Union(members) => {
+                for member in members {
+                    if let Some(ret) = member.callable_return_type() {
+                        return Some(ret);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Extract the TSend type (3rd generic parameter) from a Generator.
+    ///
+    /// `Generator<TKey, TValue, TSend, TReturn>` — the send type is the
+    /// 3rd parameter (index 2).
+    ///
+    ///   - `Generator<int, string, MyClass, void>` → `Some(Named("MyClass"))`
+    ///   - `?Generator<int, string, MyClass, void>` → `Some(Named("MyClass"))`
+    ///   - `Generator<int, string>`                 → `None` (fewer than 3 params)
+    ///   - `int`                                    → `None`
+    ///
+    /// When `skip_scalar` is true, returns `None` if the send type is
+    /// scalar (matching the pattern used by `extract_value_type`).
+    pub fn generator_send_type(&self, skip_scalar: bool) -> Option<&PhpType> {
+        match self {
+            PhpType::Generic(name, args) if Self::short_name_of(name) == "Generator" => {
+                match args.get(2) {
+                    Some(send) if skip_scalar && send.is_scalar() => None,
+                    Some(send) => Some(send),
+                    None => None,
+                }
+            }
+            PhpType::Nullable(inner) => inner.generator_send_type(skip_scalar),
+            _ => None,
+        }
     }
 
     /// Return the non-null part of a type.
@@ -2999,5 +3075,126 @@ mod tests {
         let subs = make_subs(&[("T", "Countable")]);
         let result = ty.substitute(&subs);
         assert_eq!(result.to_string(), "interface-string<Countable>");
+    }
+
+    // ─── callable_param_types tests ─────────────────────────────────────────
+
+    #[test]
+    fn callable_param_types_on_callable() {
+        let ty = PhpType::parse("callable(int, string): bool");
+        let params = ty.callable_param_types().unwrap();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].type_hint, PhpType::Named("int".to_owned()));
+        assert_eq!(params[1].type_hint, PhpType::Named("string".to_owned()));
+    }
+
+    #[test]
+    fn callable_param_types_nullable_callable() {
+        let ty = PhpType::parse("?Closure(int): void");
+        let params = ty.callable_param_types().unwrap();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].type_hint, PhpType::Named("int".to_owned()));
+    }
+
+    #[test]
+    fn callable_param_types_union_with_callable() {
+        let ty = PhpType::parse("Closure(string, int): void|null");
+        let params = ty.callable_param_types().unwrap();
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].type_hint, PhpType::Named("string".to_owned()));
+        assert_eq!(params[1].type_hint, PhpType::Named("int".to_owned()));
+    }
+
+    #[test]
+    fn callable_param_types_non_callable() {
+        let ty = PhpType::Named("int".to_owned());
+        assert!(ty.callable_param_types().is_none());
+    }
+
+    // ─── callable_return_type tests ─────────────────────────────────────────
+
+    #[test]
+    fn callable_return_type_with_return() {
+        let ty = PhpType::parse("callable(int): User");
+        let ret = ty.callable_return_type().unwrap();
+        assert_eq!(*ret, PhpType::Named("User".to_owned()));
+    }
+
+    #[test]
+    fn callable_return_type_without_return() {
+        let ty = PhpType::Callable {
+            kind: "callable".to_owned(),
+            params: vec![],
+            return_type: None,
+        };
+        assert!(ty.callable_return_type().is_none());
+    }
+
+    #[test]
+    fn callable_return_type_nullable_callable() {
+        let ty = PhpType::parse("?Closure(string): User");
+        let ret = ty.callable_return_type().unwrap();
+        assert_eq!(*ret, PhpType::Named("User".to_owned()));
+    }
+
+    #[test]
+    fn callable_return_type_union_with_callable() {
+        let ty = PhpType::parse("Closure(int): Response|null");
+        let ret = ty.callable_return_type().unwrap();
+        assert_eq!(*ret, PhpType::Named("Response".to_owned()));
+    }
+
+    #[test]
+    fn callable_return_type_non_callable() {
+        let ty = PhpType::Named("string".to_owned());
+        assert!(ty.callable_return_type().is_none());
+    }
+
+    // ─── generator_send_type tests ──────────────────────────────────────────
+
+    #[test]
+    fn generator_send_type_full_generator() {
+        let ty = PhpType::parse("Generator<int, string, MyClass, void>");
+        let send = ty.generator_send_type(false).unwrap();
+        assert_eq!(*send, PhpType::Named("MyClass".to_owned()));
+    }
+
+    #[test]
+    fn generator_send_type_skip_scalar_false_returns_scalar() {
+        let ty = PhpType::parse("Generator<int, string, int, void>");
+        let send = ty.generator_send_type(false).unwrap();
+        assert_eq!(*send, PhpType::Named("int".to_owned()));
+    }
+
+    #[test]
+    fn generator_send_type_skip_scalar_true_skips_scalar() {
+        let ty = PhpType::parse("Generator<int, string, int, void>");
+        assert!(ty.generator_send_type(true).is_none());
+    }
+
+    #[test]
+    fn generator_send_type_skip_scalar_true_keeps_class() {
+        let ty = PhpType::parse("Generator<int, string, MyClass, void>");
+        let send = ty.generator_send_type(true).unwrap();
+        assert_eq!(*send, PhpType::Named("MyClass".to_owned()));
+    }
+
+    #[test]
+    fn generator_send_type_fewer_than_three_params() {
+        let ty = PhpType::parse("Generator<int, string>");
+        assert!(ty.generator_send_type(false).is_none());
+    }
+
+    #[test]
+    fn generator_send_type_non_generator() {
+        let ty = PhpType::Named("Collection".to_owned());
+        assert!(ty.generator_send_type(false).is_none());
+    }
+
+    #[test]
+    fn generator_send_type_nullable_generator() {
+        let ty = PhpType::parse("?Generator<int, string, MyClass, void>");
+        let send = ty.generator_send_type(false).unwrap();
+        assert_eq!(*send, PhpType::Named("MyClass".to_owned()));
     }
 }

@@ -175,7 +175,7 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
         let arr_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
         // If the raw type already has generic params, return it as-is
-        // so downstream `extract_generic_value_type` can extract the
+        // so downstream `PhpType::extract_value_type` can extract the
         // element type.  Otherwise it's a plain class name and we
         // can't infer element type.
         if crate::php_type::PhpType::parse(&raw)
@@ -344,8 +344,8 @@ pub(in crate::completion) fn try_infer_from_generator_yield(
     ctx: &VarResolutionCtx<'_>,
 ) -> Vec<ClassInfo> {
     // Only applies to Generator return types.
-    let value_type = match crate::docblock::extract_generator_value_type_raw(return_type) {
-        Some(vt) => vt,
+    let value_type = match crate::php_type::PhpType::parse(return_type).extract_value_type(false) {
+        Some(vt) => vt.to_string(),
         None => return vec![],
     };
 

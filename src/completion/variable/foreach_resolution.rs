@@ -233,7 +233,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     // ── Expand type aliases before extracting generic element type ──
     // When the raw type is a type alias (e.g. `UserList` defined via
     // `@phpstan-type UserList array<int, User>`), expand it so that
-    // `extract_generic_value_type` can see the underlying generic type.
+    // `PhpType::extract_value_type` can see the underlying generic type.
     let raw_type = raw_type.map(|rt| {
         crate::completion::type_resolution::resolve_type_alias(
             &rt,
@@ -267,7 +267,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     // in the return type string.
     let iterable_classes = if let Some(ref rt) = raw_type {
         // raw_type is a class name like "PaymentOptionLocaleCollection"
-        // (extract_generic_value_type returned None above).
+        // (PhpType::extract_value_type returned None above).
         crate::completion::type_resolution::type_hint_to_classes(
             rt,
             &ctx.current_class.name,
@@ -395,7 +395,7 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     // ── Expand type aliases before extracting generic key type ──
     // Same as the value-type path: when the raw type is a type alias
     // (e.g. `UserList` defined via `@phpstan-type UserList array<int, User>`),
-    // expand it so that `extract_generic_key_type` can see the underlying
+    // expand it so that `PhpType::extract_key_type` can see the underlying
     // generic type.
     let raw_type = raw_type.map(|rt| {
         crate::completion::type_resolution::resolve_type_alias(
@@ -674,7 +674,7 @@ fn is_transitive_iterable(
 /// When the RHS type is an array shape (`array{key: Type, …}`), the
 /// destructured variable's key is matched against the shape entries.
 /// For positional (value-only) elements, the 0-based index is used as
-/// the key.  Falls back to `extract_generic_value_type` for generic
+/// the key.  Falls back to `PhpType::extract_value_type` for generic
 /// iterable types (`list<User>`, `array<int, User>`, `User[]`).
 pub(in crate::completion) fn try_resolve_destructured_type<'b>(
     assignment: &'b Assignment<'b>,
@@ -789,7 +789,7 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
     // Same as the foreach value/key paths: when the raw type is a type
     // alias (e.g. `UserData` defined via `@phpstan-type`), expand it so
     // that `extract_array_shape_value_type` and
-    // `extract_generic_value_type` can see the underlying type.
+    // `PhpType::extract_value_type` can see the underlying type.
     let raw_type = raw_type.map(|rt| {
         crate::completion::type_resolution::resolve_type_alias(
             &rt,

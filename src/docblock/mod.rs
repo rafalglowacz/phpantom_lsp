@@ -17,10 +17,7 @@
 //! - `types`: Type cleaning utilities, split into focused sub-files:
 //!   - `type_strings`: Foundational type string manipulation (constants,
 //!     splitting, cleaning, stripping, scalar checks, self/static replacement)
-//!   - `generics`: Generic argument parsing and iterable element/key extraction
 //!   - `shapes`: Array shape and object shape parsing
-//!   - `callable_types`: Callable/Closure return type and parameter extraction,
-//!     Generator TSend/TValue extraction
 
 mod conditional;
 pub(crate) mod parser;
@@ -32,8 +29,6 @@ mod virtual_members;
 // Type sub-modules — declared here (sibling files to `types.rs`) so
 // the Rust module system can find them.  `types.rs` re-exports their
 // public items so existing `use …::types::*` call sites keep working.
-pub(crate) mod callable_types;
-pub(crate) mod generics;
 pub(crate) mod shapes;
 pub(crate) mod type_strings;
 
@@ -85,8 +80,6 @@ pub use conditional::{extract_conditional_return_type, extract_conditional_retur
 
 // Type utilities
 pub use types::{
-    clean_type, extract_array_shape_value_type, extract_callable_param_types,
-    extract_callable_return_type, extract_generator_send_type, extract_generator_value_type_raw,
-    extract_generic_key_type, extract_generic_value_type, extract_iterable_element_type,
-    extract_object_shape_property_type, is_object_shape, parse_array_shape, parse_object_shape,
+    clean_type, extract_array_shape_value_type, extract_object_shape_property_type,
+    is_object_shape, parse_array_shape, parse_object_shape,
 };

@@ -20,6 +20,7 @@ use crate::completion::named_args::{
     extract_call_expression, find_enclosing_open_paren, position_to_char_offset,
     split_args_top_level,
 };
+use crate::php_type::PhpType;
 use crate::symbol_map::SymbolMap;
 use crate::types::*;
 use crate::util::position_to_offset;
@@ -248,8 +249,8 @@ fn build_param_documentation(param: &ParameterInfo) -> Option<Documentation> {
     let native = param.native_type_hint.as_deref();
     let desc = param.description.as_deref();
 
-    let show_effective = match (effective.as_deref(), native) {
-        (Some(e), Some(n)) => !crate::hover::types_equivalent(e, n),
+    let show_effective = match (&param.type_hint, native) {
+        (Some(eff), Some(nat)) => !eff.equivalent(&PhpType::parse(nat)),
         (Some(_), None) => true,
         _ => false,
     };

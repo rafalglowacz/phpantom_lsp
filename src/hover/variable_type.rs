@@ -1582,9 +1582,17 @@ fn find_callable_params_on_method(
     let method = class.methods.iter().find(|m| m.name == method_name)?;
     let param = method.parameters.get(arg_idx)?;
     let hint = param.type_hint.as_ref()?;
-    let hint_str = hint.to_string();
-    let types = crate::docblock::extract_callable_param_types(&hint_str)?;
-    if types.is_empty() { None } else { Some(types) }
+    let callable_params = hint.callable_param_types()?;
+    if callable_params.is_empty() {
+        None
+    } else {
+        Some(
+            callable_params
+                .iter()
+                .map(|cp| cp.type_hint.to_string())
+                .collect(),
+        )
+    }
 }
 
 /// Extract the raw docblock text for a method/function at the given

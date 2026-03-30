@@ -315,12 +315,11 @@ fn extract_custom_collection(
 /// Collection.
 fn extract_custom_collection_from_new_collection(methods: &[MethodInfo]) -> Option<String> {
     let method = methods.iter().find(|m| m.name == "newCollection")?;
-    let return_type_str = method.return_type.as_ref()?.to_string();
-    let return_type = return_type_str.as_str();
+    let return_type = method.return_type.as_ref()?;
+    let return_type_str = return_type.to_string();
 
     // Strip generic parameters (e.g. `TaskCollection<int, static>` → `TaskCollection`).
-    let parsed = PhpType::parse(return_type);
-    let base = parsed.base_name().unwrap_or(return_type);
+    let base = return_type.base_name().unwrap_or(return_type_str.as_str());
 
     // Compare without leading backslash for the standard Collection check,
     // but preserve the original form so that `resolve_name` in

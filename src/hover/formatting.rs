@@ -172,12 +172,12 @@ pub(super) fn build_param_return_section(
     let mut entries = Vec::new();
 
     for p in params {
-        let eff_str = p.type_hint_str();
-        let type_differs = match (eff_str.as_deref(), p.native_type_hint.as_deref()) {
-            (Some(eff), Some(nat)) => !PhpType::parse(eff).equivalent(&PhpType::parse(nat)),
-            (Some(eff), None) => eff != "mixed",
+        let type_differs = match (&p.type_hint, p.native_type_hint.as_deref()) {
+            (Some(eff_type), Some(nat)) => !eff_type.equivalent(&PhpType::parse(nat)),
+            (Some(eff_type), None) => eff_type.to_string() != "mixed",
             _ => false,
         };
+        let eff_str = p.type_hint_str();
         let has_desc = p.description.as_ref().is_some_and(|d| !d.is_empty());
 
         if !type_differs && !has_desc {
@@ -564,42 +564,6 @@ pub(crate) fn shorten_type_string(ty: &str) -> String {
         result.push_str(short_name(&ty[segment_start..]));
     }
     result
-}
-
-/// Check whether two type strings refer to the same type, ignoring
-/// namespace qualification differences.
-///
-/// Returns `true` when the only difference between `a` and `b` is that
-/// one uses a fully-qualified class name (e.g. `App\Models\User`) while
-/// the other uses the short name (`User`).  Handles nullable (`?`),
-/// union (`|`), and intersection (`&`) types by comparing each component
-/// after stripping namespace prefixes and a leading `\`.
-pub(crate) fn types_equivalent(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-
-    // Strip nullable `?` prefix from both sides.
-    let a = a.strip_prefix('?').unwrap_or(a);
-    let b = b.strip_prefix('?').unwrap_or(b);
-
-    // Split on `|` and `&` to handle union and intersection types.
-    // We compare component counts first, then each pair after
-    // normalising namespace prefixes.
-    let parts_a: Vec<&str> = a.split('|').flat_map(|part| part.split('&')).collect();
-    let parts_b: Vec<&str> = b.split('|').flat_map(|part| part.split('&')).collect();
-
-    if parts_a.len() != parts_b.len() {
-        return false;
-    }
-
-    // Sort both sides so that `Foo|null` matches `null|Foo`.
-    let mut sorted_a: Vec<&str> = parts_a.iter().map(|s| short_name(s)).collect();
-    let mut sorted_b: Vec<&str> = parts_b.iter().map(|s| short_name(s)).collect();
-    sorted_a.sort_unstable();
-    sorted_b.sort_unstable();
-
-    sorted_a == sorted_b
 }
 
 /// Return the short (unqualified) class name from a potentially

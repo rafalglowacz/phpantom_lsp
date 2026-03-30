@@ -255,7 +255,7 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
 
         if let Some(cls) = owner {
             return crate::inheritance::resolve_method_return_type(&cls, method_name, class_loader)
-                .map(|ret| PhpType::parse(&ret).replace_self(&cls.name).to_string());
+                .map(|ret| ret.replace_self(&cls.name).to_string());
         }
         return None;
     }
@@ -282,7 +282,7 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
 
         if let Some(cls) = owner {
             return crate::inheritance::resolve_method_return_type(&cls, method_name, class_loader)
-                .map(|ret| PhpType::parse(&ret).replace_self(&cls.name).to_string());
+                .map(|ret| ret.replace_self(&cls.name).to_string());
         }
         return None;
     }
@@ -435,6 +435,7 @@ fn resolve_raw_type_from_call_chain(
     // Resolve LHS to a class.
     let owner = resolve_lhs_to_class(lhs, current_class, all_classes, class_loader)?;
     crate::inheritance::resolve_method_return_type(&owner, method_name, class_loader)
+        .map(|ret| ret.to_string())
 }
 
 /// Resolve the left-hand side of a chained expression to a `ClassInfo`.
@@ -506,7 +507,8 @@ fn resolve_lhs_to_class(
                 .or_else(|| inner_callee.strip_prefix("$this?->"))
             {
                 let owner = current_class?;
-                return crate::inheritance::resolve_method_return_type(owner, m, class_loader);
+                return crate::inheritance::resolve_method_return_type(owner, m, class_loader)
+                    .map(|ret| ret.to_string());
             }
             // `ClassName::method`
             if let Some((cls_part, m_part)) = inner_callee.rsplit_once("::") {
@@ -525,7 +527,8 @@ fn resolve_lhs_to_class(
                         &cls,
                         m_part,
                         class_loader,
-                    );
+                    )
+                    .map(|ret| ret.to_string());
                 }
             }
             None
@@ -551,8 +554,7 @@ fn resolve_lhs_to_class(
         && prop.chars().all(|c| c.is_alphanumeric() || c == '_')
     {
         let owner = current_class?;
-        let type_str = crate::inheritance::resolve_property_type_hint(owner, prop, class_loader)?;
-        let parsed = PhpType::parse(&type_str);
+        let parsed = crate::inheritance::resolve_property_type_hint(owner, prop, class_loader)?;
         let effective = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
         if let Some(base) = effective.base_name() {
             let lookup = short_name(base);

@@ -24,7 +24,6 @@ use mago_syntax::ast::*;
 ///     haystack's element type when the third argument is `true`.
 use std::sync::Arc;
 
-use crate::docblock;
 use crate::types::{AssertionKind, ClassInfo, ParameterInfo, TypeAssertion};
 
 use super::conditional::extract_class_string_from_expr;
@@ -1942,7 +1941,9 @@ fn resolve_in_array_element_type(
 ) -> Option<String> {
     let raw_type =
         crate::completion::variable::resolution::resolve_arg_raw_type(haystack_expr, ctx)?;
-    docblock::types::extract_iterable_element_type(&raw_type)
+    crate::php_type::PhpType::parse(&raw_type)
+        .extract_element_type()
+        .map(|t| t.to_string())
 }
 
 /// Apply `in_array($var, $haystack, true)` narrowing when the call
