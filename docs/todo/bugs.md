@@ -96,3 +96,77 @@ rather than the property's type hint.
 
 **Impact in shared codebase:** 1 false positive
 (`MobilePayConnectionManager::$instance->setMobilePayConnectionConfiguration()`).
+
+---
+
+#### B18. Null-init variable + loop reassignment doesn't build union type
+
+| | |
+|---|---|
+| **Impact** | Low |
+| **Effort** | Medium |
+
+When a variable is initialized to `null` and conditionally reassigned
+inside a loop, PHPantom resolves the variable to `null` without
+considering the reassignment sites.  Guard clauses like
+`$var !== null` can't narrow the type because the variable was never
+resolved to a union containing both `null` and the real type.
+
+**Reproducer:**
+
+```php
+$lastPaidEnd = null;
+foreach ($periods as $period) {
+    $lastPaidEnd = $period->end;  // CarbonImmutable
+}
+if ($lastPaidEnd !== null && $lastPaidEnd->diffInDays() > 30) { ... }
+//                           ^^^^^^^^^^^^ "on type 'null'"
+```
+
+PHPantom should build a union `CarbonImmutable|null` from both
+assignment sites, then the `!== null` guard should narrow it to
+`CarbonImmutable`.
+
+**Root cause:** `walk_statements_for_assignments` in
+`src/completion/variable/resolution.rs` doesn't aggregate all
+assignment sites for a variable into a union type.  It picks the
+first or most recent assignment rather than building a union from
+all reachable assignments.
+
+**Impact in shared codebase:** 1 false positive
+(CustomerService.php L302 — `diffInDays` on `null`).
+
+---
+
+#### B19. Guard clause with `continue`/`return` doesn't narrow type
+
+| | |
+|---|---|
+| **Impact** | Low |
+| **Effort** | Low |
+
+After `if (!$var) { continue; }` or `if (!$var) { return; }`,
+PHPantom should narrow `$var` to non-null (or non-falsy) in the
+code that follows.  Currently the nullable type persists.
+
+**Reproducer:**
+
+```php
+$warehouseOrderline = $warehouseOrderLines[$key] ?? null;
+if (!$warehouseOrderline) {
+    continue;
+}
+$warehouseOrderline->actualAmount;  // "on type 'null'"
+```
+
+After the `continue`, `$warehouseOrderline` is guaranteed non-null,
+but PHPantom still sees `null`.
+
+**Root cause:** `src/completion/variable/resolution.rs` — early-exit
+narrowing (guard clause + `continue`/`return`/`throw`/`break`) is
+not implemented for the variable type resolution path.
+
+**Impact in shared codebase:** 2 false positives (PCNService.php
+L1073 `actualAmount`, L1077 `amount`).
+
+---

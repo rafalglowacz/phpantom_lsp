@@ -565,10 +565,271 @@ substitution map isn't threaded through.
   inherited through the parent chain, propagate the accumulated
   `@extends` template bindings into the mixin's generic arguments.
 
-**Impact if fixed:** ~125 diagnostics eliminated in luxplus/shared
-(the majority of remaining false positives).  Every Eloquent
-relationship chain through `HasMany`, `HasOne`, `BelongsTo`,
-`BelongsToMany`, etc. hits this pattern.
+**Impact if fixed:** ~60 diagnostics remaining in luxplus/shared
+(~40 anonymous-chain + ~20 cascading unresolved_member_access).
+Down from ~125 at initial discovery — partial fixes have landed but
+the deepest chains still fail.  Every Eloquent relationship chain
+through `HasMany`, `HasOne`, `BelongsTo`, `BelongsToMany`, etc.
+hits this pattern.
+
+---
+
+## T15. `class-string<T>` static dispatch resolution
+**Impact: Medium · Effort: Medium**
+
+PHPantom doesn't resolve `class-string<T>` type annotations for
+static member access.  When a parameter is annotated as
+`@param class-string<BackedEnum> $class`, static calls like
+`$class::cases()` should resolve to the methods of `BackedEnum`,
+and `$class::KEY` should resolve to constants of the bound type.
+Currently PHPantom treats `$class` as a plain `string`.
+
+**Reproducer:**
+
+```php
+/**
+ * @template T of CustomerModel
+ * @param class-string<T> $class
+ * @return null|T
+ */
+private function parseModel(string $class): ?CustomerModel
+{
+    $class::KEY;                    // "Cannot resolve type of '$class'"
+    return $class::from($values);   // "Cannot resolve type of '$class'"
+}
+```
+
+Also affects iteration over static method results:
+
+```php
+/** @param class-string<BackedEnum> $class */
+foreach ($class::cases() as $item) {
+    $item->name;   // unresolved — $item type unknown
+    $item->value;  // unresolved
+}
+```
+
+**What should work:** `class-string<T>` should make static member
+access (`::method()`, `::CONST`, `::$prop`) resolve against `T`.
+Iteration on `$class::cases()` should yield items typed as `T`.
+
+**Where to fix:**
+- `src/completion/variable/resolution.rs` — variable type resolution
+  for `class-string` types.
+- `src/completion/call_resolution.rs` — static method dispatch should
+  unwrap `class-string<T>` to resolve against `T`.
+
+**Discovered in:** analyze-triage iteration 7 (F4b).  
+**Impact in shared codebase:** 7 diagnostics (OptionList.php ×3,
+CustomerDocument.php ×4).
+
+---
+
+## T16. Closure parameter type inference from generic host method
+**Impact: Medium · Effort: Medium**
+
+When a closure is passed to a method like
+`Collection::each(callable(TValue): void)`, PHPantom should infer
+the closure parameter type from the host method's template-bound
+parameter type.  Currently, untyped closure parameters remain
+unresolved.
+
+**Reproducer:**
+
+```php
+/** @var Collection<int, CustomerDocument> $collection */
+$collection->each(function ($class) {
+    $class->someMethod();  // "Cannot resolve type of '$class'"
+});
+```
+
+**What should work:** The `each` method's `@param` says the callable
+receives `TValue`.  If `TValue` is bound to `CustomerDocument`, the
+closure's `$class` should be typed `CustomerDocument`.
+
+**Where to fix:**
+- `src/completion/variable/resolution.rs` — closure parameter inference.
+- `src/completion/variable/rhs_resolution.rs` — resolve the host
+  method's parameter type and map template arguments to the closure's
+  parameter positions.
+
+**Discovered in:** analyze-triage iteration 5 (F4).  
+**Impact in shared codebase:** ~5 diagnostics.
+
+---
+
+## T17. Method-level template binding from closure return type
+**Impact: Medium · Effort: Medium**
+
+Methods like `Collection::reduce()` declare a method-level template
+parameter (`TReduceReturnType`) whose binding depends on the
+closure argument's return type.  PHPantom doesn't infer method-level
+template bindings from closure return types.
+
+**Reproducer:**
+
+```php
+$total = $products->reduce(
+    fn(Decimal $carry, Orderproduct $p): Decimal => $carry->add($p->price),
+    new Decimal('0')
+);
+$total->add($order->postage);
+//     ^^^ "subject type 'TReduceReturnType' could not be resolved"
+```
+
+**What should work:** The closure's return type annotation
+(`Decimal`) should bind `TReduceReturnType = Decimal`, making
+`reduce()` return `Decimal`.
+
+**Where to fix:**
+- `src/completion/call_resolution.rs` —
+  `resolve_method_return_types_with_args`: when a method has a
+  method-level template parameter, check whether a closure argument
+  provides a return type annotation that can bind it.
+
+**Discovered in:** analyze-triage iteration 7 (F13).  
+**Impact in shared codebase:** 3 diagnostics + 7 cascading
+(FlowService.php L106, L343, L517).
+
+---
+
+## T18. `@implements` generic interface parameter type inference
+**Impact: Medium · Effort: Medium**
+
+When a class declares `@implements Interface<ConcreteType>`, the
+generic binding should propagate to method parameter types inherited
+from that interface.  Currently, parameters with no native type hint
+that get their type from the interface's template parameter remain
+unresolved.
+
+**Reproducer:**
+
+```php
+/** @implements WithMapping<ProductTranslation> */
+final class ProductExport implements WithMapping {
+    public function map($productTranslation): array {
+        $productTranslation->product;
+        // "subject type could not be resolved"
+    }
+}
+```
+
+**What should work:** `$productTranslation` should be typed
+`ProductTranslation` via the `@implements WithMapping<ProductTranslation>`
+annotation, which binds the interface's template parameter.
+
+**Where to fix:**
+- `src/parser/classes.rs` — interface generic binding propagation to
+  method parameters.  When resolving a method parameter's type, check
+  whether the containing class has an `@implements` annotation that
+  binds a template parameter used in the interface method's signature.
+
+**Discovered in:** analyze-triage iteration 7 (F14).  
+**Impact in shared codebase:** 7 diagnostics (ProductExport.php —
+`name` property L51, L54, L57, L62, L63, L64, L68).
+
+---
+
+## T19. Inherited property template substitution on `$this->`
+**Impact: Medium · Effort: Low**
+
+When a class extends a generic parent and binds its template
+parameters (e.g. `@extends Collection<int, X>`), inherited property
+types should have the template parameters substituted.  Currently,
+`$this->items` on a class extending `Collection<int, X>` still
+resolves to `array<TKey, TValue>` instead of `array<int, X>`.
+
+**Reproducer:**
+
+```php
+/** @extends Collection<int, PurchaseFileDeviationMessage> */
+final class PurchaseFileDeviationMessageCollection extends Collection {
+    public function addIfUnique(PurchaseFileDeviationMessage $message): void {
+        array_any($this->items, fn($item) => $item->type === ...);
+        //                         ^^^^^ unresolved
+    }
+}
+```
+
+**What should work:** `$this->items` should resolve to
+`array<int, PurchaseFileDeviationMessage>`.
+
+**Additional note:** The `array_any()` / `array_all()` functions are
+PHP 8.4 built-ins that PHPantom may lack stubs for.  Even with
+explicit type hints on the closure parameter, the analyzer reports
+it as unresolved when the host function is unknown.
+
+**Where to fix:**
+- `src/completion/resolver.rs` — property type resolution on `$this`.
+- `src/parser/classes.rs` — `resolve_class_with_inheritance`: apply
+  template substitution to inherited property types.
+- Check/add stubs for `array_any()` / `array_all()` (PHP 8.4).
+
+**Discovered in:** analyze-triage iteration 5 (F3).  
+**Impact in shared codebase:** ~5 diagnostics
+(PurchaseFileDeviationMessageCollection.php ×4,
+PurchaseFileProductCollection.php ×1).
+
+---
+
+## T20. `static` return type resolution to concrete subclass
+**Impact: Low-Medium · Effort: Low**
+
+When `Model::first()` returns `?static`, PHPantom should resolve
+`static` to the concrete subclass at the call site.  Currently
+`AdminUser::first()` may resolve to `?Model` instead of `?AdminUser`.
+
+Similarly, `Arr::random()` has a complex overloaded return type that
+PHPantom can't narrow based on the argument type.
+
+**Reproducer:**
+
+```php
+$admin = AdminUser::first();
+$admin->assignRole($role);  // "Cannot resolve type of '$admin'"
+```
+
+**Where to fix:**
+- `src/completion/call_resolution.rs` — `resolve_static_return_type`:
+  ensure `static` resolves to the class the method was called on, not
+  the class that declares the method.
+
+**Discovered in:** analyze-triage iteration 7 (F12).  
+**Impact in shared codebase:** ~3 diagnostics (DatabaseSeeder.php,
+ProductSeeder.php ×2).
+
+---
+
+## T21. `parent::method()` return type resolution
+**Impact: Medium · Effort: Low**
+
+PHPantom doesn't resolve the return type of `parent::method()` calls.
+The return type is lost across the `parent::` dispatch, causing the
+assigned variable to be unresolved.
+
+**Reproducer:**
+
+```php
+class LoggedConnection extends BaseApiConnector {
+    public function call(...): Response {
+        $response = parent::call($endpoint, $params, $method, $headers);
+        $response->status();   // "Cannot resolve type of '$response'"
+        $response->body();     // same
+    }
+}
+```
+
+**What should work:** `parent::call()` should resolve to the parent
+class's method and return its declared return type (`Response`).
+
+**Where to fix:**
+- `src/completion/call_resolution.rs` — static dispatch for `parent::`.
+- `src/diagnostics/unknown_members.rs` — ensure `parent::` dispatches
+  correctly.
+
+**Discovered in:** analyze-triage iteration 7 (F11).  
+**Impact in shared codebase:** 5 diagnostics (LoggedConnection.php ×4,
+Paypal/Connector.php ×1).
 
 ---
 
