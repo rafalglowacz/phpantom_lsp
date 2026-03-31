@@ -4056,4 +4056,52 @@ class Foo {
             "expected unknown member diagnostic for nonExistentMethod, got: {diags:?}",
         );
     }
+
+    #[test]
+    fn no_diagnostic_for_property_chain_array_access_on_collection() {
+        // `$obj->prop['key']` where `prop` is a collection class with
+        // `@extends DataCollection<string, Day>` should resolve the
+        // bracket access to the element type `Day`.
+        let php = r#"<?php
+class Day {
+    public string $from;
+    public string $to;
+}
+
+/**
+ * @template TKey of array-key
+ * @template TValue
+ * @implements \ArrayAccess<TKey, TValue>
+ */
+class DataCollection implements \ArrayAccess {
+    /** @return TValue */
+    public function offsetGet(mixed $offset): mixed {}
+    public function offsetExists(mixed $offset): bool {}
+    public function offsetSet(mixed $offset, mixed $value): void {}
+    public function offsetUnset(mixed $offset): void {}
+}
+
+/**
+ * @extends DataCollection<string, Day>
+ */
+class OpeningHours extends DataCollection {}
+
+class ServicePoint {
+    public ?OpeningHours $opening_hours;
+}
+
+function test(ServicePoint $sp): void {
+    $day = $sp->opening_hours['monday'] ?? null;
+    if ($day !== null) {
+        $day->from;
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for property chain array access on collection, got: {diags:?}",
+        );
+    }
 }

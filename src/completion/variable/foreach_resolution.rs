@@ -539,7 +539,7 @@ const ITERABLE_IFACE_NAMES: &[&str] = &[
 /// Returns `None` when no generic iterable annotation is found or
 /// when the element type is a scalar (scalars have no completable
 /// members).
-fn extract_iterable_element_type_from_class(
+pub(in crate::completion) fn extract_iterable_element_type_from_class(
     class: &ClassInfo,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<String> {
