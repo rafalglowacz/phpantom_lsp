@@ -1,5 +1,6 @@
 use super::*;
 use crate::php_type::PhpType;
+use crate::types::ClassLikeKind;
 
 /// Helper to build a `HashMap<String, PhpType>` from `(&str, &str)` pairs.
 fn make_subs(pairs: &[(&str, &str)]) -> HashMap<String, PhpType> {
@@ -335,5 +336,106 @@ fn test_apply_substitution_to_method_modifies_return_and_params() {
     assert_eq!(
         method.parameters[0].type_hint.as_ref().unwrap().to_string(),
         "int"
+    );
+}
+
+/// Verify that `@extends Parent<ConcreteType>` propagates template args
+/// through the parent's `@use Trait<TValue>` generics so that trait
+/// methods have their template params substituted with concrete types.
+///
+/// This covers the pattern:
+///
+/// ```php
+/// /** @template TKey @template TValue */
+/// /** @use EnumerableMethods<TKey, TValue> */
+/// class DataCollection { use EnumerableMethods; }
+///
+/// /** @extends DataCollection<int, DeliveryOption> */
+/// class DeliveryOptionCollection extends DataCollection {}
+/// ```
+///
+/// `DeliveryOptionCollection->first()` should return `DeliveryOption`,
+/// not the raw template param `TValue`.
+#[test]
+fn test_extends_generics_propagate_through_parent_use_generics() {
+    use std::sync::Arc;
+
+    // The trait: has @template TKey, TValue and a method returning TValue.
+    let trait_info = ClassInfo {
+        name: "EnumerableMethods".to_string(),
+        kind: ClassLikeKind::Trait,
+        template_params: vec!["TKey".to_string(), "TValue".to_string()],
+        methods: vec![MethodInfo {
+            name: "first".to_string(),
+            name_offset: 0,
+            parameters: vec![],
+            return_type: Some(PhpType::parse("TValue")),
+            native_return_type: None,
+            description: None,
+            return_description: None,
+            links: Vec::new(),
+            see_refs: Vec::new(),
+            is_static: false,
+            visibility: Visibility::Public,
+            conditional_return: None,
+            deprecation_message: None,
+            deprecated_replacement: None,
+            template_params: Vec::new(),
+            template_param_bounds: HashMap::new(),
+            template_bindings: Vec::new(),
+            has_scope_attribute: false,
+            is_abstract: false,
+            is_virtual: false,
+            type_assertions: Vec::new(),
+            throws: Vec::new(),
+        }]
+        .into(),
+        ..ClassInfo::default()
+    };
+
+    // The parent class: has @template TKey, TValue and @use EnumerableMethods<TKey, TValue>.
+    let parent_class = ClassInfo {
+        name: "DataCollection".to_string(),
+        template_params: vec!["TKey".to_string(), "TValue".to_string()],
+        used_traits: vec!["EnumerableMethods".to_string()],
+        use_generics: vec![(
+            "EnumerableMethods".to_string(),
+            vec![PhpType::parse("TKey"), PhpType::parse("TValue")],
+        )],
+        ..ClassInfo::default()
+    };
+
+    // The child class: @extends DataCollection<int, DeliveryOption>
+    let child_class = ClassInfo {
+        name: "DeliveryOptionCollection".to_string(),
+        parent_class: Some("DataCollection".to_string()),
+        extends_generics: vec![(
+            "DataCollection".to_string(),
+            vec![PhpType::parse("int"), PhpType::parse("DeliveryOption")],
+        )],
+        is_final: true,
+        ..ClassInfo::default()
+    };
+
+    let class_loader = |name: &str| -> Option<Arc<ClassInfo>> {
+        match name {
+            "DataCollection" => Some(Arc::new(parent_class.clone())),
+            "EnumerableMethods" => Some(Arc::new(trait_info.clone())),
+            _ => None,
+        }
+    };
+
+    let resolved = resolve_class_with_inheritance(&child_class, &class_loader);
+
+    let first_method = resolved
+        .methods
+        .iter()
+        .find(|m| m.name == "first")
+        .expect("first() method should be inherited from trait via parent");
+
+    assert_eq!(
+        first_method.return_type.as_ref().unwrap().to_string(),
+        "DeliveryOption",
+        "first() return type should be substituted from TValue to DeliveryOption"
     );
 }

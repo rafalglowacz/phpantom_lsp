@@ -202,11 +202,36 @@ pub(crate) fn resolve_class_with_inheritance(
 
         // Merge traits used by the parent class as well, so that
         // grandparent-level trait members are visible.
+        // Apply the current level's template substitutions to the
+        // parent's `@use` generics.  Without this, a chain like:
+        //
+        //   /** @extends DataCollection<int, DeliveryOption> */
+        //   class DeliveryOptionCollection extends DataCollection
+        //
+        // where DataCollection has:
+        //   /** @use EnumerableMethods<TKey, TValue> */
+        //
+        // would pass the raw `TKey`/`TValue` template params to the
+        // trait instead of the concrete `int`/`DeliveryOption` types.
+        let substituted_use_generics: Vec<(String, Vec<PhpType>)> = if level_subs.is_empty() {
+            parent.use_generics.clone()
+        } else {
+            parent
+                .use_generics
+                .iter()
+                .map(|(name, args)| {
+                    let substituted_args: Vec<PhpType> =
+                        args.iter().map(|arg| arg.substitute(&level_subs)).collect();
+                    (name.clone(), substituted_args)
+                })
+                .collect()
+        };
+
         merge_traits_into(
             &mut merged,
             &parent.used_traits,
             &TraitContext {
-                use_generics: &parent.use_generics,
+                use_generics: &substituted_use_generics,
                 precedences: &parent.trait_precedences,
                 aliases: &parent.trait_aliases,
             },
