@@ -250,10 +250,19 @@ fn generate_many_variables(count: usize) -> String {
 
 // ─── Cold-start benchmark ──────────────────────────────────────────────────
 //
-// Measures the full pipeline from `Backend::new_test()` through file
-// parsing to a completed request.  All other benchmarks are warm-start,
-// so the difference between cold and warm numbers gives you the startup
-// cost implicitly.
+// Measures the full pipeline from `Backend::new_headless()` (which builds
+// the stub indices) through file parsing to a completed request that
+// triggers stub resolution (via `\DateTime`).  All other benchmarks are
+// warm-start, so the difference between cold and warm numbers gives you
+// the startup cost implicitly.
+
+const COLD_START_SOURCE: &str = r#"<?php
+class Greeter {
+    public function hello(): \DateTime {}
+}
+$g = new Greeter();
+$g->hello()->
+"#;
 
 const SIMPLE_CLASS_SOURCE: &str = r#"<?php
 class Greeter {
@@ -270,9 +279,9 @@ fn bench_cold_start(c: &mut Criterion) {
     c.bench_function("cold_start_completion", |b| {
         b.iter(|| {
             runtime.block_on(async {
-                let backend = Backend::new_test();
-                let uri = open_file(&backend, "file:///cold_start.php", SIMPLE_CLASS_SOURCE).await;
-                fire_completion(&backend, &uri, 6, 4).await;
+                let backend = Backend::new_headless();
+                let uri = open_file(&backend, "file:///cold_start.php", COLD_START_SOURCE).await;
+                fire_completion(&backend, &uri, 5, 14).await;
             })
         })
     });
@@ -290,7 +299,7 @@ fn bench_completion_simple(c: &mut Criterion) {
     ));
 
     c.bench_function("completion_simple_class", |b| {
-        b.iter(|| runtime.block_on(fire_completion(&backend, &uri, 6, 4)))
+        b.iter(|| runtime.block_on(fire_completion(&backend, &uri, 5, 4)))
     });
 }
 
