@@ -24,6 +24,8 @@ const MODEL_PHP: &str = "\
 <?php
 namespace Illuminate\\Database\\Eloquent;
 abstract class Model {
+    const CREATED_AT = 'created_at';
+    const UPDATED_AT = 'updated_at';
     /** @return \\Illuminate\\Database\\Eloquent\\Builder<static> */
     public static function query() {}
     /** @return \\Illuminate\\Database\\Eloquent\\Builder<static> */
@@ -1899,6 +1901,133 @@ class Brand extends Model {
         line, 12,
         "scopeSortable is on line 12 (0-indexed), got: {}",
         line
+    );
+}
+
+// ── Timestamp property go-to-definition ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_goto_definition_timestamp_default_created_at() {
+    // Ctrl+click on `$user->created_at` should jump to the CREATED_AT
+    // constant on the parent Model class.
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['name'];
+    public function demo(): void {
+        $user = new User();
+        $user->created_at;
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // "created_at" on line 7, cursor at character 15
+    let result = goto_definition_at(&backend, &dir, "src/Models/User.php", user_php, 7, 15).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $user->created_at should resolve to CREATED_AT constant"
+    );
+
+    let response = result.unwrap();
+    let line = definition_line(&response);
+    // CREATED_AT is on line 3 of Model.php (0-indexed)
+    assert_eq!(
+        line, 3,
+        "Should jump to CREATED_AT constant, got line: {}",
+        line
+    );
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("Model.php"),
+        "Should jump to Model.php, got: {}",
+        uri
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_timestamp_custom_created_at() {
+    // When the model overrides CREATED_AT, go-to-definition should
+    // jump to the constant on the model itself, not the parent.
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    const CREATED_AT = 'created';
+    public function demo(): void {
+        $user = new User();
+        $user->created;
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // "created" on line 7, cursor at character 15
+    let result = goto_definition_at(&backend, &dir, "src/Models/User.php", user_php, 7, 15).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $user->created should resolve to CREATED_AT constant on User"
+    );
+
+    let response = result.unwrap();
+    let line = definition_line(&response);
+    // CREATED_AT is on line 4 of User.php (0-indexed)
+    assert_eq!(
+        line, 4,
+        "Should jump to CREATED_AT constant on User, got line: {}",
+        line
+    );
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("User.php"),
+        "Should jump to User.php (not Model.php), got: {}",
+        uri
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_timestamp_updated_at() {
+    // Ctrl+click on `$user->updated_at` should jump to the UPDATED_AT
+    // constant on the parent Model class.
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    public function demo(): void {
+        $user = new User();
+        $user->updated_at;
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // "updated_at" on line 6, cursor at character 15
+    let result = goto_definition_at(&backend, &dir, "src/Models/User.php", user_php, 6, 15).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $user->updated_at should resolve to UPDATED_AT constant"
+    );
+
+    let response = result.unwrap();
+    let line = definition_line(&response);
+    // UPDATED_AT is on line 4 of Model.php (0-indexed)
+    assert_eq!(
+        line, 4,
+        "Should jump to UPDATED_AT constant, got line: {}",
+        line
+    );
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("Model.php"),
+        "Should jump to Model.php, got: {}",
+        uri
     );
 }
 

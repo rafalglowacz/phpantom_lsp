@@ -170,6 +170,7 @@ fn skips_non_relationship_methods() {
     let provider = LaravelModelProvider;
     let mut user = make_class("App\\Models\\User");
     user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+    user.laravel_mut().timestamps = Some(false);
     user.methods
         .push(make_method("getFullName", Some("string")));
     user.methods.push(make_method("save", Some("bool")));
@@ -184,6 +185,7 @@ fn skips_methods_without_return_type() {
     let provider = LaravelModelProvider;
     let mut user = make_class("App\\Models\\User");
     user.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+    user.laravel_mut().timestamps = Some(false);
     user.methods.push(make_method("posts", None));
 
     let result = provider.provide(&user, &no_loader, None);
@@ -460,7 +462,10 @@ fn scope_method_not_treated_as_relationship() {
 
     let result = provider.provide(&user, &no_loader, None);
     assert!(
-        result.properties.is_empty(),
+        result
+            .properties
+            .iter()
+            .all(|p| p.name == "created_at" || p.name == "updated_at"),
         "Scope methods should not produce relationship properties"
     );
     assert_eq!(result.methods.len(), 2);
@@ -642,7 +647,10 @@ fn scope_attribute_not_treated_as_relationship() {
 
     let result = provider.provide(&user, &no_loader, None);
     assert!(
-        result.properties.is_empty(),
+        result
+            .properties
+            .iter()
+            .all(|p| p.name == "created_at" || p.name == "updated_at"),
         "Scope attribute methods should not produce relationship properties"
     );
     assert_eq!(result.methods.len(), 2);
@@ -937,7 +945,10 @@ fn get_attribute_method_not_treated_as_accessor() {
     let result = provider.provide(&user, &loader, None);
     // getAttribute should not produce any virtual property.
     assert!(
-        result.properties.is_empty(),
+        result
+            .properties
+            .iter()
+            .all(|p| p.name == "created_at" || p.name == "updated_at"),
         "getAttribute() should not be treated as a legacy accessor, got: {:?}",
         result
             .properties
@@ -1199,6 +1210,7 @@ fn empty_casts_produces_no_properties() {
     user.name = "User".to_string();
     user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
     user.laravel_mut().casts_definitions = Vec::new();
+    user.laravel_mut().timestamps = Some(false);
 
     let result = provider.provide(&user, &no_loader, None);
     assert!(result.properties.is_empty());
@@ -1357,6 +1369,7 @@ fn empty_attributes_produces_no_properties() {
     user.name = "User".to_string();
     user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
     user.laravel_mut().attributes_definitions = Vec::new();
+    user.laravel_mut().timestamps = Some(false);
 
     let result = provider.provide(&user, &no_loader, None);
     assert!(result.properties.is_empty());
@@ -1596,9 +1609,244 @@ fn empty_column_names_produces_no_extra_properties() {
     user.name = "User".to_string();
     user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
     user.laravel_mut().column_names = Vec::new();
+    user.laravel_mut().timestamps = Some(false);
 
     let result = provider.provide(&user, &no_loader, None);
     assert!(result.properties.is_empty());
+}
+
+// ── Timestamp property synthesis tests ──────────────────────────────
+
+#[test]
+fn default_model_gets_timestamp_properties() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    // Ensure laravel metadata is initialized (timestamps defaults to None → inherits true)
+    user.laravel_mut();
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    let created = result.properties.iter().find(|p| p.name == "created_at");
+    assert!(created.is_some(), "should produce created_at property");
+    assert_eq!(
+        created.unwrap().type_hint_str().as_deref(),
+        Some("Carbon\\Carbon")
+    );
+
+    let updated = result.properties.iter().find(|p| p.name == "updated_at");
+    assert!(updated.is_some(), "should produce updated_at property");
+    assert_eq!(
+        updated.unwrap().type_hint_str().as_deref(),
+        Some("Carbon\\Carbon")
+    );
+}
+
+#[test]
+fn timestamps_explicitly_true_gets_timestamp_properties() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().timestamps = Some(true);
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        result.properties.iter().any(|p| p.name == "created_at"),
+        "should produce created_at"
+    );
+    assert!(
+        result.properties.iter().any(|p| p.name == "updated_at"),
+        "should produce updated_at"
+    );
+}
+
+#[test]
+fn timestamps_false_produces_no_timestamp_properties() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().timestamps = Some(false);
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        !result.properties.iter().any(|p| p.name == "created_at"),
+        "should not produce created_at"
+    );
+    assert!(
+        !result.properties.iter().any(|p| p.name == "updated_at"),
+        "should not produce updated_at"
+    );
+}
+
+#[test]
+fn custom_created_at_column_name() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().created_at_name = Some(Some("created".to_string()));
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        !result.properties.iter().any(|p| p.name == "created_at"),
+        "default created_at should not appear"
+    );
+    let created = result.properties.iter().find(|p| p.name == "created");
+    assert!(
+        created.is_some(),
+        "should produce custom 'created' property"
+    );
+    assert_eq!(
+        created.unwrap().type_hint_str().as_deref(),
+        Some("Carbon\\Carbon")
+    );
+    assert!(
+        result.properties.iter().any(|p| p.name == "updated_at"),
+        "updated_at should still use default"
+    );
+}
+
+#[test]
+fn custom_updated_at_column_name() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().updated_at_name = Some(Some("modified_at".to_string()));
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        result.properties.iter().any(|p| p.name == "created_at"),
+        "created_at should still use default"
+    );
+    assert!(
+        !result.properties.iter().any(|p| p.name == "updated_at"),
+        "default updated_at should not appear"
+    );
+    let modified = result.properties.iter().find(|p| p.name == "modified_at");
+    assert!(
+        modified.is_some(),
+        "should produce custom 'modified_at' property"
+    );
+    assert_eq!(
+        modified.unwrap().type_hint_str().as_deref(),
+        Some("Carbon\\Carbon")
+    );
+}
+
+#[test]
+fn null_created_at_disables_created_at_property() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().created_at_name = Some(None); // CREATED_AT = null
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        !result.properties.iter().any(|p| p.name == "created_at"),
+        "should not produce created_at when CREATED_AT is null"
+    );
+    assert!(
+        result.properties.iter().any(|p| p.name == "updated_at"),
+        "updated_at should still appear"
+    );
+}
+
+#[test]
+fn null_updated_at_disables_updated_at_property() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().updated_at_name = Some(None); // UPDATED_AT = null
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        result.properties.iter().any(|p| p.name == "created_at"),
+        "created_at should still appear"
+    );
+    assert!(
+        !result.properties.iter().any(|p| p.name == "updated_at"),
+        "should not produce updated_at when UPDATED_AT is null"
+    );
+}
+
+#[test]
+fn casts_take_priority_over_timestamp_defaults() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().casts_definitions =
+        vec![("created_at".to_string(), "immutable_datetime".to_string())];
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    let matching: Vec<_> = result
+        .properties
+        .iter()
+        .filter(|p| p.name == "created_at")
+        .collect();
+    assert_eq!(
+        matching.len(),
+        1,
+        "should have exactly one created_at property"
+    );
+    assert_eq!(
+        matching[0].type_hint_str().as_deref(),
+        Some("Carbon\\CarbonImmutable"),
+        "casts type should win over timestamp default"
+    );
+}
+
+#[test]
+fn timestamp_properties_are_public_and_not_static() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut();
+
+    let result = provider.provide(&user, &no_loader, None);
+    let prop = result
+        .properties
+        .iter()
+        .find(|p| p.name == "created_at")
+        .unwrap();
+    assert_eq!(prop.visibility, Visibility::Public);
+    assert!(!prop.is_static);
+}
+
+#[test]
+fn timestamps_false_with_custom_names_still_no_properties() {
+    let provider = LaravelModelProvider;
+    let mut user = make_class(ELOQUENT_MODEL_FQN);
+    user.name = "User".to_string();
+    user.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+    user.laravel_mut().timestamps = Some(false);
+    user.laravel_mut().created_at_name = Some(Some("created".to_string()));
+    user.laravel_mut().updated_at_name = Some(Some("modified".to_string()));
+
+    let result = provider.provide(&user, &no_loader, None);
+
+    assert!(
+        !result.properties.iter().any(|p| p.name == "created"),
+        "timestamps=false should suppress even custom column names"
+    );
+    assert!(
+        !result.properties.iter().any(|p| p.name == "modified"),
+        "timestamps=false should suppress even custom column names"
+    );
 }
 
 // ─── build_scope_methods_for_builder ─────────────────────────────

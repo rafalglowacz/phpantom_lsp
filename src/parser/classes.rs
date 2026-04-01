@@ -653,6 +653,80 @@ fn infer_type_from_literal(value: &str) -> Option<String> {
     None
 }
 
+/// Extract timestamp configuration from a model class.
+///
+/// Reads three sources:
+///
+/// - `$timestamps` property — `true` (default) or `false`.
+/// - `CREATED_AT` constant — column name string or `null`.
+/// - `UPDATED_AT` constant — column name string or `null`.
+///
+/// Returns `(timestamps, created_at_name, updated_at_name)` using the
+/// same `Option` semantics as `LaravelMetadata`: outer `None` means
+/// "not declared", `Some(None)` means "explicitly `null`".
+fn extract_timestamp_config<'a>(
+    members: impl Iterator<Item = &'a ClassLikeMember<'a>>,
+    content: &str,
+) -> (Option<bool>, Option<Option<String>>, Option<Option<String>>) {
+    let mut timestamps: Option<bool> = None;
+    let mut created_at: Option<Option<String>> = None;
+    let mut updated_at: Option<Option<String>> = None;
+
+    for member in members {
+        match member {
+            ClassLikeMember::Property(Property::Plain(plain)) => {
+                for item in plain.items.iter() {
+                    let var_name = item.variable().name.to_string();
+                    let stripped = var_name.strip_prefix('$').unwrap_or(&var_name);
+                    if stripped != "timestamps" {
+                        continue;
+                    }
+                    if let PropertyItem::Concrete(concrete) = item {
+                        let span = concrete.value.span();
+                        let start = span.start.offset as usize;
+                        let end = span.end.offset as usize;
+                        if let Some(text) = content.get(start..end) {
+                            let trimmed = text.trim();
+                            if trimmed == "false" {
+                                timestamps = Some(false);
+                            } else if trimmed == "true" {
+                                timestamps = Some(true);
+                            }
+                        }
+                    }
+                }
+            }
+            ClassLikeMember::Constant(constant) => {
+                for item in constant.items.iter() {
+                    let name = item.name.value.to_string();
+                    if name != "CREATED_AT" && name != "UPDATED_AT" {
+                        continue;
+                    }
+                    let span = item.value.span();
+                    let start = span.start.offset as usize;
+                    let end = span.end.offset as usize;
+                    let value = content.get(start..end).map(|t| t.trim());
+                    let parsed = match value {
+                        Some("null") | Some("NULL") => Some(None),
+                        Some(v) => extract_string_literal(v).map(Some),
+                        None => None,
+                    };
+                    if let Some(val) = parsed {
+                        if name == "CREATED_AT" {
+                            created_at = Some(val);
+                        } else {
+                            updated_at = Some(val);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (timestamps, created_at, updated_at)
+}
+
 /// Extract column names from `$fillable`, `$guarded`, and `$hidden` arrays.
 ///
 /// These properties contain simple string lists of column names without
@@ -839,6 +913,9 @@ impl Backend {
 
                     let column_names = extract_column_names(class.members.iter(), content);
 
+                    let (timestamps, created_at_name, updated_at_name) =
+                        extract_timestamp_config(class.members.iter(), content);
+
                     let attr_targets = extract_attribute_targets(&class.attribute_lists, content);
 
                     let class_depr = merge_deprecation_info(
@@ -884,6 +961,9 @@ impl Backend {
                             casts_definitions,
                             attributes_definitions,
                             column_names,
+                            timestamps,
+                            created_at_name,
+                            updated_at_name,
                         })),
                     });
 

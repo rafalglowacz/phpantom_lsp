@@ -198,6 +198,27 @@ impl Backend {
                 }
             }
 
+            // ── Timestamp constant redirect ─────────────────────────
+            // When the property name matches a timestamp column,
+            // jump straight to the CREATED_AT / UPDATED_AT constant.
+            if extends_eloquent_model(lookup_class, &class_loader)
+                && let Some(const_name) =
+                    Self::timestamp_property_to_constant(lookup_class, &effective_name)
+                && let Some((const_class, const_fqn)) =
+                    Self::find_declaring_class(lookup_class, const_name, &class_loader)
+                && let Some((class_uri, class_content)) =
+                    self.find_class_file_content(&const_fqn, uri, content)
+                && let Some(position) = Self::find_member_position(
+                    &class_content,
+                    const_name,
+                    MemberKind::Constant,
+                    const_class.member_name_offset(const_name, "constant"),
+                )
+                && let Ok(parsed_uri) = Url::parse(&class_uri)
+            {
+                return Some(point_location(parsed_uri, position));
+            }
+
             // ── Scope method mapping ────────────────────────────────
             // Laravel scope methods are defined as `scopeActive()` but
             // invoked as `active()`.  When the effective name doesn't
@@ -809,5 +830,35 @@ impl Backend {
         // Fallback: `#[Scope]` attribute — the method keeps its own name.
         let (declaring, fqn) = Self::find_declaring_class(&model, member_name, class_loader)?;
         Some((declaring, fqn, member_name.to_string()))
+    }
+
+    /// Map a timestamp virtual property name to its defining constant.
+    ///
+    /// Returns `Some("CREATED_AT")` or `Some("UPDATED_AT")` when the
+    /// property name matches the model's configured timestamp column,
+    /// or `None` when the property is not a timestamp.
+    fn timestamp_property_to_constant<'a>(
+        class: &ClassInfo,
+        property_name: &str,
+    ) -> Option<&'a str> {
+        if let Some(laravel) = class.laravel() {
+            let created_col = match &laravel.created_at_name {
+                Some(Some(name)) => Some(name.as_str()),
+                Some(None) => None,
+                None => Some("created_at"),
+            };
+            let updated_col = match &laravel.updated_at_name {
+                Some(Some(name)) => Some(name.as_str()),
+                Some(None) => None,
+                None => Some("updated_at"),
+            };
+            if created_col == Some(property_name) {
+                return Some("CREATED_AT");
+            }
+            if updated_col == Some(property_name) {
+                return Some("UPDATED_AT");
+            }
+        }
+        None
     }
 }

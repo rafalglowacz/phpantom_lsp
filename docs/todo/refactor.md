@@ -214,38 +214,4 @@ Each item must include:
 
 ## Outstanding items
 
-### Tighter `mago-type-syntax` integration
-
-The project already wraps `mago-type-syntax` via `PhpType` in
-`src/php_type.rs` and uses it for structured type operations (substitution,
-equivalence, display). Several areas still do manual string-level type
-manipulation that could be replaced or simplified by leaning on `PhpType`
-and the mago parser/lexer. See also
-`scratch/mago_type_syntax_integration.md` for completed items (#1, #2)
-and additional context.
-
-Grouped by size:
-
-#### Medium
-
-- **`ArrayShapeEntry.value_type: String` → `PhpType`.**
-  `src/types.rs` `ArrayShapeEntry` stores the value type as a `String`.
-  `src/docblock/shapes.rs` `shape_entries_to_array_entries()` converts
-  `PhpType::ShapeEntry` (which already has `value_type: PhpType`) back
-  to strings via `.to_string()`, and callers re-parse with
-  `PhpType::parse()`. Store `PhpType` directly to eliminate the
-  round-trip. Files: `src/types.rs`, `src/docblock/shapes.rs`,
-  `tests/integration/completion_array_shapes.rs`.
-
-#### Large
-
-- **`split_type_token()` → `mago_type_syntax::lexer::TypeLexer`.**
-  `src/docblock/type_strings.rs` L107-215 is a 108-line hand-rolled
-  tokenizer tracking `<>`, `{}`, `()` nesting, quoted strings, and
-  union/intersection suffixes. It is called from 24 sites across 7
-  files. The `TypeLexer` from `mago-type-syntax` is available but
-  unused. Replacing `split_type_token` with lexer-based boundary
-  detection would eliminate the largest piece of manual type parsing.
-  High risk due to the number of callers; should be done as a
-  standalone task with a parallel implementation and extensive
-  comparison testing.
+No outstanding items.

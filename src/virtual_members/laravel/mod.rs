@@ -568,6 +568,32 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 }
                 properties.push(PropertyInfo::virtual_property(column, Some("mixed")));
             }
+
+            // ── Timestamp properties ────────────────────────────────
+            // When $timestamps is true (the default), synthesize
+            // created_at and updated_at as Carbon\Carbon.  The column
+            // names can be overridden via CREATED_AT / UPDATED_AT
+            // constants, and either can be disabled by setting the
+            // constant to null.
+            let timestamps_enabled = laravel.timestamps.unwrap_or(true);
+            if timestamps_enabled {
+                let created_col = match &laravel.created_at_name {
+                    Some(Some(name)) => Some(name.as_str()),
+                    Some(None) => None,         // explicitly null
+                    None => Some("created_at"), // default
+                };
+                let updated_col = match &laravel.updated_at_name {
+                    Some(Some(name)) => Some(name.as_str()),
+                    Some(None) => None,         // explicitly null
+                    None => Some("updated_at"), // default
+                };
+                for col in [created_col, updated_col].into_iter().flatten() {
+                    if seen_props.insert(col.to_string()) {
+                        properties
+                            .push(PropertyInfo::virtual_property(col, Some("Carbon\\Carbon")));
+                    }
+                }
+            }
         }
 
         for method in &class.methods {

@@ -24,6 +24,9 @@ within the same impact tier.
 | #   | Item                                                                                                                                       | Impact | Effort     |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ---------- |
 | T18 | [Method-level template parameter resolution at call sites](todo/type-inference.md#t18-method-level-template-parameter-resolution-at-call-sites) | Medium | Medium     |
+| L3  | [`$dates` array (deprecated)](todo/laravel.md#l3-dates-array-deprecated)                                                                     | Low-Med | Low       |
+| L11 | [`$appends` array](todo/laravel.md#l11-appends-array)                                                                                        | Low    | Low        |
+| L13 | [`where{PropertyName}()` dynamic methods on Builder](todo/laravel.md#l13-wherepropertyname-dynamic-methods-on-builder)                        | High   | Medium     |
 | H17 | [`missingType.iterableValue` — add `@return` with inferred element type](todo/phpstan-actions.md#h17-missingtype-iterablevalue-return-type--add-return-with-iterable-type) | Medium | High       |
 | H10 | [`return.unusedType` — remove unused type from return union](todo/phpstan-actions.md#h10-returnunusedtype--remove-unused-type-from-return-union) | Medium | Medium     |
 | H6  | `return.type` — update return type to match actual returns                                                                                   | Medium | Medium     |

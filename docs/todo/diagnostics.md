@@ -368,3 +368,39 @@ own diagnostics.
 `str-contains`/`str-starts-with` modernization,
 `prefer-arrow-function`, `constant-condition`, `no-self-assignment`,
 `explicit-nullable-param`, `valid-docblock`.
+
+## D13. Unify diagnostic subject resolution with completion/hover
+
+`unknown_members.rs` has two secondary resolvers that run their own
+independent type resolution when `resolve_target_classes_expr` returns
+empty:
+
+- `resolve_scalar_subject_type` (~130 lines) re-resolves variables,
+  property chains, and call expressions to detect scalar types.
+- `resolve_unresolvable_class_subject` (~80 lines) re-resolves
+  variables and call expressions to detect class names that can't be
+  loaded.
+
+Both duplicate logic from `resolver.rs` and
+`variable/resolution.rs` but can diverge, producing diagnostics for
+types that completion and hover cannot see (or vice versa).
+
+### Goal
+
+The diagnostic path should use the same resolution result that
+completion and hover use. All three consumers should see identical
+outcomes for the same subject text at the same cursor position.
+
+### Approach
+
+Extend the shared resolver's return type (or add a secondary result)
+to carry scalar type information and unresolvable class names
+alongside the resolved `ClassInfo` list. The diagnostic collector
+would then inspect this enriched result instead of running its own
+resolution. This eliminates the secondary resolvers entirely.
+
+### Files
+
+- `src/diagnostics/unknown_members.rs` — remove
+  `resolve_scalar_subject_type` and `resolve_unresolvable_class_subject`
+- `src/completion/resolver.rs` — enrich the resolution result

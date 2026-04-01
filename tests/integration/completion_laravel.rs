@@ -11329,3 +11329,218 @@ class Product extends Model {
         methods
     );
 }
+
+// ── Timestamp property synthesis integration tests ──────────────────────────
+
+#[tokio::test]
+async fn test_default_model_gets_timestamp_properties() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['name', 'email'];
+    public function test() {
+        $user = new User();
+        $user->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 7, 15).await;
+    let props = property_names(&items);
+
+    assert!(
+        props.contains(&"created_at"),
+        "Default model should have created_at timestamp property, got: {:?}",
+        props
+    );
+    assert!(
+        props.contains(&"updated_at"),
+        "Default model should have updated_at timestamp property, got: {:?}",
+        props
+    );
+    assert!(
+        props.contains(&"name"),
+        "Fillable properties should still appear, got: {:?}",
+        props
+    );
+}
+
+#[tokio::test]
+async fn test_timestamps_false_no_timestamp_properties() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    public $timestamps = false;
+    protected $fillable = ['name'];
+    public function test() {
+        $user = new User();
+        $user->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 8, 15).await;
+    let props = property_names(&items);
+
+    assert!(
+        !props.contains(&"created_at"),
+        "timestamps=false should suppress created_at, got: {:?}",
+        props
+    );
+    assert!(
+        !props.contains(&"updated_at"),
+        "timestamps=false should suppress updated_at, got: {:?}",
+        props
+    );
+    assert!(
+        props.contains(&"name"),
+        "Fillable properties should still appear, got: {:?}",
+        props
+    );
+}
+
+#[tokio::test]
+async fn test_custom_created_at_column_name() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    const CREATED_AT = 'created';
+    public function test() {
+        $user = new User();
+        $user->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 7, 15).await;
+    let props = property_names(&items);
+
+    assert!(
+        props.contains(&"created"),
+        "Custom CREATED_AT should produce 'created' property, got: {:?}",
+        props
+    );
+    assert!(
+        !props.contains(&"created_at"),
+        "Default created_at should not appear when CREATED_AT is overridden, got: {:?}",
+        props
+    );
+    assert!(
+        props.contains(&"updated_at"),
+        "updated_at should still use default, got: {:?}",
+        props
+    );
+}
+
+#[tokio::test]
+async fn test_null_updated_at_disables_updated_at_property() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    const UPDATED_AT = null;
+    public function test() {
+        $user = new User();
+        $user->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 7, 15).await;
+    let props = property_names(&items);
+
+    assert!(
+        props.contains(&"created_at"),
+        "created_at should still appear, got: {:?}",
+        props
+    );
+    assert!(
+        !props.contains(&"updated_at"),
+        "UPDATED_AT=null should suppress updated_at, got: {:?}",
+        props
+    );
+}
+
+#[tokio::test]
+async fn test_casts_datetime_takes_priority_over_timestamp_default() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $casts = [
+        'created_at' => 'immutable_datetime',
+    ];
+    public function test() {
+        $user = new User();
+        $user->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 9, 15).await;
+    let props = property_names(&items);
+
+    // created_at should appear only once (from casts, not duplicated by timestamps)
+    let count = props.iter().filter(|p| **p == "created_at").count();
+    assert_eq!(
+        count, 1,
+        "created_at should appear exactly once (from casts), got {} occurrences",
+        count
+    );
+    assert!(
+        props.contains(&"updated_at"),
+        "updated_at should still appear from timestamp defaults, got: {:?}",
+        props
+    );
+}
+
+#[tokio::test]
+async fn test_timestamps_false_with_custom_names_still_no_properties() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    public $timestamps = false;
+    const CREATED_AT = 'created';
+    const UPDATED_AT = 'modified';
+    public function test() {
+        $user = new User();
+        $user->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 9, 15).await;
+    let props = property_names(&items);
+
+    assert!(
+        !props.contains(&"created"),
+        "timestamps=false should suppress even custom created column, got: {:?}",
+        props
+    );
+    assert!(
+        !props.contains(&"modified"),
+        "timestamps=false should suppress even custom updated column, got: {:?}",
+        props
+    );
+    assert!(
+        !props.contains(&"created_at"),
+        "timestamps=false should suppress default created_at too, got: {:?}",
+        props
+    );
+}

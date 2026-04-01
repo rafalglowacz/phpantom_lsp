@@ -1285,6 +1285,28 @@ pub struct LaravelMetadata {
     /// properties as a last-resort fallback when a column is not
     /// already covered by `$casts` or `$attributes`.
     pub column_names: Vec<String>,
+    /// Whether `$timestamps` is explicitly set on the model.
+    ///
+    /// - `None` — not declared (inherits the default, which is `true`
+    ///   on `Illuminate\Database\Eloquent\Model`).
+    /// - `Some(true)` — explicitly enabled.
+    /// - `Some(false)` — explicitly disabled; no timestamp properties
+    ///   should be synthesized.
+    pub timestamps: Option<bool>,
+    /// Override for the `CREATED_AT` column name constant.
+    ///
+    /// - `None` — not declared (inherits the default `"created_at"`).
+    /// - `Some(None)` — explicitly set to `null`; no created-at
+    ///   property should be synthesized.
+    /// - `Some(Some("created"))` — custom column name.
+    pub created_at_name: Option<Option<String>>,
+    /// Override for the `UPDATED_AT` column name constant.
+    ///
+    /// - `None` — not declared (inherits the default `"updated_at"`).
+    /// - `Some(None)` — explicitly set to `null`; no updated-at
+    ///   property should be synthesized.
+    /// - `Some(Some("modified"))` — custom column name.
+    pub updated_at_name: Option<Option<String>>,
 }
 
 /// Stores extracted class information from a parsed PHP file.
