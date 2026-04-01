@@ -1690,6 +1690,16 @@ class EloquentQueryDemo
         $query = BlogAuthor::where('genre', 'fiction');
         $query->active();
         $query->orderBy('name')->get();
+
+        // where{PropertyName}() dynamic methods (from $fillable, $casts, etc.)
+        Bakery::whereFlour('whole wheat');           // from $fillable
+        Bakery::whereApricot(true);                  // from $casts
+        Bakery::whereDefrostedAt('2024-01-01');      // from $dates
+        Bakery::whereCroissant('almond');             // from $attributes
+        Bakery::whereKitchenId(42);                   // from $guarded
+        Bakery::whereOvenCode('X9');                  // from $hidden
+        Bakery::whereFlour('rye')->whereApricot(true)->get();
+        Bakery::where('open', true)->whereFlour('spelt')->fresh()->first();
     }
 }
 

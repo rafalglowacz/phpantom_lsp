@@ -152,46 +152,6 @@ today and what is still missing.
 
 ---
 
-#### L13. `where{PropertyName}()` dynamic methods on Builder
-
-**Impact: High · Effort: Medium**
-
-**Depends on:** All model property gathering gaps being resolved first
-(L3, L11, and any others that feed into `column_names` or
-`casts_definitions`). The `where{PropertyName}` methods are derived
-from the model's known properties, so incomplete property lists produce
-incomplete method coverage.
-
-Eloquent's `Builder::__call()` translates calls like
-`whereLangCode($value)` into `where('lang_code', $value)` and returns
-`$this`. This is a dynamic convention based on the model's column
-names: `where` + StudlyCase column name.
-
-PHPantom currently has no knowledge of this pattern. The `__call`
-return type preservation (shipped in 0.5.0) keeps chains alive when
-`__call` exists, but the analyzer still reports `unknown_member` for
-each `where{PropertyName}` call because no actual method by that name
-exists on the Builder or Model.
-
-From the luxplus/shared triage, this pattern accounts for ~17
-diagnostics (29% of remaining errors): 11 direct `unknown_member`
-errors plus ~6 cascading `unresolved_member_access` failures.
-
-Affected examples: `whereBrandId()`, `whereSubcategoryId()`,
-`whereLangCode()`, `whereLanguage()`, `whereIsLuxury()`,
-`whereIsDerma()`, `whereIsProHairCare()`, `whereIsVisible()`.
-
-**Implementation approach:** In the `LaravelModelProvider` (or a new
-virtual-member pass), for each model that extends
-`Illuminate\Database\Eloquent\Model`, synthesize `where{StudlyCase}()`
-methods on the associated Builder class. Each method should accept one
-parameter (the value) and return `$this` (the Builder). The column
-names come from all property sources: `$casts`, `$attributes`,
-`$fillable`/`$guarded`/`$hidden`/`$visible`, `$dates`, timestamps,
-relationship `*_count`, and `@property` annotations.
-
----
-
 #### L2. `morphedByMany` missing from relationship method map
 
 **Impact: Low-Medium · Effort: Low**

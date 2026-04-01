@@ -23,7 +23,6 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                                                       | Impact | Effort |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------ |
-| L13 | [`where{PropertyName}()` dynamic methods on Builder](todo/laravel.md#l13-wherepropertyname-dynamic-methods-on-builder)                                                     | High   | Medium |
 | H17 | [`missingType.iterableValue` — add `@return` with inferred element type](todo/phpstan-actions.md#h17-missingtype-iterablevalue-return-type--add-return-with-iterable-type) | Medium | High   |
 | H10 | [`return.unusedType` — remove unused type from return union](todo/phpstan-actions.md#h10-returnunusedtype--remove-unused-type-from-return-union)                           | Medium | Medium |
 | H6  | `return.type` — update return type to match actual returns                                                                                                                 | Medium | Medium |

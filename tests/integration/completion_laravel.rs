@@ -11930,3 +11930,457 @@ class Controller {
         props
     );
 }
+
+// ─── where{PropertyName}() dynamic methods ──────────────────────────────────
+
+#[tokio::test]
+async fn test_where_property_static_on_model() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $casts = [
+        'brand_id' => 'int',
+        'is_active' => 'boolean',
+    ];
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // "User::" at line 9, character 14
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 9, 14).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereBrandId"),
+        "whereBrandId should appear as static on User::, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereIsActive"),
+        "whereIsActive should appear as static on User::, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_on_builder_instance() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['name', 'email'];
+}
+";
+    let controller_php = "\
+<?php
+namespace App\\Http;
+use App\\Models\\User;
+class Controller {
+    public function index() {
+        User::where('id', 1)->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/User.php", user_php),
+        ("src/Http/Controller.php", controller_php),
+    ]);
+
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Http/Controller.php",
+        controller_php,
+        5,
+        30,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereName"),
+        "whereName should appear on Builder instance, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereEmail"),
+        "whereEmail should appear on Builder instance, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_from_casts() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $casts = [
+        'lang_code' => 'string',
+        'subcategory_id' => 'int',
+    ];
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 9, 14).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereLangCode"),
+        "whereLangCode should appear from $casts, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereSubcategoryId"),
+        "whereSubcategoryId should appear from $casts, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_from_fillable() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['language', 'is_luxury', 'is_derma'];
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 6, 14).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereLanguage"),
+        "whereLanguage should appear from $fillable, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereIsLuxury"),
+        "whereIsLuxury should appear from $fillable, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereIsDerma"),
+        "whereIsDerma should appear from $fillable, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_chain_continues() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['name', 'email'];
+    public function test() {
+        User::whereName('Alice')->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // After "->", the return type is Builder<User>, so Builder methods
+    // (including where{PropertyName}) should still be available.
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 6, 34).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereEmail"),
+        "whereEmail should be available after whereName() chain, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"get"),
+        "get() should be available after whereName() chain, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"first"),
+        "first() should be available after whereName() chain, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_from_timestamps() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 5, 14).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereCreatedAt"),
+        "whereCreatedAt should appear from default timestamps, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereUpdatedAt"),
+        "whereUpdatedAt should appear from default timestamps, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_not_on_non_model() {
+    let service_php = "\
+<?php
+namespace App\\Services;
+class UserService {
+    protected $fillable = ['name'];
+    public function test() {
+        UserService::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Services/UserService.php", service_php)]);
+
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Services/UserService.php",
+        service_php,
+        4,
+        22,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    assert!(
+        !methods.contains(&"whereName"),
+        "whereName should NOT appear on non-model class, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_cross_file() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $casts = [
+        'brand_id' => 'int',
+    ];
+    protected $fillable = ['email'];
+}
+";
+    let controller_php = "\
+<?php
+namespace App\\Http;
+use App\\Models\\User;
+class Controller {
+    public function index() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/User.php", user_php),
+        ("src/Http/Controller.php", controller_php),
+    ]);
+
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Http/Controller.php",
+        controller_php,
+        5,
+        14,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereBrandId"),
+        "whereBrandId should appear cross-file, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereEmail"),
+        "whereEmail should appear cross-file from $fillable, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_coexists_with_scopes_and_builder() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['name'];
+    public function scopeActive($query) {
+        return $query->where('active', true);
+    }
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 9, 14).await;
+    let methods = method_names(&items);
+
+    // where{PropertyName} methods
+    assert!(
+        methods.contains(&"whereName"),
+        "whereName should coexist with scopes, got: {:?}",
+        methods
+    );
+    // Scope methods
+    assert!(
+        methods.contains(&"active"),
+        "scope active() should still work, got: {:?}",
+        methods
+    );
+    // Regular Builder methods
+    assert!(
+        methods.contains(&"where"),
+        "Builder where() should still work, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"get"),
+        "Builder get() should still work, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_on_builder_variable() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $fillable = ['name', 'email'];
+}
+";
+    let controller_php = "\
+<?php
+namespace App\\Http;
+use App\\Models\\User;
+class Controller {
+    public function index() {
+        $query = User::where('id', 1);
+        $query->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/User.php", user_php),
+        ("src/Http/Controller.php", controller_php),
+    ]);
+
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Http/Controller.php",
+        controller_php,
+        6,
+        16,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereName"),
+        "whereName should appear on Builder variable, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereEmail"),
+        "whereEmail should appear on Builder variable, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_from_dates() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $dates = ['deleted_at'];
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 6, 14).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereDeletedAt"),
+        "whereDeletedAt should appear from $dates, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_property_from_attributes_defaults() {
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class User extends Model {
+    protected $attributes = [
+        'role' => 'user',
+        'is_active' => true,
+    ];
+    public function test() {
+        User::
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 9, 14).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"whereRole"),
+        "whereRole should appear from $attributes, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"whereIsActive"),
+        "whereIsActive should appear from $attributes, got: {:?}",
+        methods
+    );
+}

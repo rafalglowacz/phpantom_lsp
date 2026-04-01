@@ -61,6 +61,19 @@
 //!   `$guarded`, `$hidden`, and `$appends` produce `mixed`-typed
 //!   virtual properties as a last-resort fallback.  Columns already
 //!   covered by `$casts` or `$attributes` are skipped.
+//!
+//! - **`where{PropertyName}()` dynamic methods.** Laravel's
+//!   `Builder::__call()` translates calls like `whereBrandId($value)`
+//!   into `where('brand_id', $value)`.  For each known column on the
+//!   model (from all property sources: `$casts`, `$attributes`,
+//!   `$fillable`/`$guarded`/`$hidden`/`$appends`, `$dates`, timestamps,
+//!   relationship `*_count` properties, `@property` annotations, and
+//!   accessor-derived properties), a virtual `where{StudlyCase}()`
+//!   method is synthesized.  The method accepts a `mixed` value
+//!   parameter and returns `Builder<ConcreteModel>`.  These methods
+//!   appear as both instance methods on the Builder (for chaining:
+//!   `$query->whereBrandId(42)`) and static methods on the model
+//!   (for `User::whereName('Alice')`).
 
 mod accessors;
 mod builder;
@@ -69,6 +82,7 @@ mod factory;
 mod helpers;
 mod relationships;
 mod scopes;
+mod where_property;
 
 pub use helpers::extends_eloquent_model;
 pub(crate) use helpers::{accessor_method_candidates, camel_to_snake};
@@ -88,6 +102,7 @@ use relationships::{
 
 pub use scopes::build_scope_methods_for_builder;
 use scopes::{build_scope_methods, is_scope_method};
+use where_property::{build_where_property_methods_for_class, lowercase_method_names};
 
 use std::sync::Arc;
 
@@ -377,6 +392,23 @@ fn inject_scopes_and_model_methods(
 
     // 2. Inject @method virtual methods from the model.
     inject_model_virtual_methods(result, model_arg, class_loader);
+
+    // 3. Inject where{PropertyName}() dynamic methods from the model's
+    //    known columns.  These are instance methods on the Builder so
+    //    that `$query->whereBrandId(42)` resolves.
+    if let Some(model_class) = class_loader(model_arg) {
+        let existing = lowercase_method_names(&result.methods);
+        let where_methods = build_where_property_methods_for_class(&model_class, &existing);
+        for method in where_methods {
+            if !result
+                .methods
+                .iter()
+                .any(|m| m.name.eq_ignore_ascii_case(&method.name))
+            {
+                result.methods.push(method);
+            }
+        }
+    }
 }
 
 /// Inject `@method`-declared virtual methods from a model onto a Builder.
@@ -714,6 +746,17 @@ impl VirtualMemberProvider for LaravelModelProvider {
         // ── Builder-as-static forwarding ────────────────────────────
         let forwarded = build_builder_forwarded_methods(class, class_loader, cache);
         methods.extend(forwarded);
+
+        // ── where{PropertyName}() static forwarding ─────────────────
+        // Laravel's Model::__callStatic() delegates to Builder, which
+        // handles where{Column}() calls.  Synthesize these as static
+        // methods on the model so that User::whereName('Alice') resolves.
+        let existing = lowercase_method_names(&methods);
+        let where_static = build_where_property_methods_for_class(class, &existing);
+        for mut m in where_static {
+            m.is_static = true;
+            methods.push(m);
+        }
 
         VirtualMembers {
             methods,
