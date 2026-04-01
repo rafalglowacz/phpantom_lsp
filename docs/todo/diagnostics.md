@@ -50,31 +50,6 @@ The following have been verified and are covered by tests:
 
 ---
 
-## D4. Unresolved type in PHPDoc
-
-**Impact: Medium · Effort: Medium**
-
-A `@return`, `@param`, `@var`, `@throws`, `@mixin`, or `@extends` tag
-references a class that cannot be resolved. This is advisory (the code
-may still work if the type is only used for static analysis), so it
-should be **Information** severity.
-
-| Scenario                                                                    | Expected                                                        |
-| --------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| `@return SomeAlias` where SomeAlias is not a class, type alias, or template | **Info**: Type 'SomeAlias' in @return could not be resolved     |
-| `@param NonExistent $x`                                                     | **Info**: Type 'NonExistent' in @param could not be resolved    |
-| `@throws FakeException`                                                     | **Info**: Type 'FakeException' in @throws could not be resolved |
-
-### Implementation notes
-
-This partially overlaps with `unknown_classes.rs` which already flags
-`ClassReference` spans in docblock type positions. The remaining gap is
-PHPDoc tags that reference types which are not emitted as
-`ClassReference` spans by the symbol map. Audit which docblock type
-positions produce `ClassReference` spans and which don't.
-
----
-
 ## D5. Diagnostic suppression intelligence
 
 **Impact: Medium · Effort: Medium**
@@ -92,12 +67,10 @@ ignores reported by PHPStan. What remains:
 
 ### Remaining tools
 
-- Psalm: `/** @psalm-suppress [IssueType] */` on the line or above
-  the function/class.
 - PHPCS: `// phpcs:ignore [Sniff.Name]` or `// phpcs:disable` /
   `// phpcs:enable` blocks.
-- PHPMD: `// @SuppressWarnings(PHPMD.[RuleName])` in a docblock.
-- For PHPantom's own diagnostics: support `@suppress PHPxxxx`
+- PHPMD (3.0): `#[SuppressWarnings(RuleName::class)]` as a PHP attribute.
+- For PHPantom's own diagnostics: support `@suppress phpantom.*`
   in docblocks (matching PHP Tools' convention) and a config flag
   `phpantom.diagnostics.enabled: bool` (default `true`).
 

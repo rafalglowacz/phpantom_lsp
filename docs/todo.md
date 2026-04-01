@@ -26,7 +26,6 @@ within the same impact tier.
 | T18 | [Method-level template parameter resolution at call sites](todo/type-inference.md#t18-method-level-template-parameter-resolution-at-call-sites) | Medium | Medium     |
 | H17 | [`missingType.iterableValue` — add `@return` with inferred element type](todo/phpstan-actions.md#h17-missingtype-iterablevalue-return-type--add-return-with-iterable-type) | Medium | High       |
 | H10 | [`return.unusedType` — remove unused type from return union](todo/phpstan-actions.md#h10-returnunusedtype--remove-unused-type-from-return-union) | Medium | Medium     |
-| L12 | [`App::make` / `App::makeWith` class-string return type dispatch](todo/laravel.md#l12-appmake--appmakewith-class-string-return-type-dispatch) | Medium | Low        |
 | H6  | `return.type` — update return type to match actual returns                                                                                   | Medium | Medium     |
 |     | **Release 0.7.0**                                                                                                                          |        |            |
 
@@ -37,7 +36,6 @@ within the same impact tier.
 |     | Clear [refactoring gate](todo/refactor.md)                                                           | —      | —      |
 | D8  | [Undefined variable diagnostic](todo/diagnostics.md#d8-undefined-variable-diagnostic)                | High   | Medium |
 | D11 | [Invalid class-like kind in context](todo/diagnostics.md#d11-invalid-class-like-kind-in-context)     | Medium | Low    |
-| D4  | Unused variable warning                                                                              | Medium | Medium |
 |     | **Release 0.8.0**                                                                                    |        |        |
 
 > **Note:** F1 (Workspace symbol search), F2 (Document symbols), A8

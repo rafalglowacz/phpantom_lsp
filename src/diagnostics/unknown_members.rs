@@ -56,17 +56,10 @@ use crate::parser::with_parse_cache;
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
-use crate::completion::resolver::{
-    Loaders, ResolutionCtx, resolve_target_classes, resolve_target_classes_expr,
-};
-use crate::completion::variable::resolution::resolve_variable_types;
-
-use crate::hover::variable_type::resolve_variable_type_string;
-use crate::inheritance::resolve_property_type_hint;
-use crate::subject_expr::SubjectExpr;
+use crate::completion::resolver::{ResolutionCtx, SubjectOutcome, resolve_subject_outcome};
 use crate::symbol_map::SymbolKind;
-use crate::types::{AccessKind, ClassInfo, ClassLikeKind, ResolvedType};
-use crate::virtual_members::{resolve_class_fully_cached, resolve_class_fully_maybe_cached};
+use crate::types::{AccessKind, ClassInfo, ClassLikeKind};
+use crate::virtual_members::resolve_class_fully_cached;
 
 use super::helpers::{find_innermost_enclosing_class, make_diagnostic};
 use super::offset_range_to_lsp_range;
@@ -156,32 +149,9 @@ struct SubjectCacheKey {
     assert_offset: u32,
 }
 
-/// The outcome of resolving a subject for diagnostic purposes.
-///
-/// Cached so that subsequent member accesses on the same subject in the
-/// same scope skip the entire resolution pipeline (including expensive
-/// `with_parsed_program` re-parses).
-#[derive(Clone, Debug)]
-enum SubjectOutcome {
-    /// Subject resolved to one or more classes.
-    Resolved(Vec<Arc<ClassInfo>>),
-    /// Subject resolved to a scalar type — member access is always a
-    /// runtime crash.
-    Scalar(String),
-    /// Subject resolved to a class name that couldn't be loaded.
-    UnresolvableClass(String),
-    /// Subject type could not be resolved — no class information
-    /// available.  The opt-in `unresolved-member-access` diagnostic
-    /// covers this case regardless of whether the subject is a bare
-    /// variable, a chain, an array access, or a function call.
-    Untyped,
-}
-
 /// Per-pass cache mapping subject keys to their resolution outcomes.
 type SubjectCache = HashMap<SubjectCacheKey, SubjectOutcome>;
 
-/// Build a [`ScopeKey`] from the innermost enclosing class (if any)
-/// and the enclosing function/method/closure scope start offset.
 /// Check whether a subject text is rooted in `$this`, `self`, `static`,
 /// or `parent`.  This matches both bare keywords (`"$this"`, `"static"`)
 /// and chain expressions that start with one of them
@@ -219,49 +189,6 @@ fn scope_key_for(current_class: Option<&ClassInfo>, fn_scope_start: u32) -> Scop
         },
         None => ScopeKey::TopLevel { fn_scope_start },
     }
-}
-
-/// Resolve the subject and return a [`SubjectOutcome`].
-///
-/// This runs the full resolution pipeline exactly once per unique
-/// cache key.
-fn resolve_subject_outcome(
-    subject_text: &str,
-    access_kind: AccessKind,
-    rctx: &ResolutionCtx<'_>,
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: &dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
-    cache: &crate::virtual_members::ResolvedClassCache,
-) -> SubjectOutcome {
-    let base_classes: Vec<Arc<ClassInfo>> = resolve_target_classes(subject_text, access_kind, rctx);
-
-    if !base_classes.is_empty() {
-        return SubjectOutcome::Resolved(base_classes);
-    }
-
-    // ── Subject did not resolve to any class ────────────────────────
-    let expr = SubjectExpr::parse(subject_text);
-
-    // Try scalar type detection.
-    if let Some(scalar) = resolve_scalar_subject_type(
-        &expr,
-        access_kind,
-        rctx,
-        class_loader,
-        function_loader,
-        cache,
-    ) {
-        return SubjectOutcome::Scalar(scalar);
-    }
-
-    // Try unresolvable class detection.
-    if let Some(unresolved) =
-        resolve_unresolvable_class_subject(&expr, rctx, class_loader, function_loader)
-    {
-        return SubjectOutcome::UnresolvableClass(unresolved);
-    }
-
-    SubjectOutcome::Untyped
 }
 
 impl Backend {
@@ -459,14 +386,7 @@ impl Backend {
                         resolved_class_cache: Some(resolved_cache),
                         function_loader: Some(&function_loader),
                     };
-                    resolve_subject_outcome(
-                        subject_text,
-                        access_kind,
-                        &rctx,
-                        &class_loader,
-                        &function_loader,
-                        resolved_cache,
-                    )
+                    resolve_subject_outcome(subject_text, access_kind, &rctx)
                 })
                 .clone();
 
@@ -924,215 +844,6 @@ fn has_magic_method_for_access(class: &ClassInfo, is_static: bool, is_method_cal
     }
 
     false
-}
-
-/// Try to determine a scalar type for the subject, so we can report a
-/// more specific "member access on scalar" diagnostic.
-fn resolve_scalar_subject_type(
-    expr: &SubjectExpr,
-    access_kind: AccessKind,
-    rctx: &ResolutionCtx<'_>,
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: &dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
-    cache: &crate::virtual_members::ResolvedClassCache,
-) -> Option<String> {
-    match expr {
-        // ── Bare variable: $number = 1; $number->foo() ──────────
-        SubjectExpr::Variable(var_name) => {
-            let default_class = ClassInfo::default();
-            let effective_class = rctx.current_class.unwrap_or(&default_class);
-            let resolved = resolve_variable_types(
-                var_name,
-                effective_class,
-                rctx.all_classes,
-                rctx.content,
-                rctx.cursor_offset,
-                class_loader,
-                Loaders::with_function(rctx.function_loader),
-            );
-            if resolved.is_empty() {
-                return None;
-            }
-            let joined = ResolvedType::types_joined(&resolved);
-            if joined.all_members_primitive_scalar() {
-                let display = joined
-                    .non_null_type()
-                    .map_or_else(|| joined.to_string(), |t| t.to_string());
-                Some(display)
-            } else {
-                None
-            }
-        }
-
-        // ── Property chain: $user->age->value ───────────────────
-        SubjectExpr::PropertyChain { base, property } => {
-            // Resolve the base to classes, then look up the property's
-            // type hint on the resolved class.
-            let base_classes = resolve_target_classes_expr(base, access_kind, rctx);
-            for cls in &base_classes {
-                let resolved = resolve_class_fully_maybe_cached(cls, class_loader, Some(cache));
-                if let Some(parsed) = resolve_property_type_hint(&resolved, property, class_loader)
-                {
-                    // Check each union branch — if ALL branches are scalar, the
-                    // type is scalar.  If any branch is a class, resolve_target_classes
-                    // would have returned it, so we wouldn't be here.
-                    if parsed.all_members_primitive_scalar() {
-                        let display = parsed
-                            .non_null_type()
-                            .map_or_else(|| parsed.to_string(), |t| t.to_string());
-                        return Some(display);
-                    }
-                    // Non-scalar, non-class type (e.g. a type alias we can't
-                    // resolve) — treat as unresolvable.
-                    return None;
-                }
-            }
-            None
-        }
-
-        // ── Call expression: getInt()->value, $obj->getAge()->value ──
-        SubjectExpr::CallExpr { callee, args_text } => {
-            // Resolve the call return type.  If it's a scalar, report it.
-            let return_classes = Backend::resolve_call_return_types_expr(callee, args_text, rctx);
-            if return_classes.is_empty() {
-                // Try to get the raw return type hint from the callable.
-                match callee.as_ref() {
-                    // Instance method call: $obj->getAge()
-                    SubjectExpr::MethodCall { base, method } => {
-                        let base_classes = resolve_target_classes_expr(base, access_kind, rctx);
-                        for cls in &base_classes {
-                            let resolved =
-                                resolve_class_fully_maybe_cached(cls, class_loader, Some(cache));
-                            if let Some(m) = resolved
-                                .methods
-                                .iter()
-                                .find(|m| m.name.eq_ignore_ascii_case(method))
-                                && let Some(ref hint) = m.return_type
-                                && hint.all_members_primitive_scalar()
-                            {
-                                let display = hint
-                                    .non_null_type()
-                                    .map_or_else(|| hint.to_string(), |t| t.to_string());
-                                return Some(display);
-                            }
-                        }
-                    }
-                    // Standalone function call: getInt()
-                    SubjectExpr::FunctionCall(fn_name) => {
-                        if let Some(func_info) = function_loader(fn_name)
-                            && let Some(ref hint) = func_info.return_type
-                            && hint.all_members_primitive_scalar()
-                        {
-                            let display = hint
-                                .non_null_type()
-                                .map_or_else(|| hint.to_string(), |t| t.to_string());
-                            return Some(display);
-                        }
-                    }
-                    // Static method call: Foo::getInt()
-                    SubjectExpr::StaticMethodCall { class, method } => {
-                        let cls = class_loader(class);
-                        if let Some(cls) = cls {
-                            let resolved =
-                                resolve_class_fully_maybe_cached(&cls, class_loader, Some(cache));
-                            if let Some(m) = resolved
-                                .methods
-                                .iter()
-                                .find(|m| m.name.eq_ignore_ascii_case(method))
-                                && let Some(ref hint) = m.return_type
-                                && hint.all_members_primitive_scalar()
-                            {
-                                let display = hint
-                                    .non_null_type()
-                                    .map_or_else(|| hint.to_string(), |t| t.to_string());
-                                return Some(display);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Try to determine an unresolvable class name for the subject.
-///
-/// When the subject's raw type looks like a class name but cannot be
-/// loaded, we emit a diagnostic that names the unresolvable type.
-fn resolve_unresolvable_class_subject(
-    expr: &SubjectExpr,
-    rctx: &ResolutionCtx<'_>,
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: &dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
-) -> Option<String> {
-    let raw_type = match expr {
-        SubjectExpr::Variable(var_name) => {
-            // Try the unified pipeline first (covers assignments,
-            // parameter type hints, foreach bindings, catch variables,
-            // inline @var overrides, etc.).
-            let default_class = ClassInfo::default();
-            let effective_class = rctx.current_class.unwrap_or(&default_class);
-            let resolved = resolve_variable_types(
-                var_name,
-                effective_class,
-                rctx.all_classes,
-                rctx.content,
-                rctx.cursor_offset,
-                class_loader,
-                Loaders::with_function(rctx.function_loader),
-            );
-            if !resolved.is_empty() {
-                Some(ResolvedType::type_strings_joined(&resolved))
-            } else {
-                // Fall back to the hover variable type resolver which
-                // also checks class-based foreach resolution through
-                // @implements / @extends generics.
-                resolve_variable_type_string(
-                    var_name,
-                    rctx.content,
-                    rctx.cursor_offset,
-                    rctx.current_class,
-                    rctx.all_classes,
-                    class_loader,
-                    Loaders::with_function(rctx.function_loader),
-                )
-            }
-        }
-        SubjectExpr::CallExpr { callee, .. } => match callee.as_ref() {
-            SubjectExpr::FunctionCall(fn_name) => {
-                let fi = function_loader(fn_name)?;
-                fi.return_type_str()
-            }
-            _ => None,
-        },
-        _ => None,
-    }?;
-
-    let parsed = crate::php_type::PhpType::parse(&raw_type);
-    if parsed.all_members_scalar() {
-        return None;
-    }
-
-    // Extract the non-null type (e.g. `User|null` → `User`), then get
-    // the base class name.  `base_name()` returns `None` for scalars,
-    // PHPDoc pseudo-types (`class-string`, `list`, etc.), unions, and
-    // other non-class types — so we skip those automatically.
-    let effective = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
-    let base = match effective.base_name() {
-        Some(name) => name.to_string(),
-        None => return None,
-    };
-
-    // The type looks like a class name.  If we can't resolve it,
-    // the subject type is an unknown class.
-    if class_loader(&base).is_none() {
-        Some(base)
-    } else {
-        None
-    }
 }
 
 fn display_class_name(class: &ClassInfo) -> String {

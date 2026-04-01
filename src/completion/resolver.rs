@@ -31,9 +31,12 @@ use std::sync::Arc;
 
 use crate::Backend;
 use crate::docblock;
+use crate::inheritance::resolve_property_type_hint;
 use crate::php_type::PhpType;
+use crate::subject_expr::SubjectExpr;
 use crate::types::*;
 use crate::util::find_class_by_name;
+use crate::virtual_members::resolve_class_fully_maybe_cached;
 
 /// Type alias for the optional function-loader closure passed through
 /// the resolution chain.  Reduces clippy `type_complexity` warnings.
@@ -954,6 +957,303 @@ fn resolve_call_raw_return_type(
             None
         }
         _ => None,
+    }
+}
+
+// ─── Enriched subject resolution for diagnostics ────────────────────────────
+
+/// The outcome of resolving a subject for diagnostic purposes.
+///
+/// [`resolve_target_classes`] only returns classes and silently drops
+/// scalar types.  Diagnostics need to know *why* resolution returned
+/// empty — was the subject a scalar type (runtime crash), an
+/// unresolvable class name (likely typo / missing import), or truly
+/// untyped?  This enum carries that information so the diagnostic
+/// collector can emit the right message without re-running resolution.
+#[derive(Clone, Debug)]
+pub(crate) enum SubjectOutcome {
+    /// Subject resolved to one or more classes.
+    Resolved(Vec<Arc<ClassInfo>>),
+    /// Subject resolved to a scalar type — member access is always a
+    /// runtime crash.  The string is the display name of the scalar
+    /// type (e.g. `"int"`, `"string"`, `"bool|int"`).
+    Scalar(String),
+    /// Subject resolved to a class name that couldn't be loaded.
+    UnresolvableClass(String),
+    /// Subject type could not be resolved — no class information
+    /// available.
+    Untyped,
+}
+
+/// Resolve a subject to a [`SubjectOutcome`] in a single pass.
+///
+/// This is the unified entry point for diagnostic subject resolution.
+/// It first tries [`resolve_target_classes`] (the same pipeline used
+/// by completion and hover).  When that returns empty, it inspects the
+/// raw resolved types to determine whether the subject is scalar,
+/// an unresolvable class name, or truly untyped — without re-running
+/// variable resolution or calling separate secondary helpers.
+pub(crate) fn resolve_subject_outcome(
+    subject: &str,
+    access_kind: AccessKind,
+    ctx: &ResolutionCtx<'_>,
+) -> SubjectOutcome {
+    let classes = resolve_target_classes(subject, access_kind, ctx);
+    if !classes.is_empty() {
+        return SubjectOutcome::Resolved(classes);
+    }
+
+    // ── Subject did not resolve to any class — determine why ────
+    let expr = SubjectExpr::parse(subject);
+    resolve_subject_outcome_from_expr(&expr, access_kind, ctx)
+}
+
+/// Inner dispatch for [`resolve_subject_outcome`], operating on a
+/// pre-parsed [`SubjectExpr`].
+fn resolve_subject_outcome_from_expr(
+    expr: &SubjectExpr,
+    access_kind: AccessKind,
+    ctx: &ResolutionCtx<'_>,
+) -> SubjectOutcome {
+    match expr {
+        // ── Bare variable ───────────────────────────────────────
+        SubjectExpr::Variable(var_name) => resolve_subject_outcome_variable(var_name, ctx),
+
+        // ── Property chain: $user->age->value ───────────────────
+        SubjectExpr::PropertyChain { base, property } => {
+            resolve_subject_outcome_property_chain(base, property, access_kind, ctx)
+        }
+
+        // ── Call expression ─────────────────────────────────────
+        SubjectExpr::CallExpr { callee, args_text } => {
+            resolve_subject_outcome_call_expr(callee, args_text, access_kind, ctx)
+        }
+
+        _ => SubjectOutcome::Untyped,
+    }
+}
+
+/// Resolve a bare variable subject to a [`SubjectOutcome`].
+///
+/// Re-uses `resolve_variable_types` (the same function that
+/// `resolve_variable_fallback` calls) to get the raw resolved types.
+/// If they are all scalar, returns `Scalar`.  If the raw type string
+/// looks like a class name that can't be loaded, returns
+/// `UnresolvableClass`.  Otherwise returns `Untyped`.
+fn resolve_subject_outcome_variable(var_name: &str, ctx: &ResolutionCtx<'_>) -> SubjectOutcome {
+    let default_class = ClassInfo::default();
+    let effective_class = ctx.current_class.unwrap_or(&default_class);
+
+    let resolved = super::variable::resolution::resolve_variable_types(
+        var_name,
+        effective_class,
+        ctx.all_classes,
+        ctx.content,
+        ctx.cursor_offset,
+        ctx.class_loader,
+        Loaders::with_function(ctx.function_loader),
+    );
+
+    if !resolved.is_empty() {
+        let joined = ResolvedType::types_joined(&resolved);
+        if joined.all_members_primitive_scalar() {
+            let display = joined
+                .non_null_type()
+                .map_or_else(|| joined.to_string(), |t| t.to_string());
+            return SubjectOutcome::Scalar(display);
+        }
+        // The resolved types contain non-scalar, non-class entries
+        // (e.g. type aliases we can't resolve).  Check for
+        // unresolvable class names.
+        let raw_type = ResolvedType::type_strings_joined(&resolved);
+        if let Some(unresolved) = check_unresolvable_class_name(&raw_type, ctx.class_loader) {
+            return SubjectOutcome::UnresolvableClass(unresolved);
+        }
+        return SubjectOutcome::Untyped;
+    }
+
+    // Variable resolution returned nothing.  Fall back to the hover
+    // variable type resolver which also checks class-based foreach
+    // resolution through @implements / @extends generics.
+    if let Some(raw_type) = crate::hover::variable_type::resolve_variable_type_string(
+        var_name,
+        ctx.content,
+        ctx.cursor_offset,
+        ctx.current_class,
+        ctx.all_classes,
+        ctx.class_loader,
+        Loaders::with_function(ctx.function_loader),
+    ) && let Some(unresolved) = check_unresolvable_class_name(&raw_type, ctx.class_loader)
+    {
+        return SubjectOutcome::UnresolvableClass(unresolved);
+    }
+
+    SubjectOutcome::Untyped
+}
+
+/// Resolve a property chain subject to a [`SubjectOutcome`].
+///
+/// Resolves the base to classes, then looks up the property's type
+/// hint.  If the type is purely scalar, returns `Scalar`.
+fn resolve_subject_outcome_property_chain(
+    base: &SubjectExpr,
+    property: &str,
+    access_kind: AccessKind,
+    ctx: &ResolutionCtx<'_>,
+) -> SubjectOutcome {
+    let base_classes = resolve_target_classes_expr(base, access_kind, ctx);
+    for cls in &base_classes {
+        let resolved =
+            resolve_class_fully_maybe_cached(cls, ctx.class_loader, ctx.resolved_class_cache);
+        if let Some(parsed) = resolve_property_type_hint(&resolved, property, ctx.class_loader) {
+            if parsed.all_members_primitive_scalar() {
+                let display = parsed
+                    .non_null_type()
+                    .map_or_else(|| parsed.to_string(), |t| t.to_string());
+                return SubjectOutcome::Scalar(display);
+            }
+            // Non-scalar, non-class type — treat as unresolvable.
+            return SubjectOutcome::Untyped;
+        }
+    }
+    SubjectOutcome::Untyped
+}
+
+/// Resolve a call expression subject to a [`SubjectOutcome`].
+///
+/// First tries `resolve_call_return_types_expr` (the normal path).
+/// When that returns empty, inspects the raw return type hint of the
+/// callable — if it's scalar, returns `Scalar`.
+fn resolve_subject_outcome_call_expr(
+    callee: &SubjectExpr,
+    args_text: &str,
+    access_kind: AccessKind,
+    ctx: &ResolutionCtx<'_>,
+) -> SubjectOutcome {
+    let return_classes = Backend::resolve_call_return_types_expr(callee, args_text, ctx);
+    if !return_classes.is_empty() {
+        // Shouldn't happen (resolve_target_classes would have returned
+        // these), but handle gracefully.
+        return SubjectOutcome::Resolved(return_classes);
+    }
+
+    // Try to get the raw return type hint from the callable.
+    if let Some(scalar) = resolve_call_scalar_return(callee, access_kind, ctx) {
+        return SubjectOutcome::Scalar(scalar);
+    }
+
+    // Try unresolvable class detection for function calls.
+    if let SubjectExpr::FunctionCall(fn_name) = callee
+        && let Some(fl) = ctx.function_loader
+        && let Some(func_info) = fl(fn_name.as_str())
+        && let Some(raw_type) = func_info.return_type_str()
+        && let Some(unresolved) = check_unresolvable_class_name(&raw_type, ctx.class_loader)
+    {
+        return SubjectOutcome::UnresolvableClass(unresolved);
+    }
+
+    SubjectOutcome::Untyped
+}
+
+/// Check whether a call expression's return type is a scalar.
+///
+/// Inspects the raw return type hint on the method or function without
+/// going through the full class resolution pipeline.
+fn resolve_call_scalar_return(
+    callee: &SubjectExpr,
+    access_kind: AccessKind,
+    ctx: &ResolutionCtx<'_>,
+) -> Option<String> {
+    match callee {
+        // Instance method call: $obj->getAge()
+        SubjectExpr::MethodCall { base, method } => {
+            let base_classes = resolve_target_classes_expr(base, access_kind, ctx);
+            for cls in &base_classes {
+                let resolved = resolve_class_fully_maybe_cached(
+                    cls,
+                    ctx.class_loader,
+                    ctx.resolved_class_cache,
+                );
+                if let Some(m) = resolved
+                    .methods
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(method))
+                    && let Some(ref hint) = m.return_type
+                    && hint.all_members_primitive_scalar()
+                {
+                    let display = hint
+                        .non_null_type()
+                        .map_or_else(|| hint.to_string(), |t| t.to_string());
+                    return Some(display);
+                }
+            }
+            None
+        }
+        // Standalone function call: getInt()
+        SubjectExpr::FunctionCall(fn_name) => {
+            if let Some(fl) = ctx.function_loader
+                && let Some(func_info) = fl(fn_name)
+                && let Some(ref hint) = func_info.return_type
+                && hint.all_members_primitive_scalar()
+            {
+                let display = hint
+                    .non_null_type()
+                    .map_or_else(|| hint.to_string(), |t| t.to_string());
+                return Some(display);
+            }
+            None
+        }
+        // Static method call: Foo::getInt()
+        SubjectExpr::StaticMethodCall { class, method } => {
+            let cls = (ctx.class_loader)(class);
+            if let Some(cls) = cls {
+                let resolved = resolve_class_fully_maybe_cached(
+                    &cls,
+                    ctx.class_loader,
+                    ctx.resolved_class_cache,
+                );
+                if let Some(m) = resolved
+                    .methods
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(method))
+                    && let Some(ref hint) = m.return_type
+                    && hint.all_members_primitive_scalar()
+                {
+                    let display = hint
+                        .non_null_type()
+                        .map_or_else(|| hint.to_string(), |t| t.to_string());
+                    return Some(display);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Check whether a raw type string refers to a class that cannot be
+/// loaded.
+///
+/// Returns `Some(class_name)` when the type looks like a class name
+/// (not scalar, not a PHPDoc pseudo-type) but the class loader cannot
+/// find it.  Returns `None` for scalars, unions, shapes, and types
+/// that resolve successfully.
+fn check_unresolvable_class_name(
+    raw_type: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<String> {
+    let parsed = PhpType::parse(raw_type);
+    if parsed.all_members_scalar() {
+        return None;
+    }
+
+    let effective = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
+    let base = effective.base_name()?;
+
+    if class_loader(base).is_none() {
+        Some(base.to_string())
+    } else {
+        None
     }
 }
 
