@@ -114,12 +114,14 @@ fn is_self_like_type(ty: &PhpType) -> bool {
         PhpType::Generic(n, _) => is_self_keyword(n),
         PhpType::Nullable(inner) => is_self_like_type(inner),
         PhpType::Union(members) => {
-            // `static|null` — every non-null member is self-like.
-            let non_null: Vec<_> = members
+            // `static|null`, `$this|void` — filter out non-class types
+            // that cannot produce a class resolution, then check that
+            // every remaining member is self-like.
+            let significant: Vec<_> = members
                 .iter()
-                .filter(|m| !matches!(m, PhpType::Named(n) if n == "null"))
+                .filter(|m| !matches!(m, PhpType::Named(n) if n == "null" || n == "void" || n == "never"))
                 .collect();
-            !non_null.is_empty() && non_null.iter().all(|m| is_self_like_type(m))
+            !significant.is_empty() && significant.iter().all(|m| is_self_like_type(m))
         }
         _ => false,
     }
