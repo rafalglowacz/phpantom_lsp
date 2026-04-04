@@ -70,33 +70,5 @@ native `array` with the docblock's `list<Request>`.
 **Impact:** 1 diagnostic in the shared project
 (`MobilePayConnection:76`).
 
-## B9: Eloquent relationship property lookup is case-sensitive
-
-Laravel normalises property names via `Str::snake()` at runtime, so
-`$order->orderProducts` and `$order->orderproducts` both resolve to the
-same relationship. PHPantom's property lookup is case-sensitive, so when
-code uses `orderProducts` (camelCase) but the model declares the
-relationship method and `@property` as `orderproducts` (all lowercase),
-the property is not found.
-
-Real-world example — `FlowService.php`:
-
-```php
-// FlowService line 477:
-$items = $order->orderProducts->map(...);
-//              ^^^^^^^^^^^^^^ camelCase — not found
-
-// Order model declares:
-public function orderproducts(): HasMany { ... }
-// and @property uses 'orderproducts' (lowercase)
-```
-
-The fix should apply `Str::snake()`-equivalent normalisation (or
-case-insensitive matching) when looking up relationship-derived virtual
-properties on Eloquent models.
-
-**Impact:** 1 direct diagnostic (`FlowService:477`) plus 1 cascading
-(`FlowService:517` — compound with `Collection::reduce()` type loss).
-
 
 
