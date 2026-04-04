@@ -58,6 +58,13 @@ use crate::completion::resolver::{Loaders, VarResolutionCtx};
 // directly (diagnostics, hover, foreach resolution).
 thread_local! {
     static VAR_RESOLUTION_DEPTH: Cell<u8> = const { Cell::new(0) };
+    /// Sticky flag set when `resolve_variable_types` returns empty
+    /// because the depth guard fired.  The flag stays set until the
+    /// outermost `resolve_variable_types` call returns, so callers
+    /// up the stack (e.g. `resolve_target_classes`) can detect that
+    /// an empty result was caused by the depth limit — not because
+    /// the variable is genuinely unresolvable — and skip caching it.
+    static VAR_RESOLUTION_DEPTH_LIMITED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Maximum nesting depth for `resolve_variable_types` calls.
@@ -73,6 +80,18 @@ thread_local! {
 /// rather than by this depth limit alone.  The depth limit is a
 /// safety net for any remaining recursive patterns.
 const MAX_VAR_RESOLUTION_DEPTH: u8 = 3;
+
+/// Returns `true` when any `resolve_variable_types` call on the
+/// current stack has returned empty because the depth guard fired.
+///
+/// The flag is sticky: once set, it stays `true` until the outermost
+/// `resolve_variable_types` call returns and clears it.  This lets
+/// callers further up the stack (e.g. `resolve_target_classes`) detect
+/// that an empty result was caused by the depth limit — not because
+/// the variable is genuinely unresolvable — and skip caching it.
+pub(crate) fn is_var_resolution_depth_limited() -> bool {
+    VAR_RESOLUTION_DEPTH_LIMITED.with(|f| f.get())
+}
 
 /// Build a [`VarClassStringResolver`] closure from a [`VarResolutionCtx`].
 ///
@@ -174,6 +193,7 @@ pub(crate) fn resolve_variable_types(
     });
     if depth >= MAX_VAR_RESOLUTION_DEPTH {
         VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        VAR_RESOLUTION_DEPTH_LIMITED.with(|f| f.set(true));
         return vec![];
     }
 
@@ -194,7 +214,17 @@ pub(crate) fn resolve_variable_types(
         resolve_variable_in_statements(program.statements.iter(), &ctx)
     });
 
-    VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    let new_depth = VAR_RESOLUTION_DEPTH.with(|d| {
+        let v = d.get().saturating_sub(1);
+        d.set(v);
+        v
+    });
+    // Clear the sticky depth-limited flag when the outermost call
+    // returns.  Inner calls leave it set so that every caller in
+    // the stack can observe it.
+    if new_depth == 0 {
+        VAR_RESOLUTION_DEPTH_LIMITED.with(|f| f.set(false));
+    }
     result
 }
 
@@ -222,6 +252,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
     });
     if depth >= MAX_VAR_RESOLUTION_DEPTH {
         VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        VAR_RESOLUTION_DEPTH_LIMITED.with(|f| f.set(true));
         return vec![];
     }
 
@@ -246,7 +277,14 @@ pub(crate) fn resolve_variable_types_branch_aware(
         },
     );
 
-    VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    let new_depth = VAR_RESOLUTION_DEPTH.with(|d| {
+        let v = d.get().saturating_sub(1);
+        d.set(v);
+        v
+    });
+    if new_depth == 0 {
+        VAR_RESOLUTION_DEPTH_LIMITED.with(|f| f.set(false));
+    }
     result
 }
 

@@ -517,12 +517,23 @@ pub(crate) fn resolve_target_classes(
     let result = resolve_target_classes_expr(&expr, access_kind, ctx);
 
     // ── Populate the cache if active ────────────────────────────
-    DIAG_SUBJECT_CACHE.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if let Some((map, _)) = borrow.as_mut() {
-            map.insert(cache_key, result.clone());
-        }
-    });
+    // Skip caching empty results when the variable resolution depth
+    // guard has fired.  A depth-limited empty result does not mean
+    // the variable is genuinely unresolvable — it only means the
+    // recursion was too deep *this time*.  Caching such an empty
+    // vec would poison the cache: a later top-level lookup (at
+    // depth 0) would hit the cached empty entry and produce a
+    // false "type could not be resolved" diagnostic.
+    let skip_cache = result.is_empty()
+        && super::variable::resolution::is_var_resolution_depth_limited();
+    if !skip_cache {
+        DIAG_SUBJECT_CACHE.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            if let Some((map, _)) = borrow.as_mut() {
+                map.insert(cache_key, result.clone());
+            }
+        });
+    }
 
     result
 }

@@ -5098,4 +5098,161 @@ final class PurchaseFileProductCollection extends Collection {
             "expected no diagnostics for $this->items on generic Collection subclass, got: {diags:?}"
         );
     }
+
+    #[test]
+    fn no_false_positive_when_variable_reassigned_inside_try_inside_foreach() {
+        // B3 follow-up: when a variable is assigned before a foreach,
+        // then reassigned inside a try block nested inside the foreach
+        // body, the type should still resolve for accesses after the
+        // reassignment (still inside the try).
+        //
+        // Real-world pattern from OrderService:137:
+        //   $remaining = $order->amount;          // Decimal via @property
+        //   foreach ($payments as $payment) {
+        //       try {
+        //           $remaining = $remaining->sub($toCapture);  // ← should resolve
+        //       } catch (...) {}
+        //   }
+        let php = r#"<?php
+class Decimal {
+    public function sub(string $v): self { return new self(); }
+    public function isZero(): bool { return true; }
+    public function isNegative(): bool { return true; }
+    public function isPositive(): bool { return true; }
+    public function toFixed(int $places): string { return ''; }
+}
+
+/**
+ * @property Decimal $amount
+ * @property string $state
+ */
+class Payment {
+}
+
+/**
+ * @property Decimal $amount
+ */
+class Order {
+}
+
+class CaptureException extends \Exception {}
+class InvalidStateException extends \Exception {}
+class CaptureService {
+    public function captureReservedPayment(Payment $p, Decimal $amount): void {}
+}
+
+class OrderService {
+    /** @param list<Payment> $payments */
+    public function capture(Order $order, array $payments): void {
+        $remaining = $order->amount;
+        foreach ($payments as $payment) {
+            if ($payment->state === 'paid') {
+                $remaining = $remaining->sub('1');
+            }
+        }
+
+        $svc = new CaptureService();
+        foreach ($payments as $payment) {
+            if ($payment->state !== 'reserved') {
+                continue;
+            }
+
+            $toCapture = $remaining->isPositive() ? $payment->amount : $remaining;
+            if ($toCapture->isZero() || $toCapture->isNegative()) {
+                break;
+            }
+
+            try {
+                $svc->captureReservedPayment($payment, $toCapture);
+                $remaining = $remaining->sub('1');
+            } catch (CaptureException|InvalidStateException $e) {
+            }
+        }
+
+        if ($remaining->isPositive() && !$remaining->isZero()) {
+            throw new \RuntimeException('remaining: ' . $remaining->toFixed(2));
+        }
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        backend.config.lock().diagnostics.unresolved_member_access = Some(true);
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for variable reassigned inside try-inside-foreach, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_false_positive_when_variable_reassigned_inside_nested_foreach() {
+        // Regression test for cache poisoning by depth-limited variable
+        // resolution.  When `$orderCostPrice` is reassigned inside a
+        // nested foreach via `$orderCostPrice = $orderCostPrice->add(…)`,
+        // the self-referential RHS triggers recursive calls to
+        // resolve_variable_types.  With two levels of foreach nesting
+        // the recursion reaches MAX_VAR_RESOLUTION_DEPTH, producing an
+        // empty result.  If that empty result is cached in
+        // DIAG_SUBJECT_CACHE, the later top-level resolution (at
+        // depth 0) for the *outer* foreach access hits the poisoned
+        // cache entry and reports "type could not be resolved".
+        //
+        // Real-world pattern from OrderService:618:
+        //   $zero = new Decimal('0');
+        //   $orderCostPrice = $zero;
+        //   foreach ($order->getOrderProducts() as $line) {
+        //       if ($product->isBundle()) {
+        //           foreach ($bundleProducts as $bp) {
+        //               $productCostPrice = $bp->supplier_price_dkk ?? $zero;
+        //               $orderCostPrice = $orderCostPrice->add($productCostPrice->mul($qty));
+        //           }
+        //           continue;
+        //       }
+        //       $productCostPrice = $product->supplier_price_dkk ?? $zero;
+        //       $orderCostPrice = $orderCostPrice->add($productCostPrice->mul($qty));
+        //   }
+        //   return $orderCostPrice->mul($rate);
+        let php = r#"<?php
+class Decimal {
+    public function add(string $v): self { return new self(); }
+    public function mul(string $v): self { return new self(); }
+}
+
+class Item {
+    public Decimal $cost;
+    public function isBundle(): bool { return false; }
+    /** @return list<Item> */
+    public function getChildren(): array { return []; }
+}
+
+class OrderService {
+    /** @param list<Item> $items */
+    public function calculateCost(array $items): Decimal {
+        $zero = new Decimal();
+        $result = $zero;
+        foreach ($items as $item) {
+            if ($item->isBundle()) {
+                $children = $item->getChildren();
+                foreach ($children as $child) {
+                    $result = $result->add($child->cost->mul('1'));
+                }
+
+                continue;
+            }
+
+            $result = $result->add($item->cost->mul('1'));
+        }
+
+        return $result->mul('1');
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        backend.config.lock().diagnostics.unresolved_member_access = Some(true);
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for variable reassigned inside nested foreach loops, got: {diags:?}"
+        );
+    }
 }
