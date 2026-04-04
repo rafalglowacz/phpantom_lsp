@@ -95,6 +95,7 @@ use accessors::{
 
 pub(crate) use relationships::count_property_to_relationship_method;
 pub use relationships::infer_relationship_from_body;
+pub(crate) use relationships::{RELATION_QUERY_METHODS, resolve_relation_chain};
 use relationships::{
     RelationshipKind, build_property_type, classify_relationship, count_property_name,
     extract_related_type,

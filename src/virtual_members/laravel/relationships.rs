@@ -7,11 +7,34 @@
 //! inferring relationship types from method body text when no `@return`
 //! annotation is present.
 
+use std::sync::Arc;
+
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, ELOQUENT_COLLECTION_FQN};
 use crate::util::{short_name, strip_fqn_prefix};
 
 use super::helpers::{camel_to_snake, snake_to_camel};
+
+/// Methods on `Builder` / `QueriesRelationships` that accept a relation
+/// name string as the first argument and a closure typed as
+/// `Closure(Builder<TRelatedModel>): mixed` as the second argument
+/// (or at the listed position).
+///
+/// When one of these methods is detected, the closure parameter
+/// inference overrides `TModel` with the related model resolved from
+/// the relation name string.
+pub(crate) const RELATION_QUERY_METHODS: &[&str] = &[
+    "has",
+    "orHas",
+    "doesntHave",
+    "orDoesntHave",
+    "whereHas",
+    "orWhereHas",
+    "withWhereHas",
+    "whereDoesntHave",
+    "orWhereDoesntHave",
+    "whereRelation",
+];
 
 /// Fully-qualified relationship class names used by
 /// [`infer_relationship_from_body`].
@@ -307,6 +330,111 @@ fn extract_class_argument(after_paren: &str) -> Option<String> {
 /// relationship.
 pub(super) fn count_property_name(method_name: &str) -> String {
     format!("{}_count", camel_to_snake(method_name))
+}
+
+/// Walk a dot-separated relation chain starting from `model` and return
+/// the fully-qualified name of the final related model.
+///
+/// For example, given model `ArticleCategoryTranslation` and chain
+/// `"category.articles"`:
+///
+/// 1. Look up `category()` on `ArticleCategoryTranslation` → returns
+///    `BelongsTo<ArticleCategory>` → extract `ArticleCategory`.
+/// 2. Look up `articles()` on `ArticleCategory` → returns
+///    `HasMany<Article>` → extract `Article`.
+/// 3. Return `"App\\Models\\Article"` (the FQN).
+///
+/// Returns `None` if any segment cannot be resolved (missing method,
+/// no relationship return type, class not found).
+pub(crate) fn resolve_relation_chain(
+    model: &ClassInfo,
+    chain: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<String> {
+    let segments: Vec<&str> = chain.split('.').collect();
+    if segments.is_empty() {
+        return None;
+    }
+
+    let mut current_class = resolve_class_with_inheritance(model, class_loader);
+    for segment in &segments {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+
+        // Find the relationship method on the current model.
+        let method = current_class.methods.iter().find(|m| m.name == segment)?;
+
+        // Get the return type and extract the related model type.
+        // Body-inferred relationship types are already stored in
+        // `return_type` by the parser, so no fallback is needed.
+        let return_type_str = method.return_type_str()?;
+        let related_type = extract_related_type_for_chain(&return_type_str, &current_class)?;
+
+        // Resolve the related type to a full class, trying the model's
+        // namespace first (e.g. short name "Article" → "App\Models\Article").
+        let resolved = resolve_related_fqn(&related_type, &current_class, class_loader)?;
+        current_class = resolve_class_with_inheritance(&resolved, class_loader);
+    }
+
+    Some(current_class.fqn())
+}
+
+/// Resolve a class fully (with inheritance and virtual members) so that
+/// relationship methods from traits and parent classes are visible.
+fn resolve_class_with_inheritance(
+    class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Arc<ClassInfo> {
+    crate::virtual_members::resolve_class_fully(class, class_loader)
+}
+
+/// Extract the related type from a relationship return type string,
+/// resolving `$this` to the declaring class.
+fn extract_related_type_for_chain(
+    return_type: &str,
+    declaring_class: &ClassInfo,
+) -> Option<String> {
+    // First check that it's actually a relationship type.
+    classify_relationship(return_type)?;
+    let related = extract_related_type(return_type)?;
+
+    // `$this` in generic args means the declaring class itself.
+    if related == "$this" || related == "static" {
+        return Some(declaring_class.fqn());
+    }
+
+    Some(related)
+}
+
+/// Resolve a short or FQN related type to a loadable FQN.
+///
+/// Tries the following strategies:
+/// 1. Direct load (works for FQNs).
+/// 2. Prepend the declaring class's namespace (works for short names
+///    in the same namespace, e.g. `Article` → `App\Models\Article`).
+fn resolve_related_fqn(
+    related_type: &str,
+    declaring_class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<Arc<ClassInfo>> {
+    let cleaned = related_type.trim_start_matches('\\');
+
+    // Try direct load first (handles FQNs).
+    if let Some(cls) = class_loader(cleaned) {
+        return Some(cls);
+    }
+
+    // Try prepending the declaring class's namespace.
+    if let Some(ref ns) = declaring_class.file_namespace {
+        let fqn = format!("{}\\{}", ns, cleaned);
+        if let Some(cls) = class_loader(&fqn) {
+            return Some(cls);
+        }
+    }
+
+    None
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

@@ -926,42 +926,126 @@ impl PhpType {
     /// assert_eq!(replaced.to_string(), "App\\User | null");
     /// ```
     pub fn replace_self(&self, class_name: &str) -> PhpType {
+        self.replace_self_with_type(&PhpType::Named(class_name.to_string()))
+    }
+
+    /// Check whether this type tree contains any `self`, `static`, or
+    /// `$this` references that [`replace_self`] / [`replace_self_with_type`]
+    /// would replace.
+    pub fn contains_self_ref(&self) -> bool {
+        match self {
+            PhpType::Named(s) => s == "self" || s == "static" || s == "$this",
+            PhpType::Nullable(inner) => inner.contains_self_ref(),
+            PhpType::Union(types) | PhpType::Intersection(types) => {
+                types.iter().any(|t| t.contains_self_ref())
+            }
+            PhpType::Generic(name, args) => {
+                matches!(name.as_str(), "self" | "static" | "$this")
+                    || args.iter().any(|a| a.contains_self_ref())
+            }
+            PhpType::Array(inner) => inner.contains_self_ref(),
+            PhpType::ArrayShape(entries) | PhpType::ObjectShape(entries) => {
+                entries.iter().any(|e| e.value_type.contains_self_ref())
+            }
+            PhpType::Callable {
+                params,
+                return_type,
+                ..
+            } => {
+                params.iter().any(|p| p.type_hint.contains_self_ref())
+                    || return_type.as_ref().is_some_and(|r| r.contains_self_ref())
+            }
+            PhpType::Conditional {
+                condition,
+                then_type,
+                else_type,
+                ..
+            } => {
+                condition.contains_self_ref()
+                    || then_type.contains_self_ref()
+                    || else_type.contains_self_ref()
+            }
+            PhpType::ClassString(inner) | PhpType::InterfaceString(inner) => {
+                inner.as_ref().is_some_and(|t| t.contains_self_ref())
+            }
+            PhpType::KeyOf(inner) | PhpType::ValueOf(inner) => inner.contains_self_ref(),
+            PhpType::IndexAccess(base, index) => {
+                base.contains_self_ref() || index.contains_self_ref()
+            }
+            PhpType::Literal(_) | PhpType::Raw(_) | PhpType::IntRange(_, _) => false,
+        }
+    }
+
+    /// Replace `self` / `static` / `$this` throughout this type tree
+    /// with the given [`PhpType`].
+    ///
+    /// This is the structured counterpart of [`replace_self`]: instead of
+    /// replacing with a bare class name (`PhpType::Named(name)`), it
+    /// substitutes a full type expression.  This preserves generic
+    /// parameters when the receiver is a generic type like
+    /// `Builder<Article>`.
+    ///
+    /// When `replacement` is `PhpType::Generic("Builder", [Named("Article")])`
+    /// and the return type is `Named("static")`, the result is the full
+    /// generic type.  When the return type is `Generic("static", [args])`,
+    /// the replacement's base name is used and the return type's own args
+    /// are kept (they override the receiver's args).
+    pub fn replace_self_with_type(&self, replacement: &PhpType) -> PhpType {
+        // Extract the base class name from the replacement for use in
+        // Generic nodes where only the name part is replaced.
+        let replacement_name = match replacement {
+            PhpType::Named(n) => n.as_str(),
+            PhpType::Generic(n, _) => n.as_str(),
+            _ => "",
+        };
         match self {
             PhpType::Named(s) if s == "self" || s == "static" || s == "$this" => {
-                PhpType::Named(class_name.to_string())
+                replacement.clone()
             }
 
             PhpType::Named(_) | PhpType::Literal(_) | PhpType::Raw(_) => self.clone(),
 
-            PhpType::Nullable(inner) => PhpType::Nullable(Box::new(inner.replace_self(class_name))),
-
-            PhpType::Union(types) => {
-                PhpType::Union(types.iter().map(|t| t.replace_self(class_name)).collect())
+            PhpType::Nullable(inner) => {
+                PhpType::Nullable(Box::new(inner.replace_self_with_type(replacement)))
             }
 
-            PhpType::Intersection(types) => {
-                PhpType::Intersection(types.iter().map(|t| t.replace_self(class_name)).collect())
-            }
+            PhpType::Union(types) => PhpType::Union(
+                types
+                    .iter()
+                    .map(|t| t.replace_self_with_type(replacement))
+                    .collect(),
+            ),
+
+            PhpType::Intersection(types) => PhpType::Intersection(
+                types
+                    .iter()
+                    .map(|t| t.replace_self_with_type(replacement))
+                    .collect(),
+            ),
 
             PhpType::Generic(name, args) => {
                 let resolved_name = match name.as_str() {
-                    "self" | "static" | "$this" => class_name.to_string(),
+                    "self" | "static" | "$this" => replacement_name.to_string(),
                     _ => name.clone(),
                 };
                 PhpType::Generic(
                     resolved_name,
-                    args.iter().map(|a| a.replace_self(class_name)).collect(),
+                    args.iter()
+                        .map(|a| a.replace_self_with_type(replacement))
+                        .collect(),
                 )
             }
 
-            PhpType::Array(inner) => PhpType::Array(Box::new(inner.replace_self(class_name))),
+            PhpType::Array(inner) => {
+                PhpType::Array(Box::new(inner.replace_self_with_type(replacement)))
+            }
 
             PhpType::ArrayShape(entries) => PhpType::ArrayShape(
                 entries
                     .iter()
                     .map(|e| ShapeEntry {
                         key: e.key.clone(),
-                        value_type: e.value_type.replace_self(class_name),
+                        value_type: e.value_type.replace_self_with_type(replacement),
                         optional: e.optional,
                     })
                     .collect(),
@@ -972,7 +1056,7 @@ impl PhpType {
                     .iter()
                     .map(|e| ShapeEntry {
                         key: e.key.clone(),
-                        value_type: e.value_type.replace_self(class_name),
+                        value_type: e.value_type.replace_self_with_type(replacement),
                         optional: e.optional,
                     })
                     .collect(),
@@ -987,14 +1071,14 @@ impl PhpType {
                 params: params
                     .iter()
                     .map(|p| CallableParam {
-                        type_hint: p.type_hint.replace_self(class_name),
+                        type_hint: p.type_hint.replace_self_with_type(replacement),
                         optional: p.optional,
                         variadic: p.variadic,
                     })
                     .collect(),
                 return_type: return_type
                     .as_ref()
-                    .map(|r| Box::new(r.replace_self(class_name))),
+                    .map(|r| Box::new(r.replace_self_with_type(replacement))),
             },
 
             PhpType::Conditional {
@@ -1006,28 +1090,36 @@ impl PhpType {
             } => PhpType::Conditional {
                 param: param.clone(),
                 negated: *negated,
-                condition: Box::new(condition.replace_self(class_name)),
-                then_type: Box::new(then_type.replace_self(class_name)),
-                else_type: Box::new(else_type.replace_self(class_name)),
+                condition: Box::new(condition.replace_self_with_type(replacement)),
+                then_type: Box::new(then_type.replace_self_with_type(replacement)),
+                else_type: Box::new(else_type.replace_self_with_type(replacement)),
             },
 
-            PhpType::ClassString(inner) => {
-                PhpType::ClassString(inner.as_ref().map(|t| Box::new(t.replace_self(class_name))))
-            }
-
-            PhpType::InterfaceString(inner) => PhpType::InterfaceString(
-                inner.as_ref().map(|t| Box::new(t.replace_self(class_name))),
+            PhpType::ClassString(inner) => PhpType::ClassString(
+                inner
+                    .as_ref()
+                    .map(|t| Box::new(t.replace_self_with_type(replacement))),
             ),
 
-            PhpType::KeyOf(inner) => PhpType::KeyOf(Box::new(inner.replace_self(class_name))),
+            PhpType::InterfaceString(inner) => PhpType::InterfaceString(
+                inner
+                    .as_ref()
+                    .map(|t| Box::new(t.replace_self_with_type(replacement))),
+            ),
 
-            PhpType::ValueOf(inner) => PhpType::ValueOf(Box::new(inner.replace_self(class_name))),
+            PhpType::KeyOf(inner) => {
+                PhpType::KeyOf(Box::new(inner.replace_self_with_type(replacement)))
+            }
+
+            PhpType::ValueOf(inner) => {
+                PhpType::ValueOf(Box::new(inner.replace_self_with_type(replacement)))
+            }
 
             PhpType::IntRange(lo, hi) => PhpType::IntRange(lo.clone(), hi.clone()),
 
             PhpType::IndexAccess(base, index) => PhpType::IndexAccess(
-                Box::new(base.replace_self(class_name)),
-                Box::new(index.replace_self(class_name)),
+                Box::new(base.replace_self_with_type(replacement)),
+                Box::new(index.replace_self_with_type(replacement)),
             ),
         }
     }

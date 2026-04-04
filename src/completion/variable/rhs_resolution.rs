@@ -1538,31 +1538,61 @@ fn resolve_rhs_method_call_inner<'b>(
         _ => return vec![],
     };
     // Resolve the object expression to candidate owner classes.
-    let owner_classes: Vec<ClassInfo> = if let Expression::Variable(Variable::Direct(dv)) = object
-        && dv.name == "$this"
-    {
-        ctx.all_classes
-            .iter()
-            .find(|c| c.name == ctx.current_class.name)
-            .map(|c| ClassInfo::clone(c))
-            .into_iter()
-            .collect()
-    } else if let Expression::Variable(Variable::Direct(dv)) = object {
-        let var = dv.name.to_string();
-        crate::completion::resolver::resolve_target_classes(
-            &var,
-            crate::types::AccessKind::Arrow,
-            &ctx.as_resolution_ctx(),
-        )
-        .into_iter()
-        .map(Arc::unwrap_or_clone)
-        .collect()
-    } else {
-        // Handle non-variable object expressions like
-        // `(new Factory())->create()`, `getService()->method()`,
-        // or chained calls by recursively resolving the expression.
-        ResolvedType::into_classes(resolve_rhs_expression(object, ctx))
-    };
+    // Keep the full `ResolvedType` for non-$this variables and chain
+    // expressions so that the receiver's generic type string (e.g.
+    // `Builder<Article>`) is available when the method returns
+    // `static`/`self`/`$this`.
+    let (owner_classes, receiver_resolved): (Vec<ClassInfo>, Vec<ResolvedType>) =
+        if let Expression::Variable(Variable::Direct(dv)) = object
+            && dv.name == "$this"
+        {
+            let classes: Vec<ClassInfo> = ctx
+                .all_classes
+                .iter()
+                .find(|c| c.name == ctx.current_class.name)
+                .map(|c| ClassInfo::clone(c))
+                .into_iter()
+                .collect();
+            (classes, vec![])
+        } else if let Expression::Variable(Variable::Direct(dv)) = object {
+            let var = dv.name.to_string();
+            let resolved = crate::completion::variable::resolution::resolve_variable_types(
+                &var,
+                ctx.current_class,
+                ctx.all_classes,
+                ctx.content,
+                // Use the object's end offset so preceding assignments
+                // are visible but the current assignment is not.
+                object.span().end.offset,
+                ctx.class_loader,
+                crate::completion::resolver::Loaders::with_function(ctx.function_loader()),
+            );
+            if !resolved.is_empty() {
+                let classes = ResolvedType::into_classes(resolved.clone());
+                (classes, resolved)
+            } else {
+                // Fall back to resolve_target_classes when the
+                // variable resolution pipeline returns nothing (e.g.
+                // for parameters that are resolved through the
+                // completion pipeline's subject resolution).
+                let classes: Vec<ClassInfo> = crate::completion::resolver::resolve_target_classes(
+                    &var,
+                    crate::types::AccessKind::Arrow,
+                    &ctx.as_resolution_ctx(),
+                )
+                .into_iter()
+                .map(Arc::unwrap_or_clone)
+                .collect();
+                (classes, vec![])
+            }
+        } else {
+            // Handle non-variable object expressions like
+            // `(new Factory())->create()`, `getService()->method()`,
+            // or chained calls by recursively resolving the expression.
+            let resolved = resolve_rhs_expression(object, ctx);
+            let classes = ResolvedType::into_classes(resolved.clone());
+            (classes, resolved)
+        };
 
     let text_args = super::raw_type_inference::extract_argument_text(argument_list, ctx.content);
     let rctx = ctx.as_resolution_ctx();
@@ -1585,7 +1615,9 @@ fn resolve_rhs_method_call_inner<'b>(
         // the same template substitution that
         // `resolve_method_return_types_with_args` used internally,
         // then replace `static`/`self`/`$this` with the owner class
-        // name so that e.g. `static[]` becomes `Country[]`.
+        // name (or the receiver's full generic type when available)
+        // so that e.g. `static[]` becomes `Country[]` and a bare
+        // `static` on `Builder<Article>` becomes `Builder<Article>`.
         let merged = crate::virtual_members::resolve_class_fully(owner, ctx.class_loader);
         let ret_type_string = merged
             .methods
@@ -1598,7 +1630,19 @@ fn resolve_rhs_method_call_inner<'b>(
                 } else {
                     ret.clone()
                 };
-                substituted.replace_self(&owner.name).to_string()
+                // When the return type contains `static`/`self`/`$this`
+                // and the receiver was resolved with generic parameters,
+                // use the receiver's full type (e.g. `Builder<Article>`)
+                // for substitution so the generics are preserved.
+                let receiver_type = if substituted.contains_self_ref() {
+                    receiver_type_for_owner(&receiver_resolved, &owner.name)
+                } else {
+                    None
+                };
+                match receiver_type {
+                    Some(rt) => substituted.replace_self_with_type(&rt).to_string(),
+                    None => substituted.replace_self(&owner.name).to_string(),
+                }
             });
 
         let results = Backend::resolve_method_return_types_with_args(
@@ -1648,6 +1692,30 @@ fn resolve_rhs_method_call_inner<'b>(
         }
     }
     vec![]
+}
+
+/// Find the receiver's type string that matches the given owner class name.
+///
+/// Scans `receiver_resolved` for a `ResolvedType` whose `class_info`
+/// name matches `owner_name` and whose `type_string` is a `Generic`
+/// (i.e. carries generic parameters like `Builder<Article>`).  Returns
+/// the matching `PhpType` so that `replace_self_with_type` can preserve
+/// those generic parameters when the method returns `static`/`self`/`$this`.
+fn receiver_type_for_owner(
+    receiver_resolved: &[ResolvedType],
+    owner_name: &str,
+) -> Option<PhpType> {
+    for rt in receiver_resolved {
+        let matches = rt
+            .class_info
+            .as_ref()
+            .is_some_and(|ci| ci.name == owner_name)
+            && matches!(rt.type_string, PhpType::Generic(_, _));
+        if matches {
+            return Some(rt.type_string.clone());
+        }
+    }
+    None
 }
 
 /// Resolve a static method call: `ClassName::method()`, `self::method()`,

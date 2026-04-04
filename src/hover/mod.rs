@@ -872,6 +872,25 @@ impl Backend {
     ) -> Option<Hover> {
         let var_name = format!("${}", name);
 
+        // When the cursor is on the `$` of an assignment like
+        // `$x = new Foo()`, the cursor offset equals the assignment
+        // statement's start offset.  The variable resolution pipeline
+        // skips statements whose start is at or after the cursor
+        // (`stmt.start >= cursor_offset`), so the assignment is
+        // excluded.  Nudge the offset by one byte so the statement's
+        // start is strictly less than the cursor, allowing the
+        // assignment to be included.  We only do this for assignments
+        // (not parameters, foreach, etc.) where `effective_from`
+        // differs from the definition offset.
+        let cursor_offset = if self
+            .lookup_var_def_effective_from(uri, name, cursor_offset)
+            .is_some()
+        {
+            cursor_offset + 1
+        } else {
+            cursor_offset
+        };
+
         // $this resolves to the enclosing class
         if name == "this" {
             if let Some(cc) = current_class {

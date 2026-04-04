@@ -98,3 +98,5 @@ properties on Eloquent models.
 **Impact:** 1 direct diagnostic (`FlowService:477`) plus 1 cascading
 (`FlowService:517` — compound with `Collection::reduce()` type loss).
 
+
+

@@ -502,20 +502,27 @@ impl SymbolMap {
     /// lets the caller decide how to handle different definition kinds
     /// (e.g. skip type-hint navigation for parameters and catch variables).
     pub fn var_def_kind_at(&self, var_name: &str, cursor_offset: u32) -> Option<&VarDefKind> {
+        self.var_def_at(var_name, cursor_offset).map(|d| &d.kind)
+    }
+
+    /// If the cursor is physically on a variable definition token, return
+    /// the full [`VarDefSite`].
+    ///
+    /// This is used by hover to retrieve the `effective_from` offset so
+    /// that hovering on the `$` sign of `$x = new Foo()` uses a cursor
+    /// offset that includes the assignment itself.
+    pub fn var_def_at(&self, var_name: &str, cursor_offset: u32) -> Option<&VarDefSite> {
         // No scope check needed: if the cursor is physically within a
         // VarDefSite's `$var` token, it IS that definition — two different
         // definitions cannot occupy the same bytes.  This also correctly
         // handles parameters, which are physically before the opening
         // brace of the function body (outside `find_enclosing_scope`'s
         // range) but whose VarDefSite has scope_start set to that brace.
-        self.var_defs
-            .iter()
-            .find(|d| {
-                d.name == var_name
-                    && cursor_offset >= d.offset
-                    && cursor_offset < d.offset + 1 + d.name.len() as u32
-            })
-            .map(|d| &d.kind)
+        self.var_defs.iter().find(|d| {
+            d.name == var_name
+                && cursor_offset >= d.offset
+                && cursor_offset < d.offset + 1 + d.name.len() as u32
+        })
     }
 
     /// Find the innermost call site whose argument list contains `offset`.

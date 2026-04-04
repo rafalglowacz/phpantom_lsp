@@ -148,6 +148,30 @@ impl Backend {
         map.var_def_kind_at(var_name, cursor_offset).cloned()
     }
 
+    /// If the cursor is on a variable at its assignment definition site,
+    /// return the `effective_from` offset (end of the assignment statement).
+    ///
+    /// This lets hover adjust the cursor offset so that the assignment's
+    /// own RHS is included in the resolution — without it, hovering on
+    /// the `$` of `$x = new Foo()` misses the assignment because the
+    /// statement start coincides with the cursor offset and the
+    /// "skip statements at or after cursor" guard excludes it.
+    pub(crate) fn lookup_var_def_effective_from(
+        &self,
+        uri: &str,
+        var_name: &str,
+        cursor_offset: u32,
+    ) -> Option<u32> {
+        let maps = self.symbol_maps.read();
+        let map = maps.get(uri)?;
+        let def = map.var_def_at(var_name, cursor_offset)?;
+        if matches!(def.kind, VarDefKind::Assignment) {
+            Some(def.effective_from)
+        } else {
+            None
+        }
+    }
+
     /// Dispatch a symbol-map hit to the appropriate resolution path.
     ///
     /// Each [`SymbolKind`] variant maps directly to existing resolution

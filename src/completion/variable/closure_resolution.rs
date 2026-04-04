@@ -34,6 +34,9 @@ use mago_syntax::ast::*;
 
 use crate::completion::resolver::ResolutionCtx;
 use crate::php_type::PhpType;
+use crate::virtual_members::laravel::{
+    ELOQUENT_BUILDER_FQN, RELATION_QUERY_METHODS, extends_eloquent_model, resolve_relation_chain,
+};
 
 /// Maximum recursion depth for callable parameter inference.
 ///
@@ -1016,6 +1019,7 @@ fn try_resolve_in_closure_call<'b>(
             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
                 let method_name = ident.value.to_string();
                 let obj_span = mc.object.span();
+                let first_arg = extract_first_arg_string(&mc.argument_list.arguments, ctx.content);
                 if try_resolve_closure_in_call_args(
                     &mc.argument_list.arguments,
                     ctx,
@@ -1026,6 +1030,7 @@ fn try_resolve_in_closure_call<'b>(
                             obj_span.end.offset,
                             &method_name,
                             arg_idx,
+                            first_arg.as_deref(),
                             ctx,
                         )
                     },
@@ -1042,6 +1047,7 @@ fn try_resolve_in_closure_call<'b>(
             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
                 let method_name = ident.value.to_string();
                 let obj_span = mc.object.span();
+                let first_arg = extract_first_arg_string(&mc.argument_list.arguments, ctx.content);
                 if try_resolve_closure_in_call_args(
                     &mc.argument_list.arguments,
                     ctx,
@@ -1052,6 +1058,7 @@ fn try_resolve_in_closure_call<'b>(
                             obj_span.end.offset,
                             &method_name,
                             arg_idx,
+                            first_arg.as_deref(),
                             ctx,
                         )
                     },
@@ -1067,6 +1074,7 @@ fn try_resolve_in_closure_call<'b>(
             }
             if let ClassLikeMemberSelector::Identifier(ident) = &sc.method {
                 let method_name = ident.value.to_string();
+                let first_arg = extract_first_arg_string(&sc.argument_list.arguments, ctx.content);
                 if try_resolve_closure_in_call_args(
                     &sc.argument_list.arguments,
                     ctx,
@@ -1076,6 +1084,7 @@ fn try_resolve_in_closure_call<'b>(
                             sc.class,
                             &method_name,
                             arg_idx,
+                            first_arg.as_deref(),
                             ctx,
                         )
                     },
@@ -1297,7 +1306,10 @@ fn resolve_closure_params_with_inferred(
                         ctx.class_loader,
                     );
                     if !resolved.is_empty() {
-                        *results = ResolvedType::from_classes(resolved);
+                        *results = ResolvedType::from_classes_with_hint(
+                            resolved,
+                            PhpType::parse(inferred),
+                        );
                         break;
                     }
                 }
@@ -1335,7 +1347,10 @@ fn resolve_closure_params_with_inferred(
                                 })
                             })
                         {
-                            *results = ResolvedType::from_classes(inferred_resolved);
+                            *results = ResolvedType::from_classes_with_hint(
+                                inferred_resolved,
+                                PhpType::parse(inferred),
+                            );
                             break;
                         }
                     }
@@ -1386,7 +1401,8 @@ fn resolve_closure_params_with_inferred(
                     ctx.class_loader,
                 );
                 if !resolved.is_empty() {
-                    *results = ResolvedType::from_classes(resolved);
+                    *results =
+                        ResolvedType::from_classes_with_hint(resolved, PhpType::parse(inferred));
                 }
             }
             break;
@@ -1537,6 +1553,7 @@ fn infer_callable_params_from_receiver(
     obj_end: u32,
     method_name: &str,
     arg_idx: usize,
+    first_arg_text: Option<&str>,
     ctx: &VarResolutionCtx<'_>,
 ) -> Vec<String> {
     // Guard against infinite recursion when nested closures reuse the
@@ -1561,6 +1578,19 @@ fn infer_callable_params_from_receiver(
     let rctx = ctx.as_resolution_ctx();
     let receiver_classes =
         crate::completion::resolver::resolve_target_classes(obj_text, AccessKind::Arrow, &rctx);
+
+    // For relation-query methods (whereHas, etc.), override the closure
+    // parameter type with Builder<RelatedModel> resolved from the
+    // relation name string.
+    if let Some(override_params) = try_relation_query_override(
+        &receiver_classes,
+        method_name,
+        first_arg_text,
+        ctx.class_loader,
+    ) {
+        CLOSURE_INFER_DEPTH.with(|d| d.set(depth));
+        return override_params;
+    }
 
     let params = find_callable_params_on_classes(&receiver_classes, method_name, arg_idx, ctx);
 
@@ -1591,6 +1621,7 @@ fn infer_callable_params_from_static_receiver(
     class_expr: &Expression<'_>,
     method_name: &str,
     arg_idx: usize,
+    first_arg_text: Option<&str>,
     ctx: &VarResolutionCtx<'_>,
 ) -> Vec<String> {
     let class_name = match class_expr {
@@ -1608,6 +1639,18 @@ fn infer_callable_params_from_static_receiver(
             .or_else(|| (ctx.class_loader)(&name).map(Arc::unwrap_or_clone))
     });
     if let Some(ref cls) = owner {
+        // For relation-query methods (whereHas, etc.), override the
+        // closure parameter type with Builder<RelatedModel> resolved
+        // from the relation name string.
+        if let Some(override_params) = try_relation_query_override(
+            &[Arc::new(cls.clone())],
+            method_name,
+            first_arg_text,
+            ctx.class_loader,
+        ) {
+            return override_params;
+        }
+
         let resolved = crate::virtual_members::resolve_class_fully_maybe_cached(
             cls,
             ctx.class_loader,
@@ -1685,4 +1728,129 @@ fn extract_callable_params_at(
             .collect();
     }
     vec![]
+}
+
+/// Extract the text of the first positional argument from a call's
+/// argument list, stripping surrounding quotes from string literals.
+fn extract_first_arg_string(
+    arguments: &TokenSeparatedSequence<'_, argument::Argument<'_>>,
+    content: &str,
+) -> Option<String> {
+    let first = arguments.iter().next()?;
+    let expr = match first {
+        argument::Argument::Positional(pos) => pos.value,
+        argument::Argument::Named(named) => named.value,
+    };
+    let span = expr.span();
+    let start = span.start.offset as usize;
+    let end = span.end.offset as usize;
+    let raw = content.get(start..end)?.trim();
+
+    // Strip surrounding quotes (single or double).
+    if raw.len() >= 2
+        && ((raw.starts_with('\'') && raw.ends_with('\''))
+            || (raw.starts_with('"') && raw.ends_with('"')))
+    {
+        Some(raw[1..raw.len() - 1].to_string())
+    } else {
+        None
+    }
+}
+
+/// Check whether `method_name` is a relation-query method (e.g.
+/// `whereHas`, `orWhereHas`, `whereDoesntHave`, etc.) and the receiver
+/// is an Eloquent model or `Builder<Model>`.  If so, resolve the
+/// relation chain from the first argument string and return
+/// `Builder<FinalRelatedModel>` as the closure parameter type.
+///
+/// Returns `None` when the override does not apply (not a relation-query
+/// method, receiver is not a model, relation chain cannot be resolved),
+/// in which case the caller falls through to normal callable param
+/// inference.
+fn try_relation_query_override(
+    receiver_classes: &[Arc<ClassInfo>],
+    method_name: &str,
+    first_arg_text: Option<&str>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<Vec<String>> {
+    // Only applies to the known relation-query methods.
+    if !RELATION_QUERY_METHODS.contains(&method_name) {
+        return None;
+    }
+
+    let relation_name = first_arg_text?;
+    if relation_name.is_empty() {
+        return None;
+    }
+
+    // Determine the base model from the receiver.  The receiver may be
+    // the model itself (static call: `Brand::whereHas(...)`) or a
+    // `Builder<Model>` instance.
+    let model = find_model_from_receivers(receiver_classes, class_loader)?;
+
+    // Walk the dot-separated relation chain to find the final related model.
+    let related_fqn = resolve_relation_chain(&model, relation_name, class_loader)?;
+
+    // Return `Builder<RelatedModel>` as the closure parameter type.
+    let builder_type = PhpType::Generic(
+        ELOQUENT_BUILDER_FQN.to_string(),
+        vec![PhpType::Named(related_fqn)],
+    )
+    .to_string();
+
+    Some(vec![builder_type])
+}
+
+/// Given a list of receiver classes, find the underlying Eloquent model.
+///
+/// If the receiver is a model class directly, return it.  If it's
+/// `Builder<Model>`, extract the model from the Builder's method return
+/// types (which contain the substituted generic arg, e.g.
+/// `Builder<Brand>` → `Brand`).
+fn find_model_from_receivers(
+    receiver_classes: &[Arc<ClassInfo>],
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<Arc<ClassInfo>> {
+    for cls in receiver_classes {
+        // Direct model class.
+        if extends_eloquent_model(cls, class_loader) {
+            return Some(Arc::clone(cls));
+        }
+
+        // Builder<Model> — extract the model name from the Builder's
+        // method return types.  After generic substitution, methods like
+        // `where()` return `Builder<Brand>`, so we can extract `Brand`
+        // from any method's return type that is `Builder<X>`.
+        let cls_fqn = cls.fqn();
+        if (cls.name == "Builder" || cls_fqn == ELOQUENT_BUILDER_FQN)
+            && let Some(model_fqn) = extract_model_from_builder(cls)
+            && let Some(model_cls) = class_loader(&model_fqn)
+            && extends_eloquent_model(&model_cls, class_loader)
+        {
+            return Some(model_cls);
+        }
+    }
+    None
+}
+
+/// Extract the model FQN from a resolved `Builder<Model>` class by
+/// scanning its method return types for `Builder<X>` and returning `X`.
+fn extract_model_from_builder(builder: &ClassInfo) -> Option<String> {
+    for method in &builder.methods {
+        if let Some(ref ret) = method.return_type {
+            let ret_str = ret.to_string();
+            let parsed = PhpType::parse(&ret_str);
+            if let PhpType::Generic(base, args) = &parsed
+                && !args.is_empty()
+                && (base == ELOQUENT_BUILDER_FQN || base == "Builder")
+            {
+                let model = args[0].to_string();
+                // Skip unsubstituted template params like "TModel".
+                if !model.is_empty() && model != "TModel" {
+                    return Some(model);
+                }
+            }
+        }
+    }
+    None
 }

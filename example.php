@@ -1783,9 +1783,16 @@ class ClosureParamInferenceDemo
             }
         });
 
-        // Eloquent whereHas — $query inferred as Builder
+        // Eloquent whereHas — $query inferred as Builder<BlogPost> (the related model)
         BlogAuthor::whereHas('posts', function ($query) {
-            $query->where('published', true); // resolves to Builder
+            $query->where('published', true); // resolves to Builder<BlogPost>
+        });
+
+        // Dot-notation relation chain: category.articles resolves through each segment
+        // BlogPost::whereHas('author.profile', fn($q) => $q->)
+        //   => $q is Builder<AuthorProfile>, not Builder<BlogPost>
+        BlogPost::whereHas('author', function ($q) {
+            $q->where('active', true);    // resolves to Builder<BlogAuthor>
         });
 
         // $this in callable param resolves to receiver, not current class

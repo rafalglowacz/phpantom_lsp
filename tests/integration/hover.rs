@@ -9295,3 +9295,287 @@ function test3(): void {
         text
     );
 }
+
+/// When a closure parameter has an explicit bare class type hint and the
+/// callable signature infers the same class WITH generic arguments, hover
+/// should show the generic version (e.g. `Builder<Order>`) instead of
+/// the bare class name (`Builder`).  This verifies that the
+/// `from_classes_with_hint` path preserves the inferred type string.
+#[test]
+fn hover_closure_param_inferred_generic_args_preserved_in_type_string() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Order {
+    public function getTotal(): float { return 0.0; }
+}
+
+/**
+ * @template T
+ */
+class Builder {
+    /** @return static */
+    public function where(string $col, mixed $val = null): static { return $this; }
+}
+
+class Processor {
+    /**
+     * @param callable(Builder<Order>): mixed $callback
+     * @return void
+     */
+    public function apply(callable $callback): void {}
+
+    public function run(): void {
+        $this->apply(function (Builder $q) {
+            $q;
+        });
+    }
+}
+"#;
+
+    // Hover on `$q` at the standalone `$q;` statement (line 22)
+    let hover = hover_at(&backend, uri, content, 22, 13).expect("expected hover on $q");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Builder<"),
+        "Hover should show Builder<…> with generic param, not bare Builder, got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_variable_assigned_from_chained_method_preserves_generic_params() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Order {
+    public function getTotal(): float { return 0.0; }
+}
+
+/**
+ * @template T
+ */
+class Builder {
+    /** @return static */
+    public function where(string $col, mixed $val = null): static { return $this; }
+}
+
+class Processor {
+    /**
+     * @param callable(Builder<Order>): mixed $callback
+     * @return void
+     */
+    public function apply(callable $callback): void {}
+
+    public function run(): void {
+        $this->apply(function (Builder $q) {
+            $a = $q->where('published', 1);
+            $a;
+        });
+    }
+}
+"#;
+
+    // Hover on `$a` at the standalone `$a;` statement (line 23)
+    let hover = hover_at(&backend, uri, content, 23, 13).expect("expected hover on $a");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Builder<"),
+        "Hover on $a should show Builder<…> with generic param (not bare Builder), got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_variable_assigned_from_multi_step_chain_preserves_generic_params() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Article {
+    public function getTitle(): string { return ''; }
+}
+
+/**
+ * @template T
+ */
+class Builder {
+    /** @return static */
+    public function where(string $col, mixed $val = null): static { return $this; }
+    /** @return static */
+    public function orderBy(string $col): static { return $this; }
+}
+
+class Service {
+    /**
+     * @param callable(Builder<Article>): mixed $cb
+     */
+    public function query(callable $cb): void {}
+
+    public function run(): void {
+        $this->query(function (Builder $q) {
+            $b = $q->where('published', 1)->orderBy('title');
+            $b;
+        });
+    }
+}
+"#;
+
+    // Hover on `$b` at the standalone `$b;` statement (line 23)
+    let hover = hover_at(&backend, uri, content, 23, 13).expect("expected hover on $b");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Builder<"),
+        "Hover on $b (multi-step chain) should show Builder<…>, got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_variable_assigned_from_method_on_generic_variable_preserves_params() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class User {
+    public int $id;
+}
+
+/**
+ * @template TModel
+ */
+class Collection {
+    /** @return static */
+    public function filter(callable $cb): static { return $this; }
+    /** @return static */
+    public function values(): static { return $this; }
+}
+
+class Handler {
+    /**
+     * @param Collection<User> $users
+     */
+    public function handle(Collection $users): void {
+        $filtered = $users->filter(fn($u) => $u->id > 0);
+        $filtered;
+    }
+}
+"#;
+
+    // Hover on `$filtered` at the standalone `$filtered;` statement (line 21)
+    let hover = hover_at(&backend, uri, content, 21, 9).expect("expected hover on $filtered");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Collection<"),
+        "Hover on $filtered should show Collection<…> with generic param, got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_variable_generic_preserved_after_prior_member_hover() {
+    // Regression: hovering on `$q->` (member access) first, then hovering
+    // on `$a` (variable) showed bare `$a` with no type.  The first hover
+    // must not poison any cache or depth counter that prevents the second
+    // hover from resolving.
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Article {
+    public function getTitle(): string { return ''; }
+}
+
+/**
+ * @template T
+ */
+class Builder {
+    /** @return static */
+    public function where(string $col, mixed $val = null): static { return $this; }
+    /** @return static */
+    public function whereLanguage(string $lang): static { return $this; }
+}
+
+class Repo {
+    /**
+     * @param callable(Builder<Article>): mixed $cb
+     */
+    public function query(callable $cb): void {}
+
+    public function run(): void {
+        $this->query(function (Builder $q) {
+            $a = $q->where('published', 1);
+            $a->whereLanguage('en');
+        });
+    }
+}
+"#;
+
+    // Line 23 (0-based): "            $a = $q->where('published', 1);"
+    //   $a starts at col 12, $q starts at col 17
+
+    // 1. Hover on `$q` variable (line 23, col 18) — simulates the user
+    //    first resolving $q, which exercises the closure-param inference
+    //    path and may populate caches.
+    let hover_q = hover_at(&backend, uri, content, 23, 18);
+    let q_text = hover_q
+        .as_ref()
+        .map(|h| hover_text(h).to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    assert!(hover_q.is_some(), "hover on $q should resolve");
+
+    // 2. Now hover on `$a` at the assignment site (line 23, col 13).
+    //    This must still show Builder<Article>, not bare `$a`.
+    let hover_var = hover_at(&backend, uri, content, 23, 13);
+    let a_text = hover_var
+        .as_ref()
+        .map(|h| hover_text(h).to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    assert!(
+        a_text.contains("Builder<"),
+        "Hover on $a (after prior $q hover) should show Builder<…> with generic param, not bare Builder.\n\
+         $q hover returned: {}\n\
+         $a hover returned: {}",
+        q_text,
+        a_text
+    );
+}
+
+#[test]
+fn hover_variable_at_dollar_sign_resolves_assignment_type() {
+    // Regression: hovering on the `$` sign of a variable at its assignment
+    // site returned no type, while hovering on the letter after `$` worked.
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Order { public string $id; }
+class Service {
+    public function run(): void {
+        $order = new Order();
+        $order->id;
+    }
+}
+"#;
+
+    // Line 4: "        $order = new Order();"
+    //   col 8 is `$`, col 9 is `o`
+
+    // Hover on `o` (col 9) — baseline, should work.
+    let hover_letter =
+        hover_at(&backend, uri, content, 4, 9).expect("hover on variable letter should resolve");
+    let text_letter = hover_text(&hover_letter);
+    assert!(
+        text_letter.contains("Order"),
+        "Hover on `o` of `$order` should show Order, got: {}",
+        text_letter
+    );
+
+    // Hover on `$` (col 8) — must also work.
+    let hover_dollar = hover_at(&backend, uri, content, 4, 8);
+    let text_dollar = hover_dollar
+        .as_ref()
+        .map(|h| hover_text(h).to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    assert!(
+        text_dollar.contains("Order"),
+        "Hover on `$` of `$order` should show Order, got: {}",
+        text_dollar
+    );
+}

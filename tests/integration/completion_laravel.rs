@@ -144,6 +144,24 @@ class Builder {
      */
     public function whereHas(string $relation, ?\\Closure $callback = null): static { return $this; }
     /**
+     * @param  string  $relation
+     * @param  (\\Closure(\\Illuminate\\Database\\Eloquent\\Builder<TModel>): mixed)|null  $callback
+     * @return static
+     */
+    public function orWhereHas(string $relation, ?\\Closure $callback = null): static { return $this; }
+    /**
+     * @param  string  $relation
+     * @param  (\\Closure(\\Illuminate\\Database\\Eloquent\\Builder<TModel>): mixed)|null  $callback
+     * @return static
+     */
+    public function whereDoesntHave(string $relation, ?\\Closure $callback = null): static { return $this; }
+    /**
+     * @param  string  $relation
+     * @param  (\\Closure(\\Illuminate\\Database\\Eloquent\\Builder<TModel>): mixed)|null  $callback
+     * @return static
+     */
+    public function withWhereHas(string $relation, ?\\Closure $callback = null): static { return $this; }
+    /**
      * @param  array<array-key, array|(\\Closure(\\Illuminate\\Database\\Eloquent\\Relations\\Relation): mixed)|string>|string  $relations
      * @param  (\\Closure(\\Illuminate\\Database\\Eloquent\\Relations\\Relation): mixed)|string|null  $callback
      * @return static
@@ -12381,6 +12399,453 @@ class User extends Model {
     assert!(
         methods.contains(&"whereIsActive"),
         "whereIsActive should appear from $attributes, got: {:?}",
+        methods
+    );
+}
+
+// ─── whereHas / whereDoesntHave closure param from relation chain ───────────
+
+#[tokio::test]
+async fn test_where_has_closure_resolves_to_related_model() {
+    // Brand::whereHas('orders', function ($q) { $q-> })
+    //   => $q should be Builder<Order> (the related model), not Builder<Brand>.
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Order extends Model {
+    public function scopeRecent(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\HasMany;
+class Brand extends Model {
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany { return $this->hasMany(Order::class); }
+    public function scopeIsActive(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+    public function test() {
+        Brand::whereHas('orders', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Order.php", order_php),
+        ("src/Models/Brand.php", brand_php),
+    ]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 10, 16).await;
+    let methods = method_names(&items);
+
+    // Builder methods should be present.
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Order>, got: {:?}",
+        methods
+    );
+    // Order's scope should be present (it's on Order, not Brand).
+    assert!(
+        methods.contains(&"recent"),
+        "Expected recent() scope from Order model, got: {:?}",
+        methods
+    );
+    // Brand's scope should NOT be present — we're in Builder<Order>, not Builder<Brand>.
+    assert!(
+        !methods.contains(&"isActive"),
+        "isActive() scope from Brand should NOT appear on Builder<Order>, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_has_dot_notation_resolves_chain() {
+    // ArticleCategoryTranslation::whereHas('category.articles', fn($q) => $q->)
+    //   => $q should be Builder<Article>
+    let article_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Article extends Model {
+    public function scopePublished(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let category_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\HasMany;
+class ArticleCategory extends Model {
+    /** @return HasMany<Article, $this> */
+    public function articles(): HasMany { return $this->hasMany(Article::class); }
+}
+";
+    let translation_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\BelongsTo;
+class ArticleCategoryTranslation extends Model {
+    /** @return BelongsTo<ArticleCategory, $this> */
+    public function category(): BelongsTo { return $this->belongsTo(ArticleCategory::class); }
+    public function test() {
+        ArticleCategoryTranslation::whereHas('category.articles', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Article.php", article_php),
+        ("src/Models/ArticleCategory.php", category_php),
+        ("src/Models/ArticleCategoryTranslation.php", translation_php),
+    ]);
+
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Models/ArticleCategoryTranslation.php",
+        translation_php,
+        9,
+        16,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Article>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"published"),
+        "Expected published() scope from Article model, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_has_on_builder_instance_resolves_related() {
+    // Brand::query()->whereHas('orders', function ($q) { $q-> })
+    //   => $q should be Builder<Order>
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Order extends Model {
+    public function scopePending(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\HasMany;
+class Brand extends Model {
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany { return $this->hasMany(Order::class); }
+    public function scopeIsActive(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+    public function test() {
+        Brand::where('active', true)->whereHas('orders', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Order.php", order_php),
+        ("src/Models/Brand.php", brand_php),
+    ]);
+
+    // line 10: "            $q->"
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 10, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Order>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"pending"),
+        "Expected pending() scope from Order model, got: {:?}",
+        methods
+    );
+    assert!(
+        !methods.contains(&"isActive"),
+        "isActive() scope from Brand should NOT appear on Builder<Order>, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_has_missing_relation_falls_back() {
+    // Brand::whereHas('nonexistent', fn($q) => $q->)
+    //   => no 'nonexistent' relation on Brand, falls back to Builder<Brand>
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Brand extends Model {
+    public function scopeIsActive(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+    public function test() {
+        Brand::whereHas('nonexistent', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 7, 16).await;
+    let methods = method_names(&items);
+
+    // Falls back to Builder<Brand>, so builder methods and Brand's scope appear.
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Brand> fallback, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"isActive"),
+        "Expected isActive() scope from Brand fallback, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_doesnt_have_resolves_to_related_model() {
+    // Brand::whereDoesntHave('orders', fn($q) => $q->)
+    //   => $q should be Builder<Order>
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Order extends Model {
+    public function scopeRecent(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\HasMany;
+class Brand extends Model {
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany { return $this->hasMany(Order::class); }
+    public function test() {
+        Brand::whereDoesntHave('orders', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Order.php", order_php),
+        ("src/Models/Brand.php", brand_php),
+    ]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 9, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Order>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"recent"),
+        "Expected recent() scope from Order model, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_or_where_has_resolves_to_related_model() {
+    // Brand::orWhereHas('orders', fn($q) => $q->)
+    //   => $q should be Builder<Order>
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Order extends Model {
+    public function scopeRecent(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\HasMany;
+class Brand extends Model {
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany { return $this->hasMany(Order::class); }
+    public function test() {
+        Brand::orWhereHas('orders', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Order.php", order_php),
+        ("src/Models/Brand.php", brand_php),
+    ]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 9, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Order>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"recent"),
+        "Expected recent() scope from Order model, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_with_where_has_resolves_to_related_model() {
+    // Brand::withWhereHas('orders', fn($q) => $q->)
+    //   => $q should be Builder<Order>
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Order extends Model {
+    public function scopeRecent(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\HasMany;
+class Brand extends Model {
+    /** @return HasMany<Order, $this> */
+    public function orders(): HasMany { return $this->hasMany(Order::class); }
+    public function test() {
+        Brand::withWhereHas('orders', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Order.php", order_php),
+        ("src/Models/Brand.php", brand_php),
+    ]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 9, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Order>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"recent"),
+        "Expected recent() scope from Order model, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_has_body_inferred_relationship() {
+    // When the relationship has no @return annotation but the body
+    // contains $this->hasMany(Order::class), the relation chain should
+    // still resolve.
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Order extends Model {
+    public function scopePaid(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Brand extends Model {
+    public function orders() { return $this->hasMany(Order::class); }
+    public function test() {
+        Brand::whereHas('orders', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Order.php", order_php),
+        ("src/Models/Brand.php", brand_php),
+    ]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 7, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Order>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"paid"),
+        "Expected paid() scope from Order (body-inferred relation), got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_where_has_belongs_to_resolves_to_parent() {
+    // Order::whereHas('brand', fn($q) => $q->)
+    //   => $q should be Builder<Brand> (BelongsTo relationship)
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class Brand extends Model {
+    public function scopeIsActive(\\Illuminate\\Database\\Eloquent\\Builder $query): void {}
+}
+";
+    let order_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Relations\\BelongsTo;
+class Order extends Model {
+    /** @return BelongsTo<Brand, $this> */
+    public function brand(): BelongsTo { return $this->belongsTo(Brand::class); }
+    public function test() {
+        Order::whereHas('brand', function ($q) {
+            $q->
+        });
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Brand.php", brand_php),
+        ("src/Models/Order.php", order_php),
+    ]);
+
+    let items = complete_at(&backend, &dir, "src/Models/Order.php", order_php, 9, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Expected where() from Builder<Brand>, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"isActive"),
+        "Expected isActive() scope from Brand model, got: {:?}",
         methods
     );
 }
