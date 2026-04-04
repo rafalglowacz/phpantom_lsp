@@ -901,6 +901,7 @@ fn resolve_variable_in_members<'b>(
                     // cases where the class declares `map(object $entity)`
                     // but the interface has `@param TEntity $entity` with
                     // `@implements Interface<Boo>` substituting `TEntity`.
+                    let mut merged_type_hint: Option<String> = None;
                     let method_name = method.name.value.to_string();
                     let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
                         ctx.current_class,
@@ -933,6 +934,12 @@ fn resolve_variable_in_members<'b>(
                                 );
                                 break;
                             }
+                            // The merged type hint is richer than the
+                            // native hint (e.g. `list<Pen>` vs `array`)
+                            // but didn't resolve to a class. Remember
+                            // it so the type-string-only fallback below
+                            // uses it instead of the bare native hint.
+                            merged_type_hint = Some(hint_str);
                         }
                     }
 
@@ -944,7 +951,14 @@ fn resolve_variable_in_members<'b>(
                     // Prefer the docblock type (e.g. `class-string<BackedEnum>`)
                     // over the native type (e.g. `string`) when the
                     // docblock provides a more specific annotation.
-                    let best_type_str = raw_docblock_type.as_deref().or(type_str_for_resolution);
+                    // When the merged class provides a richer type from
+                    // parent/interface inheritance (e.g. `list<Pen>` from
+                    // a parent's `@param`), prefer that over the bare
+                    // native hint.
+                    let best_type_str = raw_docblock_type
+                        .as_deref()
+                        .or(merged_type_hint.as_deref())
+                        .or(type_str_for_resolution);
                     if let Some(ts) = best_type_str {
                         let mut parsed = PhpType::parse(ts);
 

@@ -514,10 +514,14 @@ pub fn find_var_raw_type_in_source(
         min_depth = min_depth.min(brace_depth);
 
         // Once we have exited our containing scope (min_depth < 0) and
-        // re-entered a block at depth >= 0, we are inside a sibling
-        // scope (e.g. a different method in the same class).  From that
-        // point on every annotation belongs to a foreign scope.
-        if min_depth < 0 && brace_depth >= 0 {
+        // re-entered a block close to that level, we are inside a
+        // sibling scope (e.g. a different method in the same class).
+        // From that point on every annotation belongs to a foreign
+        // scope.  The threshold is `min_depth + 1` rather than `>= 0`
+        // because the cursor may be inside a nested block (foreach,
+        // if, etc.) whose extra depth prevents brace_depth from ever
+        // reaching 0 when traversing sibling classes.
+        if min_depth < 0 && brace_depth > min_depth {
             seen_sibling_scope = true;
         }
         if seen_sibling_scope {
@@ -966,10 +970,19 @@ pub fn find_iterable_raw_type_in_source(
         min_depth = min_depth.min(brace_depth);
 
         // Once we have exited our containing scope (min_depth < 0) and
-        // re-entered a block at depth >= 0, we are inside a sibling
-        // scope (e.g. a different method in the same class).  From that
-        // point on every annotation belongs to a foreign scope.
-        if min_depth < 0 && brace_depth >= 0 {
+        // re-entered a block close to that level, we are inside a
+        // sibling scope (e.g. a different method in the same class).
+        // From that point on every annotation belongs to a foreign
+        // scope.
+        //
+        // The threshold is `min_depth + 1` rather than `>= 0` because
+        // the cursor may be inside a nested block (foreach, if, etc.)
+        // that adds extra depth.  When starting inside a foreach in a
+        // class method, min_depth reaches -3 (foreach { + method { +
+        // class {), so a sibling method body at depth -1 would never
+        // reach 0.  Using `min_depth + 1` catches the first rise back
+        // toward our exit point.
+        if min_depth < 0 && brace_depth > min_depth {
             seen_sibling_scope = true;
         }
         if seen_sibling_scope {
@@ -1889,5 +1902,191 @@ mod tests {
     fn other_tags_but_no_removed() {
         let doc = "/**\n * @deprecated Use foo() instead.\n * @see NewClass\n * @return int\n */";
         assert_eq!(extract_removed_version(doc), None);
+    }
+
+    // ── find_var_raw_type_in_source — scope isolation ───────────────
+
+    #[test]
+    fn var_docblock_does_not_leak_across_sibling_methods() {
+        // A `@var` in one class method must not be visible in another.
+        let src = concat!(
+            "<?php\n",
+            "class A {\n",
+            "    public function first(): void {\n",
+            "        /** @var object{title: string} $item */\n",
+            "        $item = foo();\n",
+            "    }\n",
+            "}\n",
+            "class B {\n",
+            "    public function second(): void {\n",
+            "        $item->\n", // cursor here
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from A::first() must not leak into B::second()"
+        );
+    }
+
+    #[test]
+    fn var_docblock_does_not_leak_across_sibling_methods_same_class() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function first(): void {\n",
+            "        /** @var Pen $item */\n",
+            "        $item = foo();\n",
+            "    }\n",
+            "    public function second(): void {\n",
+            "        $item->\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from first() must not leak into second()"
+        );
+    }
+
+    #[test]
+    fn var_docblock_does_not_leak_when_cursor_inside_nested_block() {
+        // The original bug: when the cursor is inside a foreach (or if,
+        // while, etc.), the extra nesting depth prevented the sibling
+        // scope detection from firing, allowing @var from a method in a
+        // completely different class to leak through.
+        let src = concat!(
+            "<?php\n",
+            "class ObjectShapeDemo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var object{title: string, score: float} $item */\n",
+            "        $item = getUnknownValue();\n",
+            "    }\n",
+            "}\n",
+            "class Other {\n",
+            "    public function demo(): void {\n",
+            "        foreach ($things as $item) {\n",
+            "            $item->\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from ObjectShapeDemo must not leak into Other when cursor is inside foreach"
+        );
+    }
+
+    #[test]
+    fn var_docblock_found_in_own_scope() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var Pen $item */\n",
+            "        $item = foo();\n",
+            "        $item->\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(result, Some("Pen".to_string()));
+    }
+
+    #[test]
+    fn var_docblock_found_inside_nested_block_in_own_scope() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var Pen $item */\n",
+            "        $item = foo();\n",
+            "        if (true) {\n",
+            "            $item->\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(result, Some("Pen".to_string()));
+    }
+
+    // ── find_iterable_raw_type_in_source — scope isolation ──────────
+
+    #[test]
+    fn iterable_docblock_does_not_leak_across_sibling_classes_nested() {
+        // Same bug scenario for find_iterable_raw_type_in_source:
+        // @var in a sibling class method leaks when cursor is nested.
+        let src = concat!(
+            "<?php\n",
+            "class A {\n",
+            "    public function demo(): void {\n",
+            "        /** @var object{title: string} $item */\n",
+            "        $item = foo();\n",
+            "    }\n",
+            "}\n",
+            "class B {\n",
+            "    public function demo(): void {\n",
+            "        foreach ($things as $x) {\n",
+            "            $item->\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_iterable_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from A::demo() must not leak into B::demo() foreach body"
+        );
+    }
+
+    #[test]
+    fn iterable_param_found_in_own_method_from_nested_block() {
+        // @param in the enclosing method's docblock must still be found
+        // even when the cursor is inside a nested block.
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    /**\n",
+            "     * @param list<Pen> $items\n",
+            "     */\n",
+            "    public function demo(array $items): void {\n",
+            "        foreach ($items as $x) {\n",
+            "            // cursor\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("// cursor").unwrap();
+        let result = find_iterable_raw_type_in_source(src, cursor, "$items");
+        assert_eq!(result, Some("list<Pen>".to_string()));
+    }
+
+    #[test]
+    fn iterable_var_found_in_own_scope_nested() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var list<Pen> $items */\n",
+            "        $items = foo();\n",
+            "        foreach ($items as $x) {\n",
+            "            // cursor\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("// cursor").unwrap();
+        let result = find_iterable_raw_type_in_source(src, cursor, "$items");
+        assert_eq!(result, Some("list<Pen>".to_string()));
     }
 }

@@ -854,6 +854,29 @@ class ClassStringStaticDemo
 }
 
 
+// ── Class-String Parameter Static Dispatch ──────────────────────────────────
+
+class ClassStringParamDispatchDemo
+{
+    /**
+     * @param class-string<\BackedEnum> $enumClass
+     */
+    public function demo(string $enumClass): void
+    {
+        // Static method dispatch through class-string<T> parameter.
+        // $enumClass::from() returns static, resolved to BackedEnum.
+        $result = $enumClass::from('foo');
+        $result->name;                            // property from UnitEnum via BackedEnum
+
+        // Foreach over $enumClass::cases() resolves items to BackedEnum.
+        foreach ($enumClass::cases() as $item) {
+            $item->value;                         // property from BackedEnum
+            $item->name;                          // property from UnitEnum
+        }
+    }
+}
+
+
 // ── Ambiguous Variables ─────────────────────────────────────────────────────
 
 class AmbiguousVariableDemo

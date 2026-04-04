@@ -22,6 +22,7 @@ static UNIT_ENUM_STUB: &str = "\
 <?php
 interface UnitEnum
 {
+    /** @return static[] */
     public static function cases(): array;
     public readonly string $name;
 }

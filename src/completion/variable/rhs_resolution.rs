@@ -1805,7 +1805,39 @@ fn resolve_rhs_static_call(
                     ctx.cursor_offset,
                     ctx.class_loader,
                 );
-            targets.first().map(|c| c.name.clone())
+            if let Some(first) = targets.first() {
+                Some(first.name.clone())
+            } else {
+                // Fallback: resolve the variable's type and extract the
+                // inner type from `class-string<T>`.  This handles
+                // parameters typed as `@param class-string<Foo> $var`
+                // where there is no `$var = Foo::class` assignment.
+                let resolved = super::resolution::resolve_variable_types(
+                    &var_name,
+                    ctx.current_class,
+                    ctx.all_classes,
+                    ctx.content,
+                    ctx.cursor_offset,
+                    ctx.class_loader,
+                    Loaders::with_function(ctx.function_loader()),
+                );
+                resolved.iter().find_map(|rt| match &rt.type_string {
+                    PhpType::ClassString(Some(inner)) => Some(inner.to_string()),
+                    PhpType::Nullable(inner) => match inner.as_ref() {
+                        PhpType::ClassString(Some(cs_inner)) => Some(cs_inner.to_string()),
+                        _ => None,
+                    },
+                    PhpType::Union(members) => members.iter().find_map(|m| match m {
+                        PhpType::ClassString(Some(inner)) => Some(inner.to_string()),
+                        PhpType::Nullable(inner) => match inner.as_ref() {
+                            PhpType::ClassString(Some(cs_inner)) => Some(cs_inner.to_string()),
+                            _ => None,
+                        },
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+            }
         }
         _ => None,
     };

@@ -488,30 +488,7 @@ simpler, but basic reconciliation can work with strings too).
 
 ---
 
-## T23. `class-string<T>` static method dispatch
-**Impact: Medium · Effort: Medium**
 
-When a variable is typed as `class-string<Foo>` (via `@param` or
-native type), calling static methods on it (e.g. `$class::cases()`,
-`$class::create()`) should resolve through `Foo` as the base class.
-PHPantom currently does not resolve static method calls on
-`class-string`-typed variables, so the return type is unknown and
-any chaining breaks.
-
-A specific sub-problem is the `static` return type: `UnitEnum::cases()`
-returns `static[]`. When called via `$class::cases()` where `$class`
-is `class-string<BackedEnum>`, the return type should resolve as
-`BackedEnum[]`, making `$item->name` and `$item->value` accessible
-in a `foreach`.
-
-Example from triage: `OptionList:27,30` — `$class::cases()` where
-`$class` is typed as `class-string<BackedEnum>`. Properties `name`
-and `value` on the iterated elements are unresolved.
-
-**Implementation:** in the static call resolution path, detect when
-the subject is a variable with a `class-string<T>` type. Extract `T`
-and resolve the method on that class. When the return type contains
-`static`, substitute it with `T`.
 
 ---
 

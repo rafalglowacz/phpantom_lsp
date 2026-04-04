@@ -23,7 +23,7 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                             | Impact      | Effort      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- | ----------- |
-| T23 | [`class-string<T>` static method dispatch](todo/type-inference.md#t23-class-stringt-static-method-dispatch)                                     | Medium      | Medium      |
+
 | H10 | [`return.unusedType` — remove unused type from return union](todo/phpstan-actions.md#h10-returnunusedtype--remove-unused-type-from-return-union) | Medium      | Medium      |
 | H6  | `return.type` — update return type to match actual returns                                                                                       | Medium      | Medium      |
 |     | **Release 0.7.0**                                                                                                                                |             |             |
