@@ -19,7 +19,7 @@
 ///   type alias reference.
 use std::sync::Arc;
 
-use crate::inheritance::apply_generic_args;
+use crate::inheritance::{apply_generic_args, build_generic_subs};
 use crate::php_type::PhpType;
 use crate::types::*;
 use crate::util::{find_class_by_name, short_name};
@@ -361,6 +361,26 @@ fn resolve_named_type(
                     virtual_members::resolve_class_fully(&cls, class_loader)
                 };
                 let mut result = apply_generic_args(&resolved, &generic_args);
+
+                // ── Template-param mixin resolution ────────────────
+                // When a class declares `@mixin TParam` where `TParam`
+                // is a template parameter, the mixin cannot be resolved
+                // during `resolve_class_fully` because the concrete type
+                // is not yet known.  Now that generic args are concrete,
+                // resolve those mixins and merge their members.
+                if cls.mixins.iter().any(|m| cls.template_params.contains(m)) {
+                    let subs = build_generic_subs(&cls, &generic_args);
+                    if !subs.is_empty() {
+                        let mixin_members = virtual_members::phpdoc::resolve_template_param_mixins(
+                            &cls,
+                            &subs,
+                            class_loader,
+                        );
+                        if !mixin_members.is_empty() {
+                            virtual_members::merge_virtual_members(&mut result, mixin_members);
+                        }
+                    }
+                }
 
                 // ── Eloquent Builder scope injection ───────────────
                 laravel::try_inject_builder_scopes(

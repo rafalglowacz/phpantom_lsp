@@ -7389,3 +7389,118 @@ async fn test_function_template_param_resolves_to_bound_inside_body() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+/// When a class declares `@template TWraps` and `@mixin TWraps`, and a
+/// property is typed as `Wrapper<ConcreteApi>`, the mixin should resolve
+/// `TWraps` → `ConcreteApi` and expose `ConcreteApi`'s methods on the
+/// property.  This is the "direct property access" scenario — no child
+/// class extends the wrapper; the concrete type comes entirely from the
+/// `@var` generic annotation on the property.
+///
+/// Reproduces the Klaviyo SDK pattern:
+///   `/** @var Subclient<EventsApi> */ public $Events;`
+#[tokio::test]
+async fn test_mixin_template_param_resolved_via_property_generic_type() {
+    let backend = create_test_backend();
+
+    let wrapper_uri = Url::parse("file:///Subclient.php").unwrap();
+    let wrapper_text = r#"<?php
+/**
+ * @template TWraps of object
+ * @mixin TWraps
+ */
+class Subclient {
+    public function getApiInstance(): object {}
+}
+"#;
+
+    let api_uri = Url::parse("file:///EventsApi.php").unwrap();
+    let api_text = r#"<?php
+class EventsApi {
+    public function createEvent(array $body): array {}
+    public function getEvents(string $filter): array {}
+    public function deleteEvent(string $id): void {}
+}
+"#;
+
+    let consumer_uri = Url::parse("file:///KlaviyoClient.php").unwrap();
+    let consumer_text = r#"<?php
+class KlaviyoClient {
+    /** @var Subclient<EventsApi> */
+    public $Events;
+
+    function test() {
+        $this->Events->
+    }
+}
+"#;
+
+    // Open all files
+    for (uri, text) in [
+        (&wrapper_uri, wrapper_text),
+        (&api_uri, api_text),
+        (&consumer_uri, consumer_text),
+    ] {
+        backend
+            .did_open(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "php".to_string(),
+                    version: 1,
+                    text: text.to_string(),
+                },
+            })
+            .await;
+    }
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: consumer_uri.clone(),
+            },
+            position: Position {
+                line: 6,
+                character: 24,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"createEvent"),
+                "Mixin template param via @var Subclient<EventsApi> should expose 'createEvent', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getEvents"),
+                "Mixin template param via @var Subclient<EventsApi> should expose 'getEvents', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"deleteEvent"),
+                "Mixin template param via @var Subclient<EventsApi> should expose 'deleteEvent', got: {:?}",
+                method_names
+            );
+            // The wrapper's own method should also be present.
+            assert!(
+                method_names.contains(&"getApiInstance"),
+                "Wrapper's own method 'getApiInstance' should still be present, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

@@ -633,11 +633,21 @@ impl Backend {
                 }
             }
 
-            // Resolve mixin names to fully-qualified names
+            // Resolve mixin names to fully-qualified names.
+            // Skip names that match a template parameter — these are
+            // not class names but placeholders that will be substituted
+            // with concrete types when the generic class is instantiated
+            // (e.g. `@template TWraps` + `@mixin TWraps`).
             class.mixins = class
                 .mixins
                 .iter()
-                .map(|m| Self::resolve_name(m, use_map, namespace))
+                .map(|m| {
+                    if class.template_params.contains(m) {
+                        m.clone()
+                    } else {
+                        Self::resolve_name(m, use_map, namespace)
+                    }
+                })
                 .collect();
 
             // Resolve custom collection class name to FQN

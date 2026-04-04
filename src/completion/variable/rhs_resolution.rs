@@ -469,8 +469,29 @@ fn resolve_rhs_instantiation(
                             type_arg_strings.iter().map(|s| s.as_str()).collect();
                         let resolved =
                             crate::virtual_members::resolve_class_fully(cls, ctx.class_loader);
-                        let substituted =
+                        let mut substituted =
                             crate::inheritance::apply_generic_args(&resolved, &type_args);
+
+                        // ── Template-param mixin resolution ────────────────
+                        // When a class declares `@mixin TParam` where `TParam`
+                        // is a template parameter, the mixin cannot be resolved
+                        // during `resolve_class_fully` because the concrete type
+                        // is not yet known.  Now that generic args are concrete,
+                        // resolve those mixins and merge their members.
+                        if cls.mixins.iter().any(|m| cls.template_params.contains(m)) {
+                            let generic_subs = crate::inheritance::build_generic_subs(cls, &type_args);
+                            if !generic_subs.is_empty() {
+                                let mixin_members = crate::virtual_members::phpdoc::resolve_template_param_mixins(
+                                    cls,
+                                    &generic_subs,
+                                    ctx.class_loader,
+                                );
+                                if !mixin_members.is_empty() {
+                                    crate::virtual_members::merge_virtual_members(&mut substituted, mixin_members);
+                                }
+                            }
+                        }
+
                         return vec![ResolvedType::from_class(substituted)];
                     }
                 }

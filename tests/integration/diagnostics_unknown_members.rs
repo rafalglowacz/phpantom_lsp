@@ -2863,3 +2863,237 @@ class NotificationCategoryService {
         diags3
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// @mixin with template parameter resolved via property generic type
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// When a class declares `@template TWraps` and `@mixin TWraps`, and a
+/// property is typed as `Wrapper<ConcreteApi>`, calling methods from
+/// `ConcreteApi` on the property should NOT produce unknown_member
+/// diagnostics.  This is the Klaviyo SDK pattern.
+#[test]
+fn no_diagnostic_for_mixin_template_param_via_property_generic() {
+    let backend = create_test_backend();
+
+    let wrapper_uri = "file:///Subclient.php";
+    let wrapper_text = r#"<?php
+/**
+ * @template TWraps of object
+ * @mixin TWraps
+ */
+class Subclient {
+    public function getApiInstance(): object {}
+}
+"#;
+
+    let api_uri = "file:///EventsApi.php";
+    let api_text = r#"<?php
+class EventsApi {
+    public function createEvent(array $body): array {}
+    public function getEvents(string $filter): array {}
+}
+"#;
+
+    let consumer_uri = "file:///KlaviyoClient.php";
+    let consumer_text = r#"<?php
+class KlaviyoClient {
+    /** @var Subclient<EventsApi> */
+    public $Events;
+
+    function test() {
+        $this->Events->createEvent([]);
+        $this->Events->getEvents('filter');
+        $this->Events->getApiInstance();
+    }
+}
+"#;
+
+    backend.update_ast(wrapper_uri, wrapper_text);
+    backend.update_ast(api_uri, api_text);
+    backend.update_ast(consumer_uri, consumer_text);
+
+    let diags = unknown_member_diagnostics(&backend, consumer_uri, consumer_text);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("createEvent")),
+        "createEvent from mixin TWraps→EventsApi should not be flagged, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("getEvents")),
+        "getEvents from mixin TWraps→EventsApi should not be flagged, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("getApiInstance")),
+        "Own method getApiInstance should not be flagged, got: {:?}",
+        diags
+    );
+}
+
+/// Calling a method that does NOT exist on the concrete mixin target
+/// should still be flagged as unknown_member.
+#[test]
+fn diagnostic_for_nonexistent_method_on_mixin_template_param() {
+    let backend = create_test_backend();
+
+    let wrapper_uri = "file:///Wrapper.php";
+    let wrapper_text = r#"<?php
+/**
+ * @template T of object
+ * @mixin T
+ */
+class Wrapper {}
+"#;
+
+    let api_uri = "file:///Api.php";
+    let api_text = r#"<?php
+class Api {
+    public function realMethod(): void {}
+}
+"#;
+
+    let consumer_uri = "file:///Consumer.php";
+    let consumer_text = r#"<?php
+class Consumer {
+    /** @var Wrapper<Api> */
+    public $api;
+
+    function test() {
+        $this->api->fakeMethod();
+    }
+}
+"#;
+
+    backend.update_ast(wrapper_uri, wrapper_text);
+    backend.update_ast(api_uri, api_text);
+    backend.update_ast(consumer_uri, consumer_text);
+
+    let diags = unknown_member_diagnostics(&backend, consumer_uri, consumer_text);
+    assert!(
+        diags.iter().any(|d| d.message.contains("fakeMethod")),
+        "fakeMethod does not exist on Api and should be flagged, got: {:?}",
+        diags
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// @mixin with template parameter — namespaced (Klaviyo SDK pattern)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Reproduces the exact Klaviyo SDK pattern with namespaces:
+///   - `KlaviyoAPI\Subclient` has `@template TWraps of object` + `@mixin TWraps`
+///   - `KlaviyoAPI\KlaviyoAPI` has `/** @var Subclient<EventsApi> */ public $Events;`
+///   - A consumer calls `$this->getClient()->Events->createEvent([])`
+///
+/// The mixin template parameter must resolve through the `@var` generic
+/// annotation even when all classes live in different namespaces.
+#[test]
+fn no_diagnostic_for_mixin_template_param_namespaced_klaviyo_pattern() {
+    let backend = create_test_backend();
+
+    let subclient_uri = "file:///vendor/klaviyo/Subclient.php";
+    let subclient_text = r#"<?php
+namespace KlaviyoAPI;
+
+/**
+ * @template TWraps of object
+ * @mixin TWraps
+ */
+class Subclient {
+    public function __call(string $name, array $args): mixed {}
+}
+"#;
+
+    let events_api_uri = "file:///vendor/klaviyo/EventsApi.php";
+    let events_api_text = r#"<?php
+namespace KlaviyoAPI\API;
+
+class EventsApi {
+    public function createEvent(array $body): array {}
+    public function getEvents(string $filter): array {}
+}
+"#;
+
+    let profiles_api_uri = "file:///vendor/klaviyo/ProfilesApi.php";
+    let profiles_api_text = r#"<?php
+namespace KlaviyoAPI\API;
+
+class ProfilesApi {
+    public function getProfiles(?string $additional = null, ?array $fields = null, ?string $filter = null): array {}
+    public function updateProfile(string $id, array $body): array {}
+}
+"#;
+
+    let klaviyo_api_uri = "file:///vendor/klaviyo/KlaviyoAPI.php";
+    let klaviyo_api_text = r#"<?php
+namespace KlaviyoAPI;
+
+use KlaviyoAPI\API\EventsApi;
+use KlaviyoAPI\API\ProfilesApi;
+
+class KlaviyoAPI {
+    /** @var Subclient<EventsApi> */
+    public $Events;
+    /** @var Subclient<ProfilesApi> */
+    public $Profiles;
+}
+"#;
+
+    let service_uri = "file:///src/KlaviyoService.php";
+    let service_text = r#"<?php
+namespace App\Services;
+
+use KlaviyoAPI\KlaviyoAPI;
+
+class KlaviyoService {
+    private ?KlaviyoAPI $client = null;
+
+    private function getClient(): KlaviyoAPI
+    {
+        return $this->client;
+    }
+
+    public function testEvents(): void
+    {
+        $this->getClient()->Events->createEvent([]);
+        $this->getClient()->Events->getEvents('filter');
+    }
+
+    public function testProfiles(): void
+    {
+        $this->getClient()->Profiles->getProfiles(null, ['email'], 'filter');
+        $this->getClient()->Profiles->updateProfile('id123', []);
+    }
+}
+"#;
+
+    backend.update_ast(subclient_uri, subclient_text);
+    backend.update_ast(events_api_uri, events_api_text);
+    backend.update_ast(profiles_api_uri, profiles_api_text);
+    backend.update_ast(klaviyo_api_uri, klaviyo_api_text);
+    backend.update_ast(service_uri, service_text);
+
+    let diags = unknown_member_diagnostics(&backend, service_uri, service_text);
+
+    assert!(
+        !diags.iter().any(|d| d.message.contains("createEvent")),
+        "createEvent from mixin TWraps→EventsApi should not be flagged, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("getEvents")),
+        "getEvents from mixin TWraps→EventsApi should not be flagged, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("getProfiles")),
+        "getProfiles from mixin TWraps→ProfilesApi should not be flagged, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("updateProfile")),
+        "updateProfile from mixin TWraps→ProfilesApi should not be flagged, got: {:?}",
+        diags
+    );
+}

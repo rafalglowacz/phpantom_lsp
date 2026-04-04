@@ -605,6 +605,83 @@ fn collect_mixin_members(
     }
 }
 
+/// Resolve `@mixin` tags that name a template parameter, using concrete
+/// generic arguments provided at a call site.
+///
+/// During [`PHPDocProvider::provide`], mixin names that are template
+/// parameters (e.g. `@mixin TWraps`) cannot be resolved because the
+/// concrete type arguments are not yet known — they are applied later
+/// by [`apply_generic_args`](crate::inheritance::apply_generic_args).
+/// This function fills that gap: after generic substitution has been
+/// performed, call it with the **original** (unsubstituted) class and
+/// the substitution map to collect members from the now-concrete mixin
+/// classes.
+///
+/// Only mixins whose names match a template parameter are processed;
+/// non-template mixins were already resolved during `provide`.
+///
+/// The returned [`VirtualMembers`](super::VirtualMembers) should be
+/// merged into the substituted class via
+/// [`merge_virtual_members`](super::merge_virtual_members).
+pub fn resolve_template_param_mixins(
+    original_class: &ClassInfo,
+    template_subs: &HashMap<String, PhpType>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> super::VirtualMembers {
+    if template_subs.is_empty() || original_class.mixins.is_empty() {
+        return super::VirtualMembers {
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+        };
+    }
+
+    // Only process mixins whose name is a template parameter — the
+    // rest were already resolved during `PHPDocProvider::provide`.
+    let template_mixins: Vec<String> = original_class
+        .mixins
+        .iter()
+        .filter(|m| original_class.template_params.contains(m))
+        .cloned()
+        .collect();
+
+    if template_mixins.is_empty() {
+        return super::VirtualMembers {
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+        };
+    }
+
+    let dedup = MixinDedup {
+        methods: HashSet::new(),
+        properties: HashSet::new(),
+        constants: HashSet::new(),
+    };
+
+    let mut collector = MixinCollector {
+        methods: Vec::new(),
+        properties: Vec::new(),
+        constants: Vec::new(),
+        dedup,
+    };
+
+    collect_mixin_members(
+        &template_mixins,
+        &original_class.mixin_generics,
+        class_loader,
+        &mut collector,
+        template_subs,
+        0,
+    );
+
+    super::VirtualMembers {
+        methods: collector.methods,
+        properties: collector.properties,
+        constants: collector.constants,
+    }
+}
+
 /// Build a substitution map for mixin generic resolution by zipping the
 /// parent class's `@template` parameters with the type arguments provided
 /// by the child's `@extends` / `@implements` generics.

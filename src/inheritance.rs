@@ -999,25 +999,17 @@ pub(crate) fn apply_substitution<'a>(
     }
 }
 
-/// Apply explicit generic type arguments to a class's members.
+/// Build a substitution map from a class's template parameters and
+/// concrete type arguments.
 ///
-/// When a type hint includes generic parameters (e.g. `Collection<int, User>`),
-/// this function maps them to the class's `@template` parameters and rewrites
-/// all method return types, method parameter types, and property type hints
-/// with the concrete types.
+/// Handles right-alignment when fewer arguments than template parameters
+/// are provided (see [`apply_generic_args`] for details on the heuristic).
 ///
-/// If the class has no `template_params` or no `type_args` are provided,
-/// returns a clone of the class unchanged.
-///
-/// # Example
-///
-/// Given a `Collection` class with `@template TKey` and `@template TValue`,
-/// calling `apply_generic_args(&collection_class, &["int", "User"])` will
-/// substitute every occurrence of `TKey` with `int` and `TValue` with `User`
-/// in the class's methods and properties.
-pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> ClassInfo {
+/// Returns an empty map when no substitutions can be made (e.g. when
+/// `template_params` or `type_args` is empty).
+pub(crate) fn build_generic_subs(class: &ClassInfo, type_args: &[&str]) -> HashMap<String, PhpType> {
     if class.template_params.is_empty() || type_args.is_empty() {
-        return class.clone();
+        return HashMap::new();
     }
 
     // When fewer type arguments are provided than template parameters,
@@ -1052,6 +1044,28 @@ pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> Class
             subs.insert(param_name.clone(), PhpType::parse(arg));
         }
     }
+
+    subs
+}
+
+/// Apply explicit generic type arguments to a class's members.
+///
+/// When a type hint includes generic parameters (e.g. `Collection<int, User>`),
+/// this function maps them to the class's `@template` parameters and rewrites
+/// all method return types, method parameter types, and property type hints
+/// with the concrete types.
+///
+/// If the class has no `template_params` or no `type_args` are provided,
+/// returns a clone of the class unchanged.
+///
+/// # Example
+///
+/// Given a `Collection` class with `@template TKey` and `@template TValue`,
+/// calling `apply_generic_args(&collection_class, &["int", "User"])` will
+/// substitute every occurrence of `TKey` with `int` and `TValue` with `User`
+/// in the class's methods and properties.
+pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> ClassInfo {
+    let subs = build_generic_subs(class, type_args);
 
     if subs.is_empty() {
         return class.clone();
