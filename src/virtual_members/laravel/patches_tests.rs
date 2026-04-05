@@ -3,7 +3,7 @@ use crate::test_fixtures::make_class;
 use crate::types::MethodInfo;
 use crate::virtual_members::laravel::ELOQUENT_BUILDER_FQN;
 
-use super::{CONDITIONABLE_FQN, apply_laravel_patches};
+use super::{CONDITIONABLE_FQN, DB_CONNECTION_FQN, DB_FACADE_FQN, apply_laravel_patches};
 
 /// Create a method with a parsed `PhpType` return type.
 ///
@@ -437,6 +437,211 @@ fn union_of_only_self_types_is_not_patched() {
             .to_string(),
         return_type.to_string(),
         "Union of self-like types should not be patched"
+    );
+}
+
+// ─── DB select return type patches ──────────────────────────────────────────
+
+#[test]
+fn db_facade_select_bare_array_becomes_typed() {
+    let mut class = make_class(DB_FACADE_FQN);
+    class.methods = vec![make_method_typed(
+        "select",
+        Some(PhpType::Named("array".to_string())),
+    )]
+    .into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "array<int, stdClass>",
+        "select() bare array should become array<int, stdClass>"
+    );
+}
+
+#[test]
+fn db_facade_select_from_write_connection_becomes_typed() {
+    let mut class = make_class(DB_FACADE_FQN);
+    class.methods = vec![make_method_typed(
+        "selectFromWriteConnection",
+        Some(PhpType::Named("array".to_string())),
+    )]
+    .into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "array<int, stdClass>",
+    );
+}
+
+#[test]
+fn db_facade_select_result_sets_becomes_typed() {
+    let mut class = make_class(DB_FACADE_FQN);
+    class.methods = vec![make_method_typed(
+        "selectResultSets",
+        Some(PhpType::Named("array".to_string())),
+    )]
+    .into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "array<int, stdClass>",
+    );
+}
+
+#[test]
+fn db_facade_select_one_mixed_becomes_nullable_stdclass() {
+    let mut class = make_class(DB_FACADE_FQN);
+    class.methods = vec![make_method_typed(
+        "selectOne",
+        Some(PhpType::Named("mixed".to_string())),
+    )]
+    .into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "?stdClass",
+        "selectOne() mixed should become ?stdClass"
+    );
+}
+
+#[test]
+fn db_connection_select_bare_array_becomes_typed() {
+    let mut class = make_class(DB_CONNECTION_FQN);
+    class.methods = vec![make_method_typed(
+        "select",
+        Some(PhpType::Named("array".to_string())),
+    )]
+    .into();
+
+    apply_laravel_patches(&mut class, DB_CONNECTION_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "array<int, stdClass>",
+        "Connection::select() bare array should become array<int, stdClass>"
+    );
+}
+
+#[test]
+fn db_select_non_array_return_is_not_patched() {
+    let mut class = make_class(DB_FACADE_FQN);
+    let original = PhpType::Generic(
+        "array".to_string(),
+        vec![
+            PhpType::Named("string".to_string()),
+            PhpType::Named("mixed".to_string()),
+        ],
+    );
+    class.methods = vec![make_method_typed("select", Some(original.clone()))].into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        original.to_string(),
+        "select() with non-bare-array return type should not be patched"
+    );
+}
+
+#[test]
+fn db_select_one_non_mixed_is_not_patched() {
+    let mut class = make_class(DB_FACADE_FQN);
+    let original = PhpType::Named("object".to_string());
+    class.methods = vec![make_method_typed("selectOne", Some(original.clone()))].into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        original.to_string(),
+        "selectOne() with non-mixed return type should not be patched"
+    );
+}
+
+#[test]
+fn db_other_method_is_not_patched() {
+    let mut class = make_class(DB_FACADE_FQN);
+    let original = PhpType::Named("array".to_string());
+    class.methods = vec![make_method_typed("insert", Some(original.clone()))].into();
+
+    apply_laravel_patches(&mut class, DB_FACADE_FQN);
+
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .next()
+            .unwrap()
+            .return_type
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        original.to_string(),
+        "non-select methods should not be patched"
     );
 }
 

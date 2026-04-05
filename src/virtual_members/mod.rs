@@ -624,6 +624,17 @@ fn resolve_class_fully_inner(
 
     // ── Uncached resolution ─────────────────────────────────────────
     let mut merged = resolve_class_with_inheritance(class, class_loader);
+
+    // ── Pre-provider patches ────────────────────────────────────────
+    // Inject missing `@mixin` annotations before virtual member
+    // providers run, so that `collect_mixin_members` picks them up.
+    if fqn == "Illuminate\\Redis\\Connections\\Connection" {
+        let mixin = "Redis".to_string();
+        if !merged.mixins.contains(&mixin) {
+            merged.mixins.push(mixin);
+        }
+    }
+
     let providers = default_providers();
     if !providers.is_empty() {
         apply_virtual_members(&mut merged, class_loader, &providers, cache);

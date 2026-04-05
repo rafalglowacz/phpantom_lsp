@@ -29,6 +29,26 @@
 //!    patch runs at scope-injection time (post-generic-substitution),
 //!    not during `resolve_class_fully_inner`.  It is documented here
 //!    as part of the patch inventory but not dispatched from this module.
+//!
+//! 4. **`Redis\Connections\Connection` mixin.**
+//!    The base `Connection` class delegates all Redis commands to the
+//!    underlying `\Redis` client via `__call`, but lacks a `@mixin`
+//!    annotation.  The patch injects `@mixin \Redis` **pre-resolution**
+//!    (in `resolve_class_fully_inner`, before virtual member providers
+//!    run) so that `collect_mixin_members` picks it up and merges
+//!    `del()`, `get()`, `set()`, etc. from the stubs.  This patch is
+//!    not dispatched from `apply_laravel_patches` because that runs
+//!    post-resolution, after mixin collection has already completed.
+//!
+//! 5. **`DB` facade / `Connection` select method return types.**
+//!    The facade's `@method` annotations and the underlying
+//!    `Connection` class both declare `select()`,
+//!    `selectFromWriteConnection()`, and `selectResultSets()` as
+//!    returning bare `array`.  The actual return type is
+//!    `array<int, stdClass>`.  Similarly, `selectOne()` is declared as
+//!    `mixed` but actually returns `stdClass|null`.  The patch
+//!    overrides these return types so that downstream property access
+//!    on query results resolves correctly.
 
 use crate::php_type::PhpType;
 use crate::types::ClassInfo;
@@ -37,6 +57,12 @@ use super::ELOQUENT_BUILDER_FQN;
 
 /// FQN of the `Conditionable` trait from `illuminate/support`.
 const CONDITIONABLE_FQN: &str = "Illuminate\\Support\\Traits\\Conditionable";
+
+/// FQN of the `DB` facade from `illuminate/support`.
+const DB_FACADE_FQN: &str = "Illuminate\\Support\\Facades\\DB";
+
+/// FQN of the base `Connection` class from `illuminate/database`.
+const DB_CONNECTION_FQN: &str = "Illuminate\\Database\\Connection";
 
 /// Apply all registered Laravel class patches to a fully-resolved class.
 ///
@@ -56,6 +82,10 @@ pub fn apply_laravel_patches(class: &mut ClassInfo, fqn: &str) {
         patch_conditionable_when_unless(class);
     } else if fqn == CONDITIONABLE_FQN || class_uses_conditionable(class) {
         patch_conditionable_when_unless(class);
+    }
+
+    if fqn == DB_FACADE_FQN || fqn == DB_CONNECTION_FQN {
+        patch_db_select_return_types(class);
     }
 }
 
@@ -190,6 +220,51 @@ fn is_likely_template_param(ty: &PhpType) -> bool {
     }
 
     false
+}
+
+/// Patch `select()`, `selectFromWriteConnection()`, `selectResultSets()`
+/// return types from bare `array` to `array<int, stdClass>`, and
+/// `selectOne()` from `mixed` to `stdClass|null`.
+///
+/// Both the `DB` facade (`@method` annotations) and the underlying
+/// `Illuminate\Database\Connection` class declare these methods with
+/// imprecise return types.  The actual runtime return is always an
+/// array of `stdClass` rows (or a single `stdClass|null` for
+/// `selectOne`).  Patching this here lets property access on query
+/// results resolve correctly across the codebase.
+fn patch_db_select_return_types(class: &mut ClassInfo) {
+    let array_of_std = PhpType::Generic(
+        "array".to_string(),
+        vec![
+            PhpType::Named("int".to_string()),
+            PhpType::Named("stdClass".to_string()),
+        ],
+    );
+    let std_or_null = PhpType::Nullable(Box::new(PhpType::Named("stdClass".to_string())));
+
+    for method in class.methods.make_mut().iter_mut() {
+        match method.name.as_str() {
+            "select" | "selectFromWriteConnection" | "selectResultSets" => {
+                if method
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|rt| rt.to_string() == "array")
+                {
+                    method.return_type = Some(array_of_std.clone());
+                }
+            }
+            "selectOne" => {
+                if method
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|rt| rt.to_string() == "mixed")
+                {
+                    method.return_type = Some(std_or_null.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Check whether a class uses the `Conditionable` trait (directly or

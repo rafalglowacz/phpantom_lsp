@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DB::select()` return type.** `DB::select()`, `DB::selectFromWriteConnection()`, and `DB::selectResultSets()` now return `array<int, stdClass>` instead of bare `array`, and `DB::selectOne()` returns `?stdClass` instead of `mixed`. Property access on query results (e.g. `$result[0]->column_name`) no longer produces false-positive diagnostics. The same fix applies to the underlying `Illuminate\Database\Connection` class.
+- **Redis `Connection` method resolution.** `Illuminate\Redis\Connections\Connection` now has `@mixin \Redis` applied automatically, so Redis commands like `del()`, `get()`, `set()`, etc. resolve through the phpredis stubs instead of producing false-positive diagnostics.
+
 ### Added
 
 - **Foreach over arrays with non-class element types.** When iterating over a generic array whose value type is an array shape (e.g. `array<int, array{tool: Pen, count: int}>`), the foreach iteration variable now carries the full shape type. Bracket access on the iteration variable (`$entry['tool']->`) resolves each key to its declared type. Previously the element type was silently dropped when it was not a class name, leaving the iteration variable untyped.

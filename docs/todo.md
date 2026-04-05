@@ -27,7 +27,6 @@ within the same impact tier.
 | B11 | [`static` return type not resolved through `class-string<T>` context](todo/bugs.md#b11-static-return-type-not-resolved-through-class-stringt-context)     | Low    | Medium     |
 | B12 | [`Collection::reduce()` generic return type not inferred](todo/bugs.md#b12-collectionreduce-generic-return-type-not-inferred)                             | Low    | Medium     |
 | B13 | [Array shape tracking from keyed literal assignments in loops](todo/bugs.md#b13-array-shape-tracking-from-keyed-literal-assignments-in-loops)             | Low    | High       |
-| B14 | [`DB::select()` returns bare `array`, element type unresolvable](todo/bugs.md#b14-dbselect-returns-bare-array-element-type-unresolvable)                  | Low    | Low        |
 | H10 | [`return.unusedType` — remove unused type from return union](todo/phpstan-actions.md#h10-returnunusedtype--remove-unused-type-from-return-union)          | Medium | Medium     |
 | H6  | `return.type` — update return type to match actual returns                                                                                                | Medium | Medium     |
 |     | **Release 0.7.0**                                                                                                                                         |        |            |
