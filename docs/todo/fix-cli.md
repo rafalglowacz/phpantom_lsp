@@ -37,6 +37,19 @@ with side effects in the RHS (method calls, function calls). When the
 RHS is pure (literal, property access, simple expression), remove the
 entire statement.
 
+### FX7. `add_return_type` — Generate `@return` docblocks from function bodies
+
+Wire up the existing "Generate PHPDoc" code action's return-type
+inference to the fix CLI. When a function or method has a native
+`array` return type (or no return type at all) and the body contains
+enough information to infer a specific element type, add a `@return`
+tag with the inferred type (e.g. `@return list<Butterfly>`).
+
+This lets teams that want to reach PHPStan level 6 (require return
+type declarations) run a single command and get specific, useful
+return types across the entire codebase for free, instead of adding
+them by hand file by file.
+
 ---
 
 ## Planned PHPStan Rules

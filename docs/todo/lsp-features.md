@@ -239,3 +239,30 @@ index (X4), the lookup becomes a simple index query.
 
 Consider implementing after X4 (full background indexing) ships, or
 accept the same scan-based latency that Find References currently has.
+
+## F6. Machine-readable CLI output formats
+
+**Impact: Medium · Effort: Low**
+
+Add a `--format` flag to `analyze` and `fix` that controls the output
+format. The default remains the current human-readable table.
+
+### Formats
+
+- **`github`** — Emit
+  [workflow commands](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-a-warning-message)
+  (`::warning file=...::message`) so diagnostics appear as inline
+  annotations on pull request diffs. This is the highest-priority
+  format because GitHub Actions is the most common CI environment for
+  PHP projects.
+- **`json`** — One JSON object per diagnostic (or a top-level array).
+  Enables integration with custom dashboards, editor plugins, and
+  other tooling that wants to consume PHPantom output programmatically.
+
+### Implementation
+
+The output logic in `analyse.rs` and `fix.rs` currently writes
+directly to stderr/stdout with ANSI formatting. Extract the rendering
+behind a trait or enum so each format can be selected at the call
+site. The `--no-colour` flag becomes redundant for non-table formats
+but should continue to work for the default table output.

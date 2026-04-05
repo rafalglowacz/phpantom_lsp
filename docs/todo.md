@@ -35,6 +35,7 @@ within the same impact tier.
 | D11 | [Invalid class-like kind in context](todo/diagnostics.md#d11-invalid-class-like-kind-in-context)                             | Medium | Low    |
 | F4  | [Return type and closure parameter type inlay hints](todo/lsp-features.md#f4-return-type-and-closure-parameter-type-inlay-hints) | Medium | Medium |
 | A36 | [Import all missing classes](todo/actions.md#a36-import-all-missing-classes) (bulk import)                                    | Medium | Low    |
+| F6  | [Machine-readable CLI output formats](todo/lsp-features.md#f6-machine-readable-cli-output-formats) (`--format github\|json`) | Medium | Low    |
 |     | **Release 0.8.0**                                                                                                            |        |        |
 
 > **Note:** F1 (Workspace symbol search), F2 (Document symbols), A8
@@ -133,6 +134,7 @@ unlikely to move the needle for most users.
 | FX4  | [`phpstan.missingType.iterableValue` — add `@return` with iterable type](todo/fix-cli.md#fx4-phpstanmissingtypeiterablevalue--add-return-with-iterable-type)                | Medium      | Medium         |
 | FX5  | [`phpstan.property.unused` / `phpstan.method.unused` — remove unused member](todo/fix-cli.md#fx5-phpstanpropertyunused--phpstanmethodunused--remove-unused-member)          | Low         | Low            |
 | FX6  | [`phpstan.generics.callSiteVarianceRedundant` — remove redundant variance](todo/fix-cli.md#fx6-phpstangenericscallsitevarianceredundant--remove-redundant-variance)         | Low         | Low            |
+| FX7  | [`add_return_type` — generate `@return` docblocks from function bodies](todo/fix-cli.md#fx7-add_return_type--generate-return-docblocks-from-function-bodies)                | Medium-High | Medium         |
 |      | **[LSP Features](todo/lsp-features.md)**                                                                                                                                    |             |                |
 | F5   | [Call hierarchy](todo/lsp-features.md#f5-call-hierarchy) (incoming/outgoing calls)                                                                                          | Medium      | Medium         |
 | F2   | [Partial result streaming via `$/progress`](todo/lsp-features.md#f2-partial-result-streaming-via-progress)                                                                  | Medium      | Medium-High    |
