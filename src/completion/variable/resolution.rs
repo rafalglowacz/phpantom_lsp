@@ -37,7 +37,7 @@ use mago_syntax::ast::*;
 
 use crate::completion::types::narrowing;
 use crate::docblock;
-use crate::parser::{extract_hint_string, with_parsed_program};
+use crate::parser::{extract_hint_type, with_parsed_program};
 use crate::php_type::{PhpType, ShapeEntry};
 use crate::types::{ClassInfo, ResolvedType};
 
@@ -790,7 +790,8 @@ fn resolve_variable_in_members<'b>(
                 if pname == ctx.var_name {
                     matched_param_is_variadic = param.ellipsis.is_some();
                     // Try the native AST type hint first.
-                    let native_type_str = param.hint.as_ref().map(|h| extract_hint_string(h));
+                    let native_type = param.hint.as_ref().map(|h| extract_hint_type(h));
+                    let native_type_str = native_type.as_ref().map(|t| t.to_string());
 
                     // ── Eloquent scope Builder inference ────────
                     // When the enclosing method is a scope on an
@@ -832,7 +833,11 @@ fn resolve_variable_in_members<'b>(
 
                     // Pick the effective type: docblock overrides native
                     // when it is a compatible refinement.
-                    let native_parsed = type_str_for_resolution.map(PhpType::parse);
+                    let native_parsed = if let Some(ref enriched) = enriched_type_str {
+                        Some(PhpType::parse(enriched))
+                    } else {
+                        native_type.clone()
+                    };
                     let doc_parsed = raw_docblock_type.as_ref().map(|s| PhpType::parse(s));
                     let effective_type = crate::docblock::resolve_effective_type_typed(
                         native_parsed.as_ref(),
@@ -2723,8 +2728,7 @@ fn walk_try_statement<'b>(
         if let Some(ref var) = catch.variable
             && var.name == ctx.var_name
         {
-            let hint_str = extract_hint_string(&catch.hint);
-            let parsed_hint = PhpType::parse(&hint_str);
+            let parsed_hint = extract_hint_type(&catch.hint);
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 &parsed_hint,
                 &ctx.current_class.name,
@@ -3146,10 +3150,10 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
                 let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
                 let resolved =
                     super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
-                let value_type = if !resolved.is_empty() {
-                    ResolvedType::types_joined(&resolved).to_string()
+                let value_php_type = if !resolved.is_empty() {
+                    ResolvedType::types_joined(&resolved)
                 } else {
-                    "mixed".to_string()
+                    PhpType::Named("mixed".to_string())
                 };
                 let base_type = results
                     .last()
@@ -3163,9 +3167,7 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
                     return;
                 }
                 // Infer the key type from the index expression.
-                let key_type_str = infer_array_key_type(array_access.index, &rhs_ctx);
-                let key_php_type = PhpType::parse(&key_type_str);
-                let value_php_type = PhpType::parse(&value_type);
+                let key_php_type = infer_array_key_type(array_access.index, &rhs_ctx);
                 let merged = merge_keyed_type(&base_type, &key_php_type, &value_php_type);
                 let new_rt = ResolvedType::from_type_string(merged);
                 results.clear();
@@ -3433,11 +3435,11 @@ fn merge_keyed_type(base: &PhpType, key_type: &PhpType, value_type: &PhpType) ->
 /// strings (string literals, method calls returning `string`, string
 /// variables), `"int"` for integer expressions, and `"int|string"`
 /// when the type cannot be determined.
-fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> String {
+fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> PhpType {
     // Fast path: literal values.
     match index {
-        Expression::Literal(Literal::Integer(_)) => return "int".to_string(),
-        Expression::Literal(Literal::String(_)) => return "string".to_string(),
+        Expression::Literal(Literal::Integer(_)) => return PhpType::Named("int".to_string()),
+        Expression::Literal(Literal::String(_)) => return PhpType::Named("string".to_string()),
         _ => {}
     }
 
@@ -3445,32 +3447,68 @@ fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> S
     let resolved = super::rhs_resolution::resolve_rhs_expression(index, ctx);
     if !resolved.is_empty() {
         let joined = ResolvedType::types_joined(&resolved);
-        let key_str = joined.to_string();
         // Normalise the resolved type to a valid array key type.
         // PHP array keys are always int or string; bool and null are
         // coerced to int, float is truncated to int.
-        if is_int_like_key(&key_str) {
-            return "int".to_string();
+        if is_int_like_key_typed(&joined) {
+            return PhpType::Named("int".to_string());
         }
-        if key_str == "string" || key_str == "non-empty-string" || key_str == "class-string" {
-            return "string".to_string();
+        if is_string_like_key(&joined) {
+            return PhpType::Named("string".to_string());
         }
-        if key_str == "int|string" || key_str == "string|int" || key_str == "array-key" {
-            return "int|string".to_string();
-        }
-        // If the resolved type is a known scalar that PHP coerces
-        // to a key type, map it.  Otherwise fall through to the
-        // default.
-        if key_str == "mixed" {
-            return "int|string".to_string();
+        if joined.is_mixed() || is_array_key_type(&joined) {
+            return PhpType::Union(vec![
+                PhpType::Named("int".to_string()),
+                PhpType::Named("string".to_string()),
+            ]);
         }
         // For anything else (e.g. a class-string<T>, or a union),
         // return as-is if it is composed entirely of int/string
         // subtypes; otherwise fall back.
-        return key_str;
+        return joined;
     }
 
-    "int|string".to_string()
+    PhpType::Union(vec![
+        PhpType::Named("int".to_string()),
+        PhpType::Named("string".to_string()),
+    ])
+}
+
+/// Returns `true` when the [`PhpType`] represents a PHP type that
+/// is always coerced to `int` when used as an array key.
+fn is_int_like_key_typed(ty: &PhpType) -> bool {
+    match ty {
+        PhpType::Named(s) => is_int_like_key(s),
+        _ => false,
+    }
+}
+
+/// Returns `true` when the [`PhpType`] represents a string-like
+/// array key type.
+fn is_string_like_key(ty: &PhpType) -> bool {
+    match ty {
+        PhpType::Named(s) => matches!(s.as_str(), "string" | "non-empty-string" | "class-string"),
+        PhpType::ClassString(_) => true,
+        _ => false,
+    }
+}
+
+/// Returns `true` when the [`PhpType`] is `array-key` or the
+/// equivalent `int|string` union.
+fn is_array_key_type(ty: &PhpType) -> bool {
+    match ty {
+        PhpType::Named(s) if s == "array-key" => true,
+        PhpType::Union(members) if members.len() == 2 => {
+            let has_int = members
+                .iter()
+                .any(|m| matches!(m, PhpType::Named(s) if s == "int"));
+            let has_string = members
+                .iter()
+                .any(|m| matches!(m, PhpType::Named(s) if s == "string"));
+            has_int && has_string
+        }
+        _ => false,
+    }
 }
 
 /// Returns `true` when the type string represents a PHP type that

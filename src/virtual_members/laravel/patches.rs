@@ -102,10 +102,7 @@ fn patch_eloquent_builder_call_return_type(class: &mut ClassInfo) {
     let static_type = PhpType::Named("static".to_string());
     for method in class.methods.make_mut().iter_mut() {
         if (method.name == "__call" || method.name == "__callStatic")
-            && method
-                .return_type
-                .as_ref()
-                .is_some_and(|rt| rt.to_string() == "mixed")
+            && method.return_type.as_ref().is_some_and(|rt| rt.is_mixed())
         {
             method.return_type = Some(static_type.clone());
         }
@@ -248,17 +245,13 @@ fn patch_db_select_return_types(class: &mut ClassInfo) {
                 if method
                     .return_type
                     .as_ref()
-                    .is_some_and(|rt| rt.to_string() == "array")
+                    .is_some_and(|rt| matches!(rt, PhpType::Named(s) if s == "array"))
                 {
                     method.return_type = Some(array_of_std.clone());
                 }
             }
             "selectOne" => {
-                if method
-                    .return_type
-                    .as_ref()
-                    .is_some_and(|rt| rt.to_string() == "mixed")
-                {
+                if method.return_type.as_ref().is_some_and(|rt| rt.is_mixed()) {
                     method.return_type = Some(std_or_null.clone());
                 }
             }

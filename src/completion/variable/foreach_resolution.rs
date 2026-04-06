@@ -500,7 +500,7 @@ fn push_foreach_resolved_types_typed(
         // downstream consumers (array bracket access, hover, etc.)
         // can still see the structured type string and resolve
         // through it.
-        if matches!(ty, PhpType::Named(n) if n == "mixed") {
+        if ty.is_mixed() {
             return;
         }
         vec![ResolvedType::from_type_string(ty.clone())]

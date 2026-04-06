@@ -12,7 +12,7 @@ use crate::php_type::PhpType;
 use crate::types::*;
 
 use super::{
-    DocblockCtx, extract_hint_string, extract_parameters, is_available_for_version,
+    DocblockCtx, extract_hint_type, extract_parameters, is_available_for_version,
     is_removed_for_version, merge_deprecation_info,
 };
 
@@ -116,7 +116,7 @@ impl Backend {
                     let raw_native_return_type = func
                         .return_type_hint
                         .as_ref()
-                        .map(|rth| extract_hint_string(&rth.hint));
+                        .map(|rth| extract_hint_type(&rth.hint));
 
                     // Check for a #[LanguageLevelTypeAware] override on the
                     // function's return type.  When present, it replaces the
@@ -128,7 +128,7 @@ impl Backend {
                     {
                         Some(PhpType::parse(&override_type))
                     } else {
-                        raw_native_return_type.map(|s| PhpType::parse(&s))
+                        raw_native_return_type
                     };
 
                     // Apply PHPDoc `@return` override for the function.

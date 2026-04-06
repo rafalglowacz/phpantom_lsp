@@ -17,7 +17,7 @@ use mago_syntax::ast::*;
 
 use crate::completion::types::narrowing::is_subtype_of;
 use crate::docblock;
-use crate::parser::{extract_hint_string, with_parsed_program};
+use crate::parser::{extract_hint_type, with_parsed_program};
 use crate::php_type::PhpType;
 use crate::types::{AccessKind, ClassInfo, ResolvedType};
 use crate::util::short_name;
@@ -416,7 +416,7 @@ fn find_type_in_params(
             continue;
         }
 
-        let native_type = param.hint.as_ref().map(|h| extract_hint_string(h));
+        let native_parsed = param.hint.as_ref().map(|h| extract_hint_type(h));
 
         // Try @param docblock type
         let docblock_type =
@@ -429,7 +429,6 @@ fn find_type_in_params(
                         .and_then(|doc| docblock::extract_param_raw_type(&doc, &pname))
                 });
 
-        let native_parsed = native_type.as_ref().map(|s| PhpType::parse(s));
         let doc_parsed = docblock_type.as_ref().map(|s| PhpType::parse(s));
         let effective =
             docblock::resolve_effective_type_typed(native_parsed.as_ref(), doc_parsed.as_ref())
@@ -440,7 +439,7 @@ fn find_type_in_params(
         }
 
         // Return native type if no effective type
-        return native_type;
+        return native_parsed.as_ref().map(|t| t.to_string());
     }
     None
 }
@@ -493,7 +492,7 @@ fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) 
                     let var_start = var.span.start.offset;
                     let var_end = var.span.end.offset;
                     if cursor_offset >= var_start && cursor_offset < var_end {
-                        return Some(extract_hint_string(&catch.hint));
+                        return Some(extract_hint_type(&catch.hint).to_string());
                     }
                 }
                 // Recurse into catch block
@@ -1356,7 +1355,10 @@ fn find_type_in_closure_call(
 
             if let Some((param_idx, param)) = param_hit {
                 // Get the explicit type hint.
-                let explicit_type = param.hint.as_ref().map(|h| extract_hint_string(h));
+                let explicit_type = param
+                    .hint
+                    .as_ref()
+                    .map(|h| extract_hint_type(h).to_string());
 
                 // If there's an explicit type, check whether the
                 // inferred callable parameter type is more specific.

@@ -203,37 +203,6 @@ fn format_param_label(param: &ParameterInfo) -> String {
     base
 }
 
-/// Shorten a type string by stripping namespace prefixes from every
-/// fully-qualified name, including names nested inside generic
-/// parameters.
-///
-/// For example `\App\Models\User` → `User`, `string` → `string`,
-/// `\App\User|\App\Admin` → `User|Admin`,
-/// `list<\App\User>` → `list<User>`,
-/// `array<string, \Ns\Cls>` → `array<string, Cls>`.
-fn shorten_type(ty: &str) -> String {
-    // Split on characters that delimit type names in PHP type strings
-    // (|, <, >, comma, space) while preserving the delimiters. Replace
-    // each segment that looks like a FQN with its short name.
-    let mut result = String::with_capacity(ty.len());
-    let mut segment_start = 0;
-    for (i, ch) in ty.char_indices() {
-        if matches!(ch, '|' | '<' | '>' | ',' | ' ' | '(' | ')') {
-            if i > segment_start {
-                let seg = &ty[segment_start..i];
-                result.push_str(crate::util::short_name(seg));
-            }
-            result.push(ch);
-            segment_start = i + ch.len_utf8();
-        }
-    }
-    // Trailing segment after the last delimiter (or the whole string).
-    if segment_start < ty.len() {
-        result.push_str(crate::util::short_name(&ty[segment_start..]));
-    }
-    result
-}
-
 /// Build per-parameter documentation markdown.
 ///
 /// When the effective type (`type_hint`) differs from the native PHP type
@@ -255,7 +224,7 @@ fn build_param_documentation(param: &ParameterInfo) -> Option<Documentation> {
         _ => false,
     };
 
-    let shortened = effective.as_deref().map(shorten_type);
+    let shortened = effective.as_deref().map(crate::hover::shorten_type_string);
     let value = match (show_effective, desc) {
         (true, Some(d)) => format!("`{}` {}", shortened.as_deref().unwrap_or(""), d),
         (true, None) => format!("`{}`", shortened.as_deref().unwrap_or("")),
@@ -283,7 +252,7 @@ fn build_signature(params: &[ParameterInfo], return_type: Option<&str>) -> Signa
     let params_str = param_labels.join(", ");
     let ret = format!(
         ": {}",
-        return_type.map_or("mixed".to_string(), shorten_type)
+        return_type.map_or("mixed".to_string(), crate::hover::shorten_type_string)
     );
     let label = format!("({}){}", params_str, ret);
 

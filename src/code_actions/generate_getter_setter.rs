@@ -30,7 +30,7 @@ use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
 use super::detect_indent_from_members;
 use crate::Backend;
 use crate::docblock::{extract_var_type, get_docblock_text_for_node};
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
 use crate::util::offset_to_position;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -290,7 +290,10 @@ fn collect_accessor_properties<'a>(
             let is_static = has_static(plain.modifiers.iter());
 
             // Extract the native type hint for the property.
-            let native_hint = plain.hint.as_ref().map(|h| extract_hint_string(h));
+            let native_hint = plain
+                .hint
+                .as_ref()
+                .map(|h| extract_hint_type(h).to_string());
 
             // Try to get a docblock @var type if there's no native hint.
             let docblock_type =
@@ -403,11 +406,22 @@ fn setter_method_name(prop_name: &str) -> String {
 }
 
 /// Check whether a type hint represents a boolean type.
+///
+/// Handles bare `bool`, `boolean`, and nullable `?bool` / `?boolean`.
 fn is_bool_type(type_hint: Option<&str>) -> bool {
     match type_hint {
         Some(t) => {
-            let t = t.trim();
-            t.eq_ignore_ascii_case("bool") || t.eq_ignore_ascii_case("boolean")
+            let parsed = crate::php_type::PhpType::parse(t.trim());
+            match &parsed {
+                crate::php_type::PhpType::Named(s) => {
+                    s.eq_ignore_ascii_case("bool") || s.eq_ignore_ascii_case("boolean")
+                }
+                crate::php_type::PhpType::Nullable(inner) => matches!(
+                    inner.as_ref(),
+                    crate::php_type::PhpType::Named(s) if s.eq_ignore_ascii_case("bool") || s.eq_ignore_ascii_case("boolean")
+                ),
+                _ => false,
+            }
         }
         None => false,
     }
@@ -688,7 +702,12 @@ mod tests {
         assert!(!is_bool_type(Some("string")));
         assert!(!is_bool_type(Some("int")));
         assert!(!is_bool_type(None));
-        assert!(!is_bool_type(Some("?bool")));
+    }
+
+    #[test]
+    fn nullable_bool_type_recognized() {
+        assert!(is_bool_type(Some("?bool")));
+        assert!(is_bool_type(Some("?boolean")));
     }
 
     // ── build_getter ────────────────────────────────────────────────────

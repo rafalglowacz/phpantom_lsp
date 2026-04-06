@@ -809,43 +809,66 @@ pub(crate) fn with_parsed_program<T: Default>(
     }
 }
 
-/// Extract a string representation of a type hint from the AST.
-pub(crate) fn extract_hint_string(hint: &Hint) -> String {
+/// Convert a Mago [`Hint`] AST node directly to a [`PhpType`].
+///
+/// Since `Hint` only represents native PHP type syntax (no
+/// generics, shapes, or callables), the mapping is straightforward.
+pub(crate) fn extract_hint_type(hint: &Hint) -> PhpType {
     match hint {
-        Hint::Identifier(ident) => ident.value().to_string(),
-        Hint::Nullable(nullable) => {
-            format!("?{}", extract_hint_string(nullable.hint))
-        }
+        Hint::Identifier(ident) => PhpType::Named(ident.value().to_string()),
+        Hint::Nullable(nullable) => PhpType::Nullable(Box::new(extract_hint_type(nullable.hint))),
         Hint::Union(union) => {
-            let left = extract_hint_string(union.left);
-            let right = extract_hint_string(union.right);
-            format!("{}|{}", left, right)
+            let mut members = Vec::new();
+            collect_union_members(union.left, &mut members);
+            collect_union_members(union.right, &mut members);
+            PhpType::Union(members)
         }
         Hint::Intersection(intersection) => {
-            let left = extract_hint_string(intersection.left);
-            let right = extract_hint_string(intersection.right);
-            format!("{}&{}", left, right)
+            let mut members = Vec::new();
+            collect_intersection_members(intersection.left, &mut members);
+            collect_intersection_members(intersection.right, &mut members);
+            PhpType::Intersection(members)
         }
-        Hint::Void(ident)
-        | Hint::Never(ident)
-        | Hint::Float(ident)
-        | Hint::Bool(ident)
-        | Hint::Integer(ident)
-        | Hint::String(ident)
-        | Hint::Object(ident)
-        | Hint::Mixed(ident)
-        | Hint::Iterable(ident) => ident.value.to_string(),
-        Hint::Null(keyword)
-        | Hint::True(keyword)
-        | Hint::False(keyword)
-        | Hint::Array(keyword)
-        | Hint::Callable(keyword)
-        | Hint::Static(keyword)
-        | Hint::Self_(keyword)
-        | Hint::Parent(keyword) => keyword.value.to_string(),
-        Hint::Parenthesized(paren) => {
-            format!("({})", extract_hint_string(paren.hint))
+        Hint::Null(_) => PhpType::Named("null".to_string()),
+        Hint::True(_) => PhpType::Named("true".to_string()),
+        Hint::False(_) => PhpType::Named("false".to_string()),
+        Hint::Array(_) => PhpType::Named("array".to_string()),
+        Hint::Callable(_) => PhpType::Named("callable".to_string()),
+        Hint::Static(_) => PhpType::Named("static".to_string()),
+        Hint::Self_(_) => PhpType::Named("self".to_string()),
+        Hint::Parent(_) => PhpType::Named("parent".to_string()),
+        Hint::Void(i)
+        | Hint::Never(i)
+        | Hint::Float(i)
+        | Hint::Bool(i)
+        | Hint::Integer(i)
+        | Hint::String(i)
+        | Hint::Object(i)
+        | Hint::Mixed(i)
+        | Hint::Iterable(i) => PhpType::Named(i.value.to_string()),
+        Hint::Parenthesized(paren) => extract_hint_type(paren.hint),
+    }
+}
+
+/// Recursively flatten nested `Hint::Union` nodes into a flat member list.
+fn collect_union_members(hint: &Hint, members: &mut Vec<PhpType>) {
+    match hint {
+        Hint::Union(union) => {
+            collect_union_members(union.left, members);
+            collect_union_members(union.right, members);
         }
+        other => members.push(extract_hint_type(other)),
+    }
+}
+
+/// Recursively flatten nested `Hint::Intersection` nodes into a flat member list.
+fn collect_intersection_members(hint: &Hint, members: &mut Vec<PhpType>) {
+    match hint {
+        Hint::Intersection(intersection) => {
+            collect_intersection_members(intersection.left, members);
+            collect_intersection_members(intersection.right, members);
+        }
+        other => members.push(extract_hint_type(other)),
     }
 }
 
@@ -887,10 +910,7 @@ pub(crate) fn extract_parameters(
             let has_default = param.default_value.is_some();
             let is_required = !has_default && !is_variadic;
 
-            let native_type_hint = param
-                .hint
-                .as_ref()
-                .map(|h| PhpType::parse(&extract_hint_string(h)));
+            let native_type_hint = param.hint.as_ref().map(|h| extract_hint_type(h));
 
             // Check for a #[LanguageLevelTypeAware] override on the
             // parameter.  When present, it replaces the native type hint
@@ -951,9 +971,7 @@ pub(crate) fn extract_property_info(property: &Property) -> Vec<PropertyInfo> {
     let is_static = property.modifiers().iter().any(|m| m.is_static());
     let visibility = extract_visibility(property.modifiers().iter());
 
-    let native_hint = property
-        .hint()
-        .map(|h| PhpType::parse(&extract_hint_string(h)));
+    let native_hint = property.hint().map(|h| extract_hint_type(h));
 
     property
         .variables()

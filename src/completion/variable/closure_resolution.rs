@@ -63,7 +63,7 @@ thread_local! {
     static IN_CLOSURE_THIS_OVERRIDE: Cell<bool> = const { Cell::new(false) };
 }
 
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
 use crate::parser::with_parsed_program;
 use crate::types::{AccessKind, ClassInfo, FunctionInfo, MethodInfo, ResolvedType};
 
@@ -1131,7 +1131,7 @@ fn try_resolve_closure_in_call_args<'b, F>(
     infer_fn: F,
 ) -> bool
 where
-    F: Fn(usize) -> Vec<String>,
+    F: Fn(usize) -> Vec<PhpType>,
 {
     for (arg_idx, arg) in arguments.iter().enumerate() {
         let arg_expr = match arg {
@@ -1274,19 +1274,19 @@ fn resolve_closure_params_with_inferred(
     parameter_list: &FunctionLikeParameterList<'_>,
     ctx: &VarResolutionCtx<'_>,
     results: &mut Vec<ResolvedType>,
-    inferred_types: &[String],
+    inferred_types: &[PhpType],
 ) {
     let mut matched_param_is_variadic = false;
     for (idx, param) in parameter_list.parameters.iter().enumerate() {
         let pname = param.variable.name.to_string();
         if pname == ctx.var_name {
             matched_param_is_variadic = param.ellipsis.is_some();
-            // Pre-parse the inferred type (if any) so that all
-            // branches below can reuse it without redundant parsing.
-            let parsed_inferred = inferred_types.get(idx).map(|s| PhpType::parse(s));
+            // Clone the inferred type (if any) so that all branches
+            // below can reuse it without reborrowing the slice.
+            let parsed_inferred = inferred_types.get(idx).cloned();
             // 1. Try the explicit type hint first.
             if let Some(hint) = &param.hint {
-                let type_str = extract_hint_string(hint);
+                let type_str = extract_hint_type(hint).to_string();
 
                 // When the explicit hint is a bare class name (no
                 // generic args) and the inferred type from the callable
@@ -1298,7 +1298,7 @@ fn resolve_closure_params_with_inferred(
                 // template substitution so that foreach iteration resolves
                 // the element type.
                 if let Some(inferred) = inferred_types.get(idx)
-                    && inferred_type_is_more_specific(&type_str, inferred)
+                    && inferred_type_is_more_specific(&type_str, &inferred.to_string())
                 {
                     let pi = parsed_inferred.as_ref().unwrap();
                     let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
@@ -1486,7 +1486,7 @@ fn infer_callable_params_from_function(
     arg_idx: usize,
     arguments: &TokenSeparatedSequence<'_, argument::Argument<'_>>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let rctx = ctx.as_resolution_ctx();
     let func_info = if let Some(fl) = rctx.function_loader {
         fl(func_name)
@@ -1509,13 +1509,7 @@ fn infer_callable_params_from_function(
             let subs =
                 super::rhs_resolution::build_function_template_subs(&fi, &text_args_joined, &rctx);
             if !subs.is_empty() {
-                params = params
-                    .into_iter()
-                    .map(|p| {
-                        let substituted = crate::inheritance::apply_substitution(&p, &subs);
-                        substituted.into_owned()
-                    })
-                    .collect();
+                params = params.into_iter().map(|p| p.substitute(&subs)).collect();
             }
         }
 
@@ -1559,7 +1553,7 @@ fn infer_callable_params_from_receiver(
     arg_idx: usize,
     first_arg_text: Option<&str>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     // Guard against infinite recursion when nested closures reuse the
     // same variable name (e.g. `$q` in both an outer and inner closure).
     // The cycle is: infer_callable_params_from_receiver →
@@ -1613,11 +1607,7 @@ fn infer_callable_params_from_receiver(
         let receiver_type = build_receiver_self_type(receiver, ctx.class_loader);
         params
             .into_iter()
-            .map(|ty| {
-                crate::php_type::PhpType::parse(&ty)
-                    .replace_self_with_type(&receiver_type)
-                    .to_string()
-            })
+            .map(|p| p.replace_self_with_type(&receiver_type))
             .collect()
     } else {
         params
@@ -1635,7 +1625,7 @@ fn infer_callable_params_from_static_receiver(
     arg_idx: usize,
     first_arg_text: Option<&str>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let class_name = match class_expr {
         Expression::Self_(_) => Some(ctx.current_class.name.clone()),
         Expression::Static(_) => Some(ctx.current_class.name.clone()),
@@ -1672,11 +1662,7 @@ fn infer_callable_params_from_static_receiver(
         let owner_fqn = cls.fqn();
         params
             .into_iter()
-            .map(|ty| {
-                crate::php_type::PhpType::parse(&ty)
-                    .replace_self(&owner_fqn)
-                    .to_string()
-            })
+            .map(|p| p.replace_self(&owner_fqn))
             .collect()
     } else {
         vec![]
@@ -1690,7 +1676,7 @@ fn find_callable_params_on_classes(
     method_name: &str,
     arg_idx: usize,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     for cls in classes {
         let resolved = crate::virtual_members::resolve_class_fully_maybe_cached(
             cls,
@@ -1712,7 +1698,7 @@ fn find_callable_params_on_method(
     method_name: &str,
     arg_idx: usize,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let method = class.methods.iter().find(|m| m.name == method_name);
     if let Some(m) = method {
         extract_callable_params_at(&m.parameters, arg_idx, ctx)
@@ -1728,7 +1714,7 @@ fn extract_callable_params_at(
     params: &[crate::types::ParameterInfo],
     arg_idx: usize,
     _ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let param = params.get(arg_idx);
     if let Some(p) = param
         && let Some(ref hint) = p.type_hint
@@ -1736,7 +1722,7 @@ fn extract_callable_params_at(
     {
         return callable_params
             .iter()
-            .map(|cp| cp.type_hint.to_string())
+            .map(|cp| cp.type_hint.clone())
             .collect();
     }
     vec![]
@@ -1784,7 +1770,7 @@ fn try_relation_query_override(
     method_name: &str,
     first_arg_text: Option<&str>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     // Only applies to the known relation-query methods.
     if !RELATION_QUERY_METHODS.contains(&method_name) {
         return None;
@@ -1807,8 +1793,7 @@ fn try_relation_query_override(
     let builder_type = PhpType::Generic(
         ELOQUENT_BUILDER_FQN.to_string(),
         vec![PhpType::Named(related_fqn)],
-    )
-    .to_string();
+    );
 
     Some(vec![builder_type])
 }

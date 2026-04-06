@@ -412,7 +412,7 @@ pub(crate) fn resolve_type_alias(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
     let mut current = hint.to_string();
-    let mut resolved_any = false;
+    let mut last_resolved: Option<PhpType> = None;
 
     for _ in 0..10 {
         // Only bare identifiers can be type aliases.  Skip anything that
@@ -425,19 +425,15 @@ pub(crate) fn resolve_type_alias(
             resolve_type_alias_once(&current, owning_class_name, all_classes, class_loader);
 
         match expanded {
-            Some(def) => {
-                current = def;
-                resolved_any = true;
+            Some(php_type) => {
+                current = php_type.to_string();
+                last_resolved = Some(php_type);
             }
             None => break,
         }
     }
 
-    if resolved_any {
-        Some(PhpType::parse(&current))
-    } else {
-        None
-    }
+    last_resolved
 }
 
 /// Single-level alias lookup (no chaining).
@@ -446,7 +442,7 @@ fn resolve_type_alias_once(
     owning_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Find the owning class to check its type_aliases.
     let owning_class = all_classes.iter().find(|c| c.name == owning_class_name);
 
@@ -474,18 +470,18 @@ fn resolve_type_alias_once(
     None
 }
 
-/// Expand a [`TypeAliasDef`] into a type definition string.
+/// Expand a [`TypeAliasDef`] into a resolved [`PhpType`].
 ///
-/// For local aliases, returns the `PhpType`'s string representation.
+/// For local aliases, returns the `PhpType` directly.
 /// For imports, loads the source class and returns the original alias
 /// definition.
 fn expand_type_alias_def(
     def: &TypeAliasDef,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match def {
-        TypeAliasDef::Local(php_type) => Some(php_type.to_string()),
+        TypeAliasDef::Local(php_type) => Some(php_type.clone()),
         TypeAliasDef::Import {
             source_class,
             original_name,
@@ -502,7 +498,7 @@ pub(crate) fn resolve_imported_type_alias(
     original_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Try to find the source class.
     let lookup = source_class_name
         .rsplit('\\')
@@ -519,7 +515,7 @@ pub(crate) fn resolve_imported_type_alias(
 
     // Don't follow nested imports — just return the local definition.
     match def {
-        TypeAliasDef::Local(php_type) => Some(php_type.to_string()),
+        TypeAliasDef::Local(php_type) => Some(php_type.clone()),
         TypeAliasDef::Import { .. } => None,
     }
 }

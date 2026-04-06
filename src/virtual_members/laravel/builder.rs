@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::inheritance::{apply_substitution, apply_substitution_to_conditional};
+use crate::inheritance::apply_substitution_to_conditional;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, ELOQUENT_COLLECTION_FQN, MethodInfo, Visibility};
 use crate::virtual_members::ResolvedClassCache;
@@ -163,18 +163,14 @@ pub(super) fn build_builder_forwarded_methods(
         // Apply template and self-type substitutions.
         if !subs.is_empty() {
             if let Some(ref mut ret) = forwarded.return_type {
-                let ret_str = ret.to_string();
-                let substituted = apply_substitution(&ret_str, &subs);
-                *ret = PhpType::parse(&substituted);
+                *ret = ret.substitute(&subs);
             }
             if let Some(ref mut cond) = forwarded.conditional_return {
                 apply_substitution_to_conditional(cond, &subs);
             }
             for param in &mut forwarded.parameters {
                 if let Some(ref mut hint) = param.type_hint {
-                    let hint_str = hint.to_string();
-                    let substituted = apply_substitution(&hint_str, &subs);
-                    *hint = PhpType::parse(&substituted);
+                    *hint = hint.substitute(&subs);
                 }
             }
         }

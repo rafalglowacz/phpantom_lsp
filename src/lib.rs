@@ -154,7 +154,7 @@ pub use virtual_members::resolve_class_fully;
 ///
 /// Method implementations are spread across several modules:
 /// - `parser` — `parse_php`, `update_ast`, and module-level AST extraction helpers
-///   (`extract_hint_string`, `extract_parameters`, `extract_visibility`, `extract_property_info`)
+///   (`extract_hint_type`, `extract_parameters`, `extract_visibility`, `extract_property_info`)
 /// - `completion::handler` — Top-level completion request orchestration
 /// - `completion::target` — module-level `extract_completion_target`
 /// - `completion::resolver` — `resolve_target_classes` and type-resolution helpers

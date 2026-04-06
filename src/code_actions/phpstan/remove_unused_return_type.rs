@@ -133,9 +133,7 @@ fn remove_type_from_union(full_type: &str, unused_type: &str) -> Option<String> 
 /// heuristic.  This handles most cases including generic types and
 /// class names.
 fn types_match(a: &PhpType, b: &PhpType) -> bool {
-    let a_str = format!("{}", a);
-    let b_str = format!("{}", b);
-    a_str == b_str
+    a.equivalent(b)
 }
 
 /// Format a list of `PhpType` values joined by a separator.

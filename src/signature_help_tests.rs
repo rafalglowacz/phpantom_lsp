@@ -595,37 +595,49 @@ fn build_signature_return_type_scalar_unchanged() {
     assert_eq!(sig.label, "(): string");
 }
 
-// ── shorten_type ────────────────────────────────────────────────
+// ── shorten_type (delegates to crate::hover::shorten_type_string) ───
 
 #[test]
 fn shorten_plain_scalar() {
-    assert_eq!(shorten_type("int"), "int");
+    assert_eq!(crate::hover::shorten_type_string("int"), "int");
 }
 
 #[test]
 fn shorten_fqn() {
-    assert_eq!(shorten_type("\\App\\Models\\User"), "User");
+    assert_eq!(
+        crate::hover::shorten_type_string("\\App\\Models\\User"),
+        "User"
+    );
 }
 
 #[test]
 fn shorten_union() {
-    assert_eq!(shorten_type("\\App\\User|\\App\\Admin"), "User|Admin");
+    assert_eq!(
+        crate::hover::shorten_type_string("\\App\\User|\\App\\Admin"),
+        "User|Admin"
+    );
 }
 
 #[test]
 fn shorten_mixed_union() {
-    assert_eq!(shorten_type("string|\\App\\User|null"), "string|User|null");
+    assert_eq!(
+        crate::hover::shorten_type_string("string|\\App\\User|null"),
+        "string|User|null"
+    );
 }
 
 #[test]
 fn shorten_generic_param() {
-    assert_eq!(shorten_type("list<\\App\\User>"), "list<User>");
+    assert_eq!(
+        crate::hover::shorten_type_string("list<\\App\\User>"),
+        "list<User>"
+    );
 }
 
 #[test]
 fn shorten_generic_multiple_params() {
     assert_eq!(
-        shorten_type("array<string, \\App\\Models\\User>"),
+        crate::hover::shorten_type_string("array<string, \\App\\Models\\User>"),
         "array<string, User>"
     );
 }
@@ -633,7 +645,7 @@ fn shorten_generic_multiple_params() {
 #[test]
 fn shorten_nested_generic_union() {
     assert_eq!(
-        shorten_type("Collection<\\App\\User|\\App\\Admin>"),
+        crate::hover::shorten_type_string("Collection<\\App\\User|\\App\\Admin>"),
         "Collection<User|Admin>"
     );
 }
@@ -641,14 +653,17 @@ fn shorten_nested_generic_union() {
 #[test]
 fn shorten_class_string_generic() {
     assert_eq!(
-        shorten_type("class-string<\\App\\User>"),
+        crate::hover::shorten_type_string("class-string<\\App\\User>"),
         "class-string<User>"
     );
 }
 
 #[test]
 fn shorten_no_namespace_unchanged() {
-    assert_eq!(shorten_type("list<User>"), "list<User>");
+    assert_eq!(
+        crate::hover::shorten_type_string("list<User>"),
+        "list<User>"
+    );
 }
 
 // ── clamp_active_param ──────────────────────────────────────────

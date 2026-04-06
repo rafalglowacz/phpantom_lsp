@@ -2686,7 +2686,7 @@ fn format_arg_expr(expr: &Expression<'_>) -> String {
             let ret = arrow
                 .return_type_hint
                 .as_ref()
-                .map(|rth| format!(": {}", crate::parser::extract_hint_string(&rth.hint)))
+                .map(|rth| format!(": {}", crate::parser::extract_hint_type(&rth.hint)))
                 .unwrap_or_default();
             format!("fn({}){} => ...", params, ret)
         }
@@ -2696,7 +2696,7 @@ fn format_arg_expr(expr: &Expression<'_>) -> String {
             let ret = closure
                 .return_type_hint
                 .as_ref()
-                .map(|rth| format!(": {}", crate::parser::extract_hint_string(&rth.hint)))
+                .map(|rth| format!(": {}", crate::parser::extract_hint_type(&rth.hint)))
                 .unwrap_or_default();
             format!("function({}){} {{ ... }}", params, ret)
         }
@@ -2722,7 +2722,7 @@ fn format_callable_params(params: &FunctionLikeParameterList<'_>) -> String {
         let type_text = param
             .hint
             .as_ref()
-            .map(|h| crate::parser::extract_hint_string(h));
+            .map(|h| crate::parser::extract_hint_type(h).to_string());
         match type_text {
             Some(t) => parts.push(format!("{} {}", t, name)),
             None => parts.push(name),

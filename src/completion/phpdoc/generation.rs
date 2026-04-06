@@ -928,6 +928,29 @@ const NON_CLASS_TYPES: &[&str] = &[
 /// Types that need a callable-signature placeholder in PHPDoc.
 const CALLABLE_TYPES: &[&str] = &["callable", "Closure"];
 
+/// Check whether a `PhpType` is a bare callable/Closure keyword (no signature).
+fn is_callable_keyword(pt: &PhpType) -> bool {
+    matches!(pt, PhpType::Named(s) if {
+        s.eq_ignore_ascii_case("callable") || s.eq_ignore_ascii_case("Closure")
+    })
+}
+
+/// Check whether a `PhpType` is a bare `array` keyword (no generic params).
+fn is_bare_array(pt: &PhpType) -> bool {
+    matches!(pt, PhpType::Named(s) if {
+        s.eq_ignore_ascii_case("array")
+    })
+}
+
+/// Extract the callable display name from a `PhpType` that satisfies
+/// `is_callable_keyword`.
+fn callable_display_name(pt: &PhpType) -> &str {
+    match pt {
+        PhpType::Named(s) => s.as_str(),
+        _ => "callable",
+    }
+}
+
 /// Determine whether a native type hint "needs enrichment" via a PHPDoc
 /// tag, and if so return the tag type string to use.
 ///
@@ -952,21 +975,18 @@ pub(crate) fn enrichment_snippet(
         Some(t) => t,
     };
 
-    let th = pt.to_string();
-    let th = th.as_str();
-
     // `void` is never enriched for return types (caller handles skip).
     // `array` always needs enrichment.
-    if th == "array" {
+    if is_bare_array(pt) {
         let s = format!("array<${{{}:mixed}}>", *tab_stop);
         *tab_stop += 1;
         return Some(s);
     }
 
     // `Closure` / `callable` need a callable-signature placeholder.
-    let clean = th.trim_start_matches('\\');
-    if CALLABLE_TYPES.iter().any(|s| s.eq_ignore_ascii_case(clean)) {
-        let s = format!("({}(): ${{{}:mixed}})", clean, *tab_stop);
+    if is_callable_keyword(pt) {
+        let name = callable_display_name(pt);
+        let s = format!("({}(): ${{{}:mixed}})", name, *tab_stop);
         *tab_stop += 1;
         return Some(s);
     }
@@ -976,30 +996,26 @@ pub(crate) fn enrichment_snippet(
     // (e.g. `Collection<int|string, User>|null` must not be split on the inner `|`).
     let members = pt.union_members();
     if members.len() > 1 {
-        let needs = members.iter().any(|member| {
-            let s = member.to_string();
-            let p = s.trim_start_matches('\\');
-            p.eq_ignore_ascii_case("array")
-                || CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p))
-        });
+        let needs = members
+            .iter()
+            .any(|member| is_bare_array(member) || is_callable_keyword(member));
         if needs {
             let enriched_parts: Vec<String> = members
                 .iter()
                 .map(|member| {
-                    let s = member.to_string();
-                    let p = s.trim_start_matches('\\');
-                    if CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p)) {
-                        format!("({}(): ${{{}:mixed}})", p, {
+                    if is_callable_keyword(member) {
+                        let name = callable_display_name(member);
+                        format!("({}(): ${{{}:mixed}})", name, {
                             let t = *tab_stop;
                             *tab_stop += 1;
                             t
                         })
-                    } else if p.eq_ignore_ascii_case("array") {
+                    } else if is_bare_array(member) {
                         let s = format!("array<${{{}:mixed}}>", *tab_stop);
                         *tab_stop += 1;
                         s
                     } else {
-                        s.to_string()
+                        member.to_string()
                     }
                 })
                 .collect();
@@ -1013,16 +1029,14 @@ pub(crate) fn enrichment_snippet(
         return None;
     }
 
-    // Check if it's a class with template parameters.
-    if NON_CLASS_TYPES
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(clean))
-    {
+    // Scalar / built-in types never have template parameters.
+    if pt.is_scalar() {
         return None;
     }
 
     // Try to load the class and check for templates.
-    if let Some(cls) = class_loader(clean)
+    if let Some(name) = pt.base_name()
+        && let Some(cls) = class_loader(name)
         && !cls.template_params.is_empty()
     {
         let mut parts = Vec::new();
@@ -1030,7 +1044,7 @@ pub(crate) fn enrichment_snippet(
             parts.push(format!("${{{}:{}}}", *tab_stop, tp));
             *tab_stop += 1;
         }
-        return Some(format!("{}<{}>", clean, parts.join(", ")));
+        return Some(format!("{}<{}>", name, parts.join(", ")));
     }
 
     None
@@ -1049,16 +1063,13 @@ pub(crate) fn enrichment_plain(
         Some(t) => t,
     };
 
-    let th = pt.to_string();
-    let th = th.as_str();
-
-    if th == "array" {
+    if is_bare_array(pt) {
         return Some("array<mixed>".to_string());
     }
 
-    let clean = th.trim_start_matches('\\');
-    if CALLABLE_TYPES.iter().any(|s| s.eq_ignore_ascii_case(clean)) {
-        return Some(format!("({}(): mixed)", clean));
+    if is_callable_keyword(pt) {
+        let name = callable_display_name(pt);
+        return Some(format!("({}(): mixed)", name));
     }
 
     // Union types — enrich individual callable / array parts.
@@ -1066,24 +1077,20 @@ pub(crate) fn enrichment_plain(
     // (e.g. `Collection<int|string, User>|null` must not be split on the inner `|`).
     let members = pt.union_members();
     if members.len() > 1 {
-        let needs = members.iter().any(|member| {
-            let s = member.to_string();
-            let p = s.trim_start_matches('\\');
-            p.eq_ignore_ascii_case("array")
-                || CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p))
-        });
+        let needs = members
+            .iter()
+            .any(|member| is_bare_array(member) || is_callable_keyword(member));
         if needs {
             let enriched_parts: Vec<String> = members
                 .iter()
                 .map(|member| {
-                    let s = member.to_string();
-                    let p = s.trim_start_matches('\\');
-                    if CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p)) {
-                        format!("({}(): mixed)", p)
-                    } else if p.eq_ignore_ascii_case("array") {
+                    if is_callable_keyword(member) {
+                        let name = callable_display_name(member);
+                        format!("({}(): mixed)", name)
+                    } else if is_bare_array(member) {
                         "array<mixed>".to_string()
                     } else {
-                        s.to_string()
+                        member.to_string()
                     }
                 })
                 .collect();
@@ -1096,18 +1103,18 @@ pub(crate) fn enrichment_plain(
         return None;
     }
 
-    if NON_CLASS_TYPES
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(clean))
-    {
+    // Scalar / built-in types never have template parameters.
+    if pt.is_scalar() {
         return None;
     }
 
-    if let Some(cls) = class_loader(clean)
+    // Try to load the class and check for templates.
+    if let Some(name) = pt.base_name()
+        && let Some(cls) = class_loader(name)
         && !cls.template_params.is_empty()
     {
         let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
-        return Some(format!("{}<{}>", clean, parts.join(", ")));
+        return Some(format!("{}<{}>", name, parts.join(", ")));
     }
 
     None

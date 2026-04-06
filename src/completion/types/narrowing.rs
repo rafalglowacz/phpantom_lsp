@@ -216,8 +216,19 @@ pub(in crate::completion) fn apply_instanceof_inclusion(
     results: &mut Vec<ClassInfo>,
 ) {
     let parsed = PhpType::parse(cls_name);
+    apply_instanceof_inclusion_typed(&parsed, exact, ctx, results);
+}
+
+/// Like [`apply_instanceof_inclusion`], but accepts a [`PhpType`] directly,
+/// avoiding a string round-trip when the caller already has a parsed type.
+pub(in crate::completion) fn apply_instanceof_inclusion_typed(
+    ty: &PhpType,
+    exact: bool,
+    ctx: &VarResolutionCtx<'_>,
+    results: &mut Vec<ClassInfo>,
+) {
     let narrowed = super::resolution::type_hint_to_classes_typed(
-        &parsed,
+        ty,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,
@@ -406,8 +417,17 @@ pub(in crate::completion) fn apply_instanceof_exclusion(
     results: &mut Vec<ClassInfo>,
 ) {
     let parsed = PhpType::parse(cls_name);
+    apply_instanceof_exclusion_typed(&parsed, ctx, results);
+}
+
+/// Like [`apply_instanceof_exclusion`], but accepts a [`PhpType`] directly.
+pub(in crate::completion) fn apply_instanceof_exclusion_typed(
+    ty: &PhpType,
+    ctx: &VarResolutionCtx<'_>,
+    results: &mut Vec<ClassInfo>,
+) {
     let excluded = super::resolution::type_hint_to_classes_typed(
-        &parsed,
+        ty,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,
@@ -934,14 +954,9 @@ pub(in crate::completion) fn try_apply_assert_condition_narrowing(
                 // opposite + negated → include.
                 let should_exclude = assertion.negated ^ !applies_positively;
                 if should_exclude {
-                    apply_instanceof_exclusion(&assertion.asserted_type.to_string(), ctx, results);
+                    apply_instanceof_exclusion_typed(&assertion.asserted_type, ctx, results);
                 } else {
-                    apply_instanceof_inclusion(
-                        &assertion.asserted_type.to_string(),
-                        false,
-                        ctx,
-                        results,
-                    );
+                    apply_instanceof_inclusion_typed(&assertion.asserted_type, false, ctx, results);
                 }
             }
         }
@@ -1865,14 +1880,9 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
             {
                 let should_exclude = assertion.negated ^ !applies_positively;
                 if should_exclude {
-                    apply_instanceof_exclusion(&assertion.asserted_type.to_string(), ctx, results);
+                    apply_instanceof_exclusion_typed(&assertion.asserted_type, ctx, results);
                 } else {
-                    apply_instanceof_inclusion(
-                        &assertion.asserted_type.to_string(),
-                        false,
-                        ctx,
-                        results,
-                    );
+                    apply_instanceof_inclusion_typed(&assertion.asserted_type, false, ctx, results);
                 }
             }
         }

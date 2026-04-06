@@ -330,7 +330,7 @@ impl Backend {
                 && let Some(ret_line) = docblock.return_tag_line
             {
                 let ret_text = lines[ret_line];
-                if ret_text.contains('<') || ret_text.contains("[]") {
+                if docblock_return_line_has_type_structure(ret_text) {
                     continue;
                 }
             }
@@ -625,12 +625,37 @@ pub(crate) fn is_add_iterable_type_stale(content: &str, diag_line: usize, messag
     // Check if the @return tag has a generic type.
     if let Some(ret_line_idx) = docblock.return_tag_line {
         let ret_text = lines[ret_line_idx];
-        if ret_text.contains('<') || ret_text.contains("[]") {
+        if docblock_return_line_has_type_structure(ret_text) {
             return true;
         }
     }
 
     false
+}
+
+/// Check whether a `@return` docblock line already contains a type with
+/// generic parameters, array slice syntax, or other type structure.
+///
+/// Extracts the type token from the line and uses `PhpType::parse()` +
+/// `has_type_structure()` for a structured check instead of a raw
+/// `.contains('<')` heuristic.
+fn docblock_return_line_has_type_structure(line: &str) -> bool {
+    // Strip the leading ` * @return ` (or similar) prefix to get the type text.
+    let trimmed = line.trim_start().trim_start_matches('*').trim_start();
+    let rest = if let Some(after) = trimmed.strip_prefix("@return") {
+        after.trim_start()
+    } else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    let (type_token, _) = crate::docblock::type_strings::split_type_token(rest);
+    if type_token.is_empty() {
+        return false;
+    }
+    let parsed = crate::php_type::PhpType::parse(type_token);
+    parsed.has_type_structure()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

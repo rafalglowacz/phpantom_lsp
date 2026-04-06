@@ -151,7 +151,7 @@ use crate::types::*;
 use crate::virtual_members::laravel::infer_relationship_from_body;
 
 use super::{
-    DeprecationInfo, DocblockCtx, extract_hint_string, extract_parameters, extract_property_info,
+    DeprecationInfo, DocblockCtx, extract_hint_type, extract_parameters, extract_property_info,
     extract_visibility, is_available_for_version, is_removed_for_version, merge_deprecation_info,
 };
 
@@ -1271,7 +1271,7 @@ impl Backend {
                         backed_type: enum_def
                             .backing_type_hint
                             .as_ref()
-                            .map(|h| crate::parser::extract_hint_string(&h.hint)),
+                            .map(|h| crate::parser::extract_hint_type(&h.hint).to_string()),
                         attribute_targets: 0,
                         laravel: None,
                     });
@@ -1830,7 +1830,7 @@ impl Backend {
                     let raw_native_return_type = method
                         .return_type_hint
                         .as_ref()
-                        .map(|rth| extract_hint_string(&rth.hint));
+                        .map(|rth| extract_hint_type(&rth.hint));
 
                     // Check for a #[LanguageLevelTypeAware] override on the
                     // method's return type.  When present, it replaces the
@@ -1842,7 +1842,7 @@ impl Backend {
                     {
                         Some(PhpType::parse(&override_type))
                     } else {
-                        raw_native_return_type.map(|s| PhpType::parse(&s))
+                        raw_native_return_type
                     };
                     let is_static = method.modifiers.iter().any(|m| m.is_static());
                     let visibility = extract_visibility(method.modifiers.iter());
@@ -1995,10 +1995,8 @@ impl Backend {
                                 let raw_name = param.variable.name.to_string();
                                 let prop_name =
                                     raw_name.strip_prefix('$').unwrap_or(&raw_name).to_string();
-                                let native_hint_str =
-                                    param.hint.as_ref().map(|h| extract_hint_string(h));
                                 let saved_native_hint =
-                                    native_hint_str.as_ref().map(|s| PhpType::parse(s));
+                                    param.hint.as_ref().map(|h| extract_hint_type(h));
                                 let prop_visibility = extract_visibility(param.modifiers.iter());
 
                                 // Check for a docblock type override.
@@ -2314,7 +2312,7 @@ impl Backend {
                     properties.append(&mut prop_infos);
                 }
                 ClassLikeMember::Constant(constant) => {
-                    let type_hint = constant.hint.as_ref().map(|h| extract_hint_string(h));
+                    let type_hint = constant.hint.as_ref().map(|h| extract_hint_type(h));
                     let visibility = extract_visibility(constant.modifiers.iter());
                     let const_docblock_text = doc_ctx.and_then(|ctx| {
                         docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
@@ -2345,7 +2343,7 @@ impl Backend {
                         constants.push(ConstantInfo {
                             name: item.name.value.to_string(),
                             name_offset: item.name.span.start.offset,
-                            type_hint: type_hint.as_deref().map(PhpType::parse),
+                            type_hint: type_hint.clone(),
                             visibility,
                             deprecation_message: deprecation_message.clone(),
                             deprecated_replacement: constant_deprecated_replacement.clone(),

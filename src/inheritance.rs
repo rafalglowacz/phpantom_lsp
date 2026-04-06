@@ -19,9 +19,7 @@ use std::collections::{HashMap, HashSet};
 /// concrete types.
 use std::sync::Arc;
 
-/// Bundles the trait-level configuration passed through
-/// [`merge_traits_into`] so the function stays within clippy's
-/// argument-count limit.
+#[cfg(test)]
 use std::borrow::Cow;
 
 /// A borrow-or-owned handle to a `ClassInfo`, used to walk the parent
@@ -47,6 +45,9 @@ impl std::ops::Deref for ClassRef<'_> {
     }
 }
 
+/// Bundles the trait-level configuration passed through
+/// [`merge_traits_into`] so the function stays within clippy's
+/// argument-count limit.
 pub(crate) struct TraitContext<'a> {
     /// Generic type arguments for `@use Trait<Type>` declarations.
     pub use_generics: &'a [(String, Vec<PhpType>)],
@@ -968,7 +969,9 @@ pub(crate) fn apply_substitution_to_property(
 ///
 /// Internally delegates to [`PhpType::substitute`] which walks the
 /// parsed type tree.  This wrapper preserves the `&str → Cow<str>` API
-/// so that existing callers do not need to change.
+/// for test assertions that compare type strings before and after
+/// substitution.
+#[cfg(test)]
 pub(crate) fn apply_substitution<'a>(
     type_str: &'a str,
     subs: &HashMap<String, PhpType>,

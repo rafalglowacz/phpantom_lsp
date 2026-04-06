@@ -574,12 +574,12 @@ impl PhpType {
                     None
                 }
             }
-            // Shapes, callables with signatures, conditionals, key-of,
-            // value-of, index-access, and raw types have no native form.
-            PhpType::ArrayShape(_)
-            | PhpType::ObjectShape(_)
-            | PhpType::Callable { .. }
-            | PhpType::Conditional { .. }
+            PhpType::ArrayShape(_) => Some("array".to_string()),
+            PhpType::ObjectShape(_) => Some("object".to_string()),
+            PhpType::Callable { kind, .. } => Some(kind.clone()),
+            // Conditionals, key-of, value-of, index-access, and raw
+            // types have no native form.
+            PhpType::Conditional { .. }
             | PhpType::KeyOf(_)
             | PhpType::ValueOf(_)
             | PhpType::IndexAccess(_, _)
@@ -2044,7 +2044,7 @@ impl PhpType {
     // -----------------------------------------------------------------------
 
     /// Whether this type is `never` (bottom type).
-    fn is_never(&self) -> bool {
+    pub fn is_never(&self) -> bool {
         matches!(self, PhpType::Named(s)
             if matches!(s.to_ascii_lowercase().as_str(),
                 "never" | "no-return" | "noreturn" | "never-return" | "never-returns"
@@ -2053,8 +2053,21 @@ impl PhpType {
     }
 
     /// Whether this type is `mixed` (top type).
-    fn is_mixed(&self) -> bool {
+    pub fn is_mixed(&self) -> bool {
         matches!(self, PhpType::Named(s) if s.eq_ignore_ascii_case("mixed"))
+    }
+
+    /// Whether this type is `void`.
+    pub fn is_void(&self) -> bool {
+        matches!(self, PhpType::Named(s) if s.eq_ignore_ascii_case("void"))
+    }
+
+    /// Whether this type conveys no useful return type information.
+    ///
+    /// Returns `true` for `mixed`, `void`, and `never` — types that
+    /// indicate "no meaningful return" in conditional resolution.
+    pub fn is_uninformative_return(&self) -> bool {
+        self.is_mixed() || self.is_void() || self.is_never()
     }
 }
 

@@ -123,7 +123,7 @@ pub(super) fn build_var_annotation(
     let eff = effective?;
     // When there is no native type hint, `mixed` is the implicit type
     // in PHP — showing `@var mixed` would be noise.
-    if native.is_none() && matches!(eff, PhpType::Named(n) if n == "mixed") {
+    if native.is_none() && eff.is_mixed() {
         return None;
     }
     if let Some(n) = native
@@ -131,7 +131,7 @@ pub(super) fn build_var_annotation(
     {
         return None;
     }
-    Some(format!("@var {}", shorten_type_string(&eff.to_string())))
+    Some(format!("@var {}", shorten_php_type(eff)))
 }
 
 /// Build a readable markdown section showing parameter and return type
@@ -172,7 +172,7 @@ pub(super) fn build_param_return_section(
     for p in params {
         let type_differs = match (&p.type_hint, p.native_type_hint.as_ref()) {
             (Some(eff_type), Some(nat)) => !eff_type.equivalent(nat),
-            (Some(eff_type), None) => eff_type.to_string() != "mixed",
+            (Some(eff_type), None) => !eff_type.is_mixed(),
             _ => false,
         };
         let eff_str = p.type_hint_str();
@@ -205,7 +205,7 @@ pub(super) fn build_param_return_section(
     // return entry
     let ret_type_differs = match (effective_return, native_return) {
         (Some(eff), Some(nat)) => !eff.equivalent(nat),
-        (Some(eff), None) => !matches!(eff, PhpType::Named(n) if n == "mixed"),
+        (Some(eff), None) => !eff.is_mixed(),
         _ => false,
     };
     let has_ret_desc = return_description.is_some_and(|d| !d.is_empty());
@@ -214,7 +214,7 @@ pub(super) fn build_param_return_section(
         let mut entry = String::from("**return**");
         if ret_type_differs {
             if let Some(eff) = effective_return {
-                entry.push_str(&format!(" `{}`", shorten_type_string(&eff.to_string())));
+                entry.push_str(&format!(" `{}`", shorten_php_type(eff)));
             }
             if has_ret_desc {
                 entry.push_str("  \n\u{00a0}\u{00a0}\u{00a0}\u{00a0}");
@@ -550,6 +550,18 @@ pub(crate) fn shorten_type_string(ty: &str) -> String {
         return shorten_type_string_fallback(ty);
     }
     parsed.shorten().to_string()
+}
+
+/// Shorten a structured `PhpType` without a string round-trip.
+///
+/// This avoids the `PhpType → String → PhpType::parse → shorten → String`
+/// cycle that `shorten_type_string` incurs when the caller already has a
+/// `PhpType` value.
+pub(crate) fn shorten_php_type(ty: &PhpType) -> String {
+    if matches!(ty, PhpType::Raw(_)) {
+        return shorten_type_string_fallback(&ty.to_string());
+    }
+    ty.shorten().to_string()
 }
 
 /// Fallback character-by-character shortener for type strings that

@@ -12,7 +12,7 @@ use mago_syntax::ast::*;
 use super::{ARRAY_ELEMENT_FUNCS, ARRAY_PRESERVING_FUNCS};
 
 use crate::docblock;
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
 use crate::php_type::PhpType;
 use crate::types::ClassInfo;
 
@@ -293,19 +293,18 @@ fn extract_array_map_element_type(
         Expression::Closure(closure) => closure
             .return_type_hint
             .as_ref()
-            .map(|rth| extract_hint_string(&rth.hint)),
+            .map(|rth| extract_hint_type(&rth.hint)),
         Expression::ArrowFunction(arrow) => arrow
             .return_type_hint
             .as_ref()
-            .map(|rth| extract_hint_string(&rth.hint)),
+            .map(|rth| extract_hint_type(&rth.hint)),
         _ => None,
     };
 
-    if let Some(hint) = return_hint {
-        let parsed = crate::php_type::PhpType::parse(&hint);
-        if let Some(name) = parsed.base_name() {
-            return Some(name.to_string());
-        }
+    if let Some(parsed) = return_hint
+        && let Some(name) = parsed.base_name()
+    {
+        return Some(name.to_string());
     }
 
     // Fallback: use the input array's element type.

@@ -31,7 +31,7 @@ use mago_syntax::ast::*;
 
 use crate::Backend;
 use crate::docblock;
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, ResolvedType};
 
@@ -1336,15 +1336,14 @@ fn resolve_rhs_function_call<'b>(
                 Some(current_class_name),
             );
             if let Some(ref ty) = resolved_type {
-                let parsed_ty = PhpType::parse(ty);
                 let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
-                    &parsed_ty,
+                    ty,
                     current_class_name,
                     all_classes,
                     class_loader,
                 );
                 if !resolved.is_empty() {
-                    return ResolvedType::from_classes_with_hint(resolved, parsed_ty);
+                    return ResolvedType::from_classes_with_hint(resolved, ty.clone());
                 }
             }
         }
@@ -1555,8 +1554,7 @@ fn resolve_rhs_function_call<'b>(
         // `(fn (): Foo => …)()` or `(function (): Foo { … })()`
         // Extract the return type from the literal instead of going
         // through `__invoke()` on the generic `Closure` stub.
-        if let Some(ret_type) = extract_closure_or_arrow_return_type(callee_expr) {
-            let parsed_ret_type = PhpType::parse(&ret_type);
+        if let Some(parsed_ret_type) = extract_closure_or_arrow_return_type(callee_expr) {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 &parsed_ret_type,
                 current_class_name,
@@ -2175,16 +2173,16 @@ fn resolve_rhs_clone(clone_expr: &Clone<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<
 /// Returns the type-hint string when the expression is a `Closure` or
 /// `ArrowFunction` with an explicit return type annotation, e.g.
 /// `fn (): Foo => …` yields `"Foo"`.  Returns `None` otherwise.
-fn extract_closure_or_arrow_return_type(expr: &Expression<'_>) -> Option<String> {
+fn extract_closure_or_arrow_return_type(expr: &Expression<'_>) -> Option<PhpType> {
     match expr {
         Expression::ArrowFunction(arrow) => arrow
             .return_type_hint
             .as_ref()
-            .map(|rth| extract_hint_string(&rth.hint)),
+            .map(|rth| extract_hint_type(&rth.hint)),
         Expression::Closure(closure) => closure
             .return_type_hint
             .as_ref()
-            .map(|rth| extract_hint_string(&rth.hint)),
+            .map(|rth| extract_hint_type(&rth.hint)),
         _ => None,
     }
 }

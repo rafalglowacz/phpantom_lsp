@@ -25,7 +25,7 @@ use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
 use super::detect_indent_from_members;
 use crate::Backend;
 use crate::docblock::{extract_var_type, get_docblock_text_for_node};
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
 use crate::util::offset_to_position;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -242,7 +242,10 @@ fn collect_qualifying_properties<'a>(
         let is_readonly = has_readonly(plain.modifiers.iter());
 
         // Extract the native type hint for the property.
-        let native_hint = plain.hint.as_ref().map(|h| extract_hint_string(h));
+        let native_hint = plain
+            .hint
+            .as_ref()
+            .map(|h| extract_hint_type(h).to_string());
 
         // Try to get a docblock @var type if there's no native hint
         // or if we want to use it as a fallback.

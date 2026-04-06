@@ -99,6 +99,10 @@ const NON_NAVIGABLE: &[&str] = &[
 
 /// Returns `true` when a type name refers to a class/interface that the
 /// user should be able to navigate to.
+///
+/// Uses simple string splitting instead of `PhpType::parse()` + `base_name()`
+/// because this is called for every type span during symbol-map extraction
+/// and must stay allocation-free.
 pub(crate) fn is_navigable_type(name: &str) -> bool {
     let base = name.split('<').next().unwrap_or(name);
     let base = base.split('{').next().unwrap_or(base);

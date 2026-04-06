@@ -801,7 +801,7 @@ pub(crate) fn resolve_target_classes_expr(
             if let SubjectExpr::CallExpr { callee, args_text } = base.as_ref() {
                 let call_raw = resolve_call_raw_return_type(callee, args_text, ctx);
                 if let Some(raw) = call_raw {
-                    let candidates = std::iter::once(PhpType::parse(&raw));
+                    let candidates = std::iter::once(raw);
                     if let Some(resolved) =
                         super::source::helpers::try_chained_array_access_with_candidates(
                             candidates,
@@ -934,7 +934,7 @@ fn resolve_call_raw_return_type(
     callee: &SubjectExpr,
     _args_text: &str,
     ctx: &ResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match callee {
         SubjectExpr::MethodCall { base, method } => {
             let base_classes =
@@ -954,7 +954,7 @@ fn resolve_call_raw_return_type(
                     .find(|m| m.name.eq_ignore_ascii_case(method));
                 if let Some(m) = found {
                     if let Some(ref ret) = m.return_type {
-                        return Some(ret.to_string());
+                        return Some(ret.clone());
                     }
                     // Method exists but has no return type.
                     // Only fall through to __call for virtual methods
@@ -974,7 +974,7 @@ fn resolve_call_raw_return_type(
                     .find(|m| m.name.eq_ignore_ascii_case("__call"))
                     && let Some(ref ret) = m.return_type
                 {
-                    return Some(ret.to_string());
+                    return Some(ret.clone());
                 }
             }
             None
@@ -993,7 +993,7 @@ fn resolve_call_raw_return_type(
                     .find(|m| m.name.eq_ignore_ascii_case(method));
                 if let Some(m) = found {
                     if let Some(ref ret) = m.return_type {
-                        return Some(ret.to_string());
+                        return Some(ret.clone());
                     }
                     // Method exists but has no return type.
                     // Only fall through to __callStatic for virtual methods.
@@ -1009,7 +1009,7 @@ fn resolve_call_raw_return_type(
                     .find(|m| m.name.eq_ignore_ascii_case("__callStatic"))
                     && let Some(ref ret) = m.return_type
                 {
-                    return Some(ret.to_string());
+                    return Some(ret.clone());
                 }
             }
             None
@@ -1018,7 +1018,7 @@ fn resolve_call_raw_return_type(
             if let Some(fl) = ctx.function_loader
                 && let Some(func_info) = fl(fn_name)
             {
-                return func_info.return_type_str();
+                return func_info.return_type.clone();
             }
             None
         }

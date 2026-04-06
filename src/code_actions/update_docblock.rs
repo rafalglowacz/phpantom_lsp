@@ -30,6 +30,7 @@ use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::docblock::is_compatible_refinement_typed;
 use crate::docblock::parser::{DocblockInfo, parse_docblock_for_tags};
 use crate::docblock::type_strings::split_type_token;
+use crate::parser::extract_hint_type;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::offset_to_position;
@@ -41,8 +42,8 @@ use crate::util::offset_to_position;
 struct SigParam {
     /// Parameter name including `$` prefix.
     name: String,
-    /// Native type hint (e.g. `string`, `?int`, `Foo|Bar`), if present.
-    type_hint: Option<String>,
+    /// Native type hint as a structured type, if present.
+    type_hint: Option<PhpType>,
     /// Whether the parameter is variadic (`...$args`).
     is_variadic: bool,
 }
@@ -385,10 +386,7 @@ fn build_info_for_function_like<'a>(
         .iter()
         .map(|p| {
             let name = p.variable.name.to_string();
-            let type_hint = p
-                .hint
-                .as_ref()
-                .map(|h| extract_hint_string_local(h, content));
+            let type_hint = p.hint.as_ref().map(|h| extract_hint_type(h));
             let is_variadic = p.ellipsis.is_some();
             SigParam {
                 name,
@@ -578,10 +576,10 @@ fn check_needs_update(
         }
     } else {
         // No @param tags at all — only flag if a param needs enrichment.
-        let needs_enrichment = info.sig_params.iter().any(|sp| {
-            let parsed = sp.type_hint.as_ref().map(|s| PhpType::parse(s));
-            enrichment_plain(parsed.as_ref(), class_loader).is_some()
-        });
+        let needs_enrichment = info
+            .sig_params
+            .iter()
+            .any(|sp| enrichment_plain(sp.type_hint.as_ref(), class_loader).is_some());
         if needs_enrichment {
             return true;
         }
@@ -595,7 +593,7 @@ fn check_needs_update(
                 let n = n.strip_prefix("...").unwrap_or(n);
                 n == sig_param.name
             })
-            && is_type_contradiction(&doc_param.type_str, native_type)
+            && is_type_contradiction(&doc_param.type_str, &native_type.to_string())
         {
             return true;
         }
@@ -615,8 +613,7 @@ fn check_needs_update(
             if PhpType::parse(&doc_param.type_str).has_type_structure() {
                 continue;
             }
-            let parsed_hint = sig_param.type_hint.as_ref().map(|s| PhpType::parse(s));
-            if let Some(enriched) = enrichment_plain(parsed_hint.as_ref(), class_loader)
+            if let Some(enriched) = enrichment_plain(sig_param.type_hint.as_ref(), class_loader)
                 && enriched != doc_param.type_str
             {
                 return true;
@@ -646,7 +643,7 @@ fn check_needs_update(
         let doc_already_rich = info
             .doc_return
             .as_ref()
-            .is_some_and(|dr| dr.type_str.contains('<') || dr.type_str.contains("[]"));
+            .is_some_and(|dr| PhpType::parse(&dr.type_str).has_type_structure());
         if !doc_already_rich
             && let Some(enriched) = enrichment_return_type(
                 content,
@@ -811,13 +808,13 @@ fn build_updated_docblock(
             let type_str = if let Some(existing) = existing {
                 // If the existing type is a refinement, keep it.
                 if let Some(native) = &sig.type_hint {
-                    if is_type_contradiction(&existing.type_str, native) {
+                    let native_str = native.to_string();
+                    if is_type_contradiction(&existing.type_str, &native_str) {
                         // Type is contradicted — try enrichment first, fall
                         // back to the raw native hint.
                         {
-                            let parsed = sig.type_hint.as_ref().map(|s| PhpType::parse(s));
-                            enrichment_plain(parsed.as_ref(), class_loader)
-                                .unwrap_or_else(|| native.clone())
+                            enrichment_plain(sig.type_hint.as_ref(), class_loader)
+                                .unwrap_or(native_str)
                         }
                     } else if PhpType::parse(&existing.type_str).has_type_structure() {
                         // Doc already has generics / callable / shape — keep it.
@@ -825,9 +822,8 @@ fn build_updated_docblock(
                     } else {
                         // Check if enrichment would upgrade the type (e.g.
                         // bare `Closure` → `(Closure(): mixed)`).
-                        let parsed_hint2 = sig.type_hint.as_ref().map(|s| PhpType::parse(s));
                         if let Some(enriched) =
-                            enrichment_plain(parsed_hint2.as_ref(), class_loader)
+                            enrichment_plain(sig.type_hint.as_ref(), class_loader)
                         {
                             if enriched != existing.type_str {
                                 enriched
@@ -845,18 +841,17 @@ fn build_updated_docblock(
                 // The docblock already documents some params, so add this
                 // missing one — use enrichment or fall back to raw hint / mixed.
                 {
-                    let parsed = sig.type_hint.as_ref().map(|s| PhpType::parse(s));
-                    enrichment_plain(parsed.as_ref(), class_loader).unwrap_or_else(|| {
-                        sig.type_hint.clone().unwrap_or_else(|| "mixed".to_string())
+                    enrichment_plain(sig.type_hint.as_ref(), class_loader).unwrap_or_else(|| {
+                        sig.type_hint
+                            .as_ref()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "mixed".to_string())
                     })
                 }
             } else {
                 // No @param tags at all — only add a tag when the native
                 // type needs enrichment, matching generate-docblock behaviour.
-                {
-                    let parsed = sig.type_hint.as_ref().map(|s| PhpType::parse(s));
-                    enrichment_plain(parsed.as_ref(), class_loader)?
-                }
+                enrichment_plain(sig.type_hint.as_ref(), class_loader)?
             };
 
             let description = existing.map(|e| e.description.clone()).unwrap_or_default();
@@ -964,7 +959,8 @@ fn build_updated_docblock(
     {
         let has_rich_return = lines.iter().any(|l| {
             if let DocLine::Return(text) = l {
-                text.contains('<') || text.contains("[]")
+                let parsed = crate::php_type::PhpType::parse(text);
+                parsed.has_type_structure()
             } else {
                 false
             }

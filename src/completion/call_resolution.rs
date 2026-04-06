@@ -527,11 +527,10 @@ impl Backend {
                         } else {
                             resolve_conditional_without_args(cond, &func_info.parameters)
                         };
-                        if let Some(ref ty) = resolved_type {
-                            let parsed_ty = PhpType::parse(ty);
+                        if let Some(ref parsed_ty) = resolved_type {
                             let classes: Vec<Arc<ClassInfo>> =
                                 super::type_resolution::type_hint_to_classes_typed(
-                                    &parsed_ty,
+                                    parsed_ty,
                                     "",
                                     ctx.all_classes,
                                     ctx.class_loader,
@@ -783,15 +782,14 @@ impl Backend {
                         Some(&class_info.template_param_defaults),
                     )
                 };
-                if let Some(ref ty) = resolved_type {
+                if let Some(ref parsed) = resolved_type {
                     // Apply method-level template substitutions to the
                     // resolved conditional type (e.g. `TModel` → concrete
                     // class when TModel is a method-level @template param).
-                    let parsed = PhpType::parse(ty);
                     let effective = if !template_subs.is_empty() {
                         parsed.substitute(template_subs)
                     } else {
-                        parsed
+                        parsed.clone()
                     };
                     let classes: Vec<Arc<ClassInfo>> =
                         super::type_resolution::type_hint_to_classes_typed(
@@ -1013,16 +1011,13 @@ fn is_valid_virtual_narrowing(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> bool {
-    let native_str = native_type.to_string();
-    let native_lower = native_str.to_ascii_lowercase();
-
     // `mixed` and `void` impose no constraint — any type is valid.
-    if matches!(native_lower.as_str(), "mixed" | "void") {
+    if native_type.is_mixed() || native_type.is_void() {
         return true;
     }
 
     // `object` — any class type is a valid narrowing.
-    if native_lower == "object" {
+    if matches!(native_type, PhpType::Named(s) if s.eq_ignore_ascii_case("object")) {
         // Only reject if the virtual type is a non-object scalar.
         return !virtual_type.is_scalar();
     }
@@ -1043,7 +1038,21 @@ fn is_valid_virtual_narrowing(
 
     // Native is a class type — the virtual type must be the same class
     // or a subclass.
-    is_type_subclass_of(virtual_type, &native_str, all_classes, class_loader)
+    if let Some(name) = native_type.base_name() {
+        is_type_subclass_of(virtual_type, name, all_classes, class_loader)
+    } else {
+        false
+    }
+}
+
+/// Strip any generic `<…>` suffix and leading `\` from a class name string.
+fn strip_class_name(name: &str) -> String {
+    let parsed = PhpType::parse(name);
+    parsed
+        .base_name()
+        .unwrap_or(name)
+        .trim_start_matches('\\')
+        .to_string()
 }
 
 /// Check whether `candidate_type` is the same class as `ancestor_name` or
@@ -1064,20 +1073,15 @@ fn is_type_subclass_of(
         Some(name) => name.strip_prefix('\\').unwrap_or(name),
         None => return false, // Not a class type
     };
-    let ancestor_base = ancestor_name
-        .strip_prefix('\\')
-        .unwrap_or(ancestor_name)
-        .split('<')
-        .next()
-        .unwrap_or(ancestor_name);
+    let ancestor_base = strip_class_name(ancestor_name);
 
     // Same class (case-insensitive, ignoring namespace prefix differences).
-    if candidate_base.eq_ignore_ascii_case(ancestor_base) {
+    if candidate_base.eq_ignore_ascii_case(&ancestor_base) {
         return true;
     }
     // Also check short-name match (e.g. "Dog" vs "App\\Models\\Dog").
     let candidate_short = crate::util::short_name(candidate_base);
-    let ancestor_short = crate::util::short_name(ancestor_base);
+    let ancestor_short = crate::util::short_name(&ancestor_base);
     if candidate_short.eq_ignore_ascii_case(ancestor_short) {
         return true;
     }
@@ -1101,21 +1105,16 @@ fn is_type_subclass_of(
         if depth > 20 {
             break;
         }
-        let parent_base = parent_name
-            .strip_prefix('\\')
-            .unwrap_or(parent_name)
-            .split('<')
-            .next()
-            .unwrap_or(parent_name);
-        if parent_base.eq_ignore_ascii_case(ancestor_base)
-            || crate::util::short_name(parent_base).eq_ignore_ascii_case(ancestor_short)
+        let parent_base = strip_class_name(parent_name);
+        if parent_base.eq_ignore_ascii_case(&ancestor_base)
+            || crate::util::short_name(&parent_base).eq_ignore_ascii_case(ancestor_short)
         {
             return true;
         }
         // Also check implemented interfaces on the parent.
-        let parent_class = find_class_by_name(all_classes, parent_base)
+        let parent_class = find_class_by_name(all_classes, &parent_base)
             .cloned()
-            .or_else(|| class_loader(parent_base));
+            .or_else(|| class_loader(&parent_base));
         match parent_class {
             Some(p) => current_parent = p.parent_class.clone(),
             None => break,
@@ -1124,14 +1123,9 @@ fn is_type_subclass_of(
 
     // Also check the candidate's own implemented interfaces.
     for iface in &cls.interfaces {
-        let iface_base = iface
-            .strip_prefix('\\')
-            .unwrap_or(iface)
-            .split('<')
-            .next()
-            .unwrap_or(iface);
-        if iface_base.eq_ignore_ascii_case(ancestor_base)
-            || crate::util::short_name(iface_base).eq_ignore_ascii_case(ancestor_short)
+        let iface_base = strip_class_name(iface);
+        if iface_base.eq_ignore_ascii_case(&ancestor_base)
+            || crate::util::short_name(&iface_base).eq_ignore_ascii_case(ancestor_short)
         {
             return true;
         }

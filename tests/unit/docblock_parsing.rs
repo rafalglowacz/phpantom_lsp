@@ -1627,7 +1627,7 @@ fn conditional_resolves_with_template_default_false() {
     defaults.insert("TAsync".to_string(), "false".to_string());
 
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
-    assert_eq!(result, Some("Response".to_string()));
+    assert_eq!(result, Some(PhpType::Named("Response".to_string())));
 }
 
 #[test]
@@ -1649,7 +1649,7 @@ fn conditional_resolves_with_template_default_true() {
     defaults.insert("TAsync".to_string(), "true".to_string());
 
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
-    assert_eq!(result, Some("PromiseInterface".to_string()));
+    assert_eq!(result, Some(PhpType::Named("PromiseInterface".to_string())));
 }
 
 #[test]
@@ -1672,7 +1672,7 @@ fn conditional_no_template_default_falls_through() {
     // Empty defaults map — should not resolve via template default
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
     // Falls through to else branch since TAsync is not a $param either
-    assert_eq!(result, Some("PromiseInterface".to_string()));
+    assert_eq!(result, Some(PhpType::Named("PromiseInterface".to_string())));
 }
 
 #[test]
@@ -1695,5 +1695,5 @@ fn conditional_negated_with_template_default() {
 
     // negated: TAsync is not false → false (since default IS false) → else branch → Response
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
-    assert_eq!(result, Some("Response".to_string()));
+    assert_eq!(result, Some(PhpType::Named("Response".to_string())));
 }

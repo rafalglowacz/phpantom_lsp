@@ -80,7 +80,7 @@ pub(crate) fn resolve_conditional_with_text_args(
     text_args: &str,
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
-) -> Option<String> {
+) -> Option<PhpType> {
     resolve_conditional_with_text_args_and_defaults(
         conditional,
         params,
@@ -104,7 +104,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
     template_defaults: Option<&HashMap<String, String>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
             param,
@@ -168,7 +168,14 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                             }
                         }
                         if !class_names.is_empty() {
-                            return Some(class_names.join("|"));
+                            let ty = if class_names.len() == 1 {
+                                PhpType::Named(class_names.into_iter().next().unwrap())
+                            } else {
+                                PhpType::Union(
+                                    class_names.into_iter().map(PhpType::Named).collect(),
+                                )
+                            };
+                            return Some(ty);
                         }
                         return resolve_conditional_with_text_args_and_defaults(
                             else_type,
@@ -186,7 +193,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     {
                         let class_name = resolve_self_keyword(&class_name, calling_class_name)
                             .unwrap_or(class_name);
-                        return Some(class_name);
+                        return Some(PhpType::Named(class_name));
                     }
                     // Check if the argument is a variable holding class-string
                     // value(s) (e.g. from a match expression).
@@ -197,7 +204,12 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     {
                         let names = resolver(trimmed);
                         if !names.is_empty() {
-                            return Some(names.join("|"));
+                            let ty = if names.len() == 1 {
+                                PhpType::Named(names.into_iter().next().unwrap())
+                            } else {
+                                PhpType::Union(names.into_iter().map(PhpType::Named).collect())
+                            };
+                            return Some(ty);
                         }
                     }
                     // Argument isn't a ::class literal or resolvable variable → try else branch
@@ -301,11 +313,10 @@ pub fn resolve_conditional_with_text_args_and_defaults(
         }
         // Non-Conditional PhpType variant (replaces Concrete)
         other => {
-            let ty = other.to_string();
-            if ty == "mixed" || ty == "void" || ty == "never" {
+            if other.is_uninformative_return() {
                 return None;
             }
-            Some(ty)
+            Some(other.clone())
         }
     }
 }
@@ -399,7 +410,7 @@ pub(crate) fn resolve_conditional_with_args<'b>(
     argument_list: &ArgumentList<'b>,
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
-) -> Option<String> {
+) -> Option<PhpType> {
     resolve_conditional_with_args_and_defaults(
         conditional,
         params,
@@ -419,7 +430,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
     template_defaults: Option<&HashMap<String, String>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
             param,
@@ -473,7 +484,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     if let Some(class_name) = arg_expr.and_then(extract_class_string_from_expr) {
                         let class_name = resolve_self_keyword(&class_name, calling_class_name)
                             .unwrap_or(class_name);
-                        return Some(class_name);
+                        return Some(PhpType::Named(class_name));
                     }
                     // Check if the argument is a variable holding class-string
                     // value(s) (e.g. from a match expression).
@@ -482,7 +493,12 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     {
                         let names = resolver(dv.name);
                         if !names.is_empty() {
-                            return Some(names.join("|"));
+                            let ty = if names.len() == 1 {
+                                PhpType::Named(names.into_iter().next().unwrap())
+                            } else {
+                                PhpType::Union(names.into_iter().map(PhpType::Named).collect())
+                            };
+                            return Some(ty);
                         }
                     }
                     // Argument isn't a ::class literal or resolvable variable → try else branch
@@ -588,11 +604,10 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
         }
         // Non-Conditional PhpType variant (replaces Concrete)
         other => {
-            let ty = other.to_string();
-            if ty == "mixed" || ty == "void" || ty == "never" {
+            if other.is_uninformative_return() {
                 return None;
             }
-            Some(ty)
+            Some(other.clone())
         }
     }
 }
@@ -603,7 +618,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
 pub(crate) fn resolve_conditional_without_args(
     conditional: &PhpType,
     params: &[ParameterInfo],
-) -> Option<String> {
+) -> Option<PhpType> {
     resolve_conditional_without_args_and_defaults(conditional, params, None)
 }
 
@@ -621,7 +636,7 @@ pub fn resolve_conditional_without_args_and_defaults(
     conditional: &PhpType,
     params: &[ParameterInfo],
     template_defaults: Option<&HashMap<String, String>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
             param,
@@ -671,11 +686,10 @@ pub fn resolve_conditional_without_args_and_defaults(
         }
         // Non-Conditional PhpType variant (replaces Concrete)
         other => {
-            let ty = other.to_string();
-            if ty == "mixed" || ty == "void" || ty == "never" {
+            if other.is_uninformative_return() {
                 return None;
             }
-            Some(ty)
+            Some(other.clone())
         }
     }
 }
@@ -700,7 +714,7 @@ fn try_resolve_with_template_default(
     then_type: &PhpType,
     else_type: &PhpType,
     template_defaults: Option<&HashMap<String, String>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let defaults = template_defaults?;
     let default_value = defaults.get(template_name)?;
 
@@ -742,11 +756,10 @@ fn try_resolve_with_template_default(
     } else {
         else_type
     };
-    let ty = branch.to_string();
-    if ty == "mixed" || ty == "void" || ty == "never" {
+    if branch.is_uninformative_return() {
         return None;
     }
-    Some(ty)
+    Some(branch.clone())
 }
 
 /// Extract the class name from an `X::class` expression.
