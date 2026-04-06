@@ -23,7 +23,15 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                                      | Impact | Effort     |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- |
-
+| T19 | [Structured type representation](todo/type-inference.md#t19-structured-type-representation) (migrate remaining callers; already in progress)              | High   | Very High  |
+| T26 | [Migrate `resolve_effective_type` / `should_override_type` to accept `PhpType`](todo/type-inference.md#t26-typed-resolve_effective_type-and-should_override_type) | Medium | Medium |
+| T27 | [Migrate `type_hint_to_classes` callers to `type_hint_to_classes_typed`](todo/type-inference.md#t27-migrate-type_hint_to_classes-callers-to-typed-variant) | Medium | Low        |
+| T28 | [Migrate `enrichment_snippet` / `enrichment_plain` to accept `PhpType`](todo/type-inference.md#t28-migrate-enrichment-functions-to-accept-phptype)        | Low    | Low        |
+| T29 | [Unify `ArrayShapeEntry` with `ShapeEntry`](todo/type-inference.md#t29-unify-arrayshapeentry-with-shapeentry)                                             | Low    | Low        |
+| T30 | [Migrate `inline_use_generics` to `Vec<(String, Vec<PhpType>)>`](todo/type-inference.md#t30-migrate-inline_use_generics-to-phptype)                       | Low    | Low        |
+| T31 | [Migrate `throws` fields to `Vec<PhpType>`](todo/type-inference.md#t31-migrate-throws-fields-to-vecphptype)                                               | Low    | Low        |
+| T32 | [Migrate `closure_this_type` to `Option<PhpType>`](todo/type-inference.md#t32-migrate-closure_this_type-to-optionphptype)                                 | Low    | Low        |
+| T33 | [Remove or inline `clean_type()`](todo/type-inference.md#t33-remove-or-inline-clean_type)                                                                 | Low    | Low        |
 |     | **Release 0.7.0**                                                                                                                                         |        |            |
 
 ## Sprint 5 — Polish for office adoption
@@ -96,7 +104,6 @@ unlikely to move the needle for most users.
 | C10  | [Deprecation markers on class-name completions from all sources](todo/completion.md#c10-deprecation-markers-on-class-name-completions-from-all-sources)                     | Low         | Low            |
 |      | **[Type Inference](todo/type-inference.md)**                                                                                                                                |             |                |
 | T25  | [Forward-walking scope model](todo/type-inference.md#t25-forward-walking-scope-model-for-variable-type-resolution) (eliminate backward-scanning depth limit)                | High        | Very High      |
-| T19  | [Structured type representation](todo/type-inference.md#t19-structured-type-representation) (partially complete; subtype checking and union simplification remain)             | High        | Very High      |
 | T20  | [Type narrowing reconciliation engine](todo/type-inference.md#t20-type-narrowing-reconciliation-engine) (sure/sureNot tracking, AND/OR algebra)                             | Medium-High | High           |
 | T6   | `Closure::bind()` / `Closure::fromCallable()` return type preservation                                                                                                      | Low-Medium  | Low-Medium     |
 | T12  | [Intersection types flattened to unions during resolution](todo/type-inference.md#t12-intersection-types-flattened-to-unions-by-type_strings_joined)                          | Low-Medium  | Low            |

@@ -417,21 +417,192 @@ emits the concrete callable signature in the `@param` tag.
 ## T19. Structured type representation
 **Impact: High · Effort: Very High**
 
-**Status: partially complete.** The `PhpType` enum exists in
-`src/php_type.rs` with full parsing via `mago-type-syntax`, a rich
-method set (substitution, extraction, display, name resolution), and
-is already used as the primary representation in core data structures
-(`MethodInfo.return_type`, `PropertyInfo.type_hint`,
-`ParameterInfo.type_hint`, `ResolvedType.type_string`). Template
-substitution, type narrowing, and inheritance merging all operate on
-`PhpType` values.
+PHPantom represents types as strings (e.g. `"Collection<string>|null"`)
+and manipulates them via string splitting, regex, and concatenation.
+PHPStan, Psalm, and Mago all use structured type trees (enums/classes)
+where each type is a node with typed children. This causes:
 
-The API boundary cleanup (T29, T30) is complete. All core internal
-APIs now accept and return `PhpType` values directly.
+- Fragile parsing on every type comparison or manipulation
+- No proper subtype checking (can't answer "is `Cat` a subtype of
+  `Animal`?")
+- String-based template substitution that breaks on nested generics
+- No union simplification (`string|string` stays as-is, `true|false`
+  doesn't merge to `bool`)
+- Intersection types can't be properly distributed over unions
 
-The remaining work is subtype checking (`is Cat a subtype of Animal?`),
-union simplification (`string|string`, `true|false -> bool`), and
-intersection distribution over unions.
+A structured type representation (a Rust `enum PhpType`) would
+eliminate these issues. PHPantom already has `PhpType` via
+`mago-type-syntax` for parsing. The gap is using it as the primary
+representation throughout the resolution pipeline instead of raw
+strings.
+
+**Migration path:** incremental. Start by making the hottest paths
+(template substitution, type narrowing) operate on `PhpType` values
+instead of strings, converting at the boundary. Expand outward over
+time.
+
+**Reference:** PHPStan's `Type` interface (~120 methods), Psalm's
+`Union`/`Atomic` hierarchy, Mago's `TUnion`/`TAtomic` enum. All three
+converge on the same architecture.
+
+**Note:** the `mago-type-syntax` integration tracked in `refactor.md`
+is a stepping stone toward this. The remaining items there
+(`ArrayShapeEntry.value_type` to `PhpType`, `split_type_token`
+replacement) should be completed first.
+
+---
+
+## T26. Typed `resolve_effective_type` and `should_override_type`
+**Impact: Medium · Effort: Medium**
+
+`resolve_effective_type()` and `should_override_type()` in
+`docblock/tags.rs` accept raw `&str` parameters, parse them into
+`PhpType` on every call, and (in the case of `resolve_effective_type`)
+return a `PhpType`. Many callers already have parsed types, stringify
+them just to satisfy the signature, then work with the returned
+`PhpType`. This creates a stringify-parse-stringify round-trip on the
+parser hot path (called for every method and property in every file).
+
+**Task:** Add `_typed` variants that accept `&PhpType` / `Option<&PhpType>`
+directly, then migrate callers in `parser/classes.rs`,
+`completion/variable/resolution.rs`, `hover/variable_type.rs`, and
+`code_actions/update_docblock.rs`. The string-based versions can
+delegate to the typed variants for backward compatibility.
+
+**Files:** `src/docblock/tags.rs`, `src/parser/classes.rs`,
+`src/completion/variable/resolution.rs`, `src/hover/variable_type.rs`,
+`src/code_actions/update_docblock.rs`
+
+---
+
+## T27. Migrate `type_hint_to_classes` callers to typed variant
+**Impact: Medium · Effort: Low**
+
+`type_hint_to_classes_typed()` in `completion/types/resolution.rs`
+already exists and accepts a `&PhpType`. The string-based
+`type_hint_to_classes()` entry point just parses and delegates.
+Several callers still use the string version even when they already
+have a parsed `PhpType` available, causing redundant parse round-trips.
+
+**Task:** Audit all call sites of `type_hint_to_classes()`, migrate
+those that already hold a `PhpType` to use `type_hint_to_classes_typed()`,
+and deprecate or remove the string entry point once all callers are
+migrated.
+
+**Files:** `src/completion/types/resolution.rs` and all call sites
+(grep for `type_hint_to_classes(`)
+
+---
+
+## T28. Migrate enrichment functions to accept `PhpType`
+**Impact: Low · Effort: Low**
+
+`enrichment_snippet()` and `enrichment_plain()` in
+`completion/phpdoc/generation.rs` accept `&Option<String>`, then
+immediately parse via `PhpType::parse()` and match on the result.
+All callers could provide a `PhpType` directly.
+
+**Task:** Change the signatures to accept `Option<&PhpType>` (or
+`&Option<PhpType>`), remove the internal `PhpType::parse()` calls,
+and update all call sites.
+
+**Files:** `src/completion/phpdoc/generation.rs` and its callers
+
+---
+
+## T29. Unify `ArrayShapeEntry` with `ShapeEntry`
+**Impact: Low · Effort: Low**
+
+`types::ArrayShapeEntry` stores `value_type: String`, duplicating
+`php_type::ShapeEntry` which stores `value_type: Box<PhpType>`.
+Functions like `parse_array_shape()` and `parse_object_shape()` parse
+into `PhpType`, unwrap the `ShapeEntry` values, then stringify them
+back into `ArrayShapeEntry`. Consumers downstream often re-parse the
+string.
+
+**Task:** Either change `ArrayShapeEntry.value_type` to `PhpType`,
+or eliminate `ArrayShapeEntry` entirely in favour of `ShapeEntry`
+(adding a `key` default for implicit positional indices). Update
+`docblock/shapes.rs` and all consumers.
+
+**Files:** `src/types.rs`, `src/docblock/shapes.rs`,
+`src/completion/array_shape.rs`, and consumers
+
+---
+
+## T30. Migrate `inline_use_generics` to `PhpType`
+**Impact: Low · Effort: Low**
+
+`ExtractedMembers::inline_use_generics` is typed
+`Vec<(String, Vec<String>)>`, storing generic type arguments as raw
+strings. The analogous fields on `ClassInfo` (`extends_generics`,
+`implements_generics`, `use_generics`) all use
+`Vec<(String, Vec<PhpType>)>`. This inconsistency forces a parse step
+when the inline generics are merged into `ClassInfo`.
+
+**Task:** Change the type to `Vec<(String, Vec<PhpType>)>` and update
+the extraction code in `parser/classes.rs` to parse at extraction time.
+
+**Files:** `src/types.rs`, `src/parser/classes.rs`
+
+---
+
+## T31. Migrate `throws` fields to `Vec<PhpType>`
+**Impact: Low · Effort: Low**
+
+`MethodInfo::throws` and `FunctionInfo::throws` store exception type
+names as `Vec<String>`. Comparisons and deduplication use
+case-insensitive string matching. Using `Vec<PhpType>` would allow
+`PhpType::resolve_names()` and `PhpType::equivalent()` for more
+robust handling.
+
+**Task:** Change both fields to `Vec<PhpType>`, update extraction in
+`docblock/tags.rs`, and update consumers in `code_actions/phpstan/`,
+`code_actions/update_docblock.rs`, `completion/source/throws_analysis.rs`,
+and `parser/ast_update.rs`.
+
+**Files:** `src/types.rs`, `src/docblock/tags.rs`,
+`src/code_actions/phpstan/add_throws.rs`,
+`src/code_actions/phpstan/remove_throws.rs`,
+`src/code_actions/update_docblock.rs`,
+`src/completion/source/throws_analysis.rs`,
+`src/parser/ast_update.rs`
+
+---
+
+## T32. Migrate `closure_this_type` to `Option<PhpType>`
+**Impact: Low · Effort: Low**
+
+`ParameterInfo::closure_this_type` is `Option<String>` while every
+other type field on `ParameterInfo` is `Option<PhpType>`. The value
+gets parsed downstream in resolution paths.
+
+**Task:** Change to `Option<PhpType>`, update extraction in
+`docblock/tags.rs` (`extract_param_closure_this_from_info`), and
+update consumers.
+
+**Files:** `src/types.rs`, `src/docblock/tags.rs`, consumers
+
+---
+
+## T33. Remove or inline `clean_type()`
+**Impact: Low · Effort: Low**
+
+`clean_type()` in `docblock/type_strings.rs` now only trims trailing
+`.` and `,` characters. It used to strip `|null` and leading `\` but
+those behaviours were removed. The function allocates a new `String`
+on every call for minimal work that could be done inline or, better,
+eliminated entirely by feeding raw strings directly to
+`PhpType::parse()` which handles all normalization internally.
+
+**Task:** Audit all ~15 call sites. Where the result is immediately
+passed to `PhpType::parse()`, remove the `clean_type()` call (parse
+handles trailing punctuation). Where the result is used as a raw
+string, replace with inline `.trim_end_matches(['.', ','])`. Remove
+the function once all call sites are migrated.
+
+**Files:** `src/docblock/type_strings.rs`, `src/docblock/tags.rs`,
+`src/docblock/virtual_members.rs`, and other callers
 
 ---
 
