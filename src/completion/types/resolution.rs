@@ -1,16 +1,16 @@
 /// Type-hint resolution to concrete `ClassInfo` values.
 ///
-/// This module contains the logic for mapping type-hint strings (as they
-/// appear in return types, property annotations, and PHPDoc tags) to
-/// resolved `ClassInfo` values that the completion, hover, and definition
-/// engines can work with.
+/// This module contains the logic for mapping parsed [`PhpType`] values
+/// (as they appear in return types, property annotations, and PHPDoc
+/// tags) to resolved `ClassInfo` values that the completion, hover, and
+/// definition engines can work with.
 ///
 /// Split from [`super::resolver`] for navigability.  The entry points are:
 ///
-/// - [`type_hint_to_classes`]: the public facade that maps a
-///   type-hint string to all matching `ClassInfo` values (handles unions,
-///   intersections, generics, `self`/`static`/`$this`, nullable types,
-///   object shapes, and type alias expansion).
+/// - [`type_hint_to_classes_typed`]: maps a parsed [`PhpType`] to all
+///   matching `ClassInfo` values (handles unions, intersections, generics,
+///   `self`/`static`/`$this`, nullable types, object shapes, and type
+///   alias expansion).
 /// - [`resolve_type_alias`]: fully expands a type alias defined
 ///   via `@phpstan-type` / `@psalm-type` / `@phpstan-import-type`.
 /// - [`resolve_property_types`]: resolves a property's type hint
@@ -47,12 +47,11 @@ pub(crate) fn resolve_property_types(
     type_hint_to_classes_typed(&type_hint, &class_info.name, all_classes, class_loader)
 }
 
-/// Map a type-hint string to all matching `ClassInfo` values.
+/// Map a parsed [`PhpType`] to all matching `ClassInfo` values.
 ///
 /// Handles:
 ///   - Nullable types: `?Foo` → strips `?`, resolves `Foo`
 ///   - Union types: `A|B|C` → resolves each part independently
-///     (respects `<…>` nesting so `Collection<int|string>` is not split)
 ///   - Intersection types: `A&B` → resolves each part independently
 ///   - Generic types: `Collection<int, User>` → resolves `Collection`,
 ///     then applies generic substitution (`TKey→int`, `TValue→User`)
@@ -62,18 +61,9 @@ pub(crate) fn resolve_property_types(
 ///     `false`, `true`) → skipped (not class types)
 ///
 /// Each resolvable class-like part is returned as a separate entry.
-pub(crate) fn type_hint_to_classes(
-    type_hint: &str,
-    owning_class_name: &str,
-    all_classes: &[Arc<ClassInfo>],
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Vec<ClassInfo> {
-    type_hint_to_classes_depth(type_hint, owning_class_name, all_classes, class_loader, 0)
-}
-
-/// Like [`type_hint_to_classes`], but accepts a pre-parsed [`PhpType`]
-/// to avoid a parse→stringify→reparse round-trip when the caller already
-/// has a structured type.
+///
+/// Callers that start with a raw type string should parse it with
+/// `PhpType::parse()` first.
 pub(crate) fn type_hint_to_classes_typed(
     ty: &PhpType,
     owning_class_name: &str,
@@ -83,32 +73,8 @@ pub(crate) fn type_hint_to_classes_typed(
     type_hint_to_classes_typed_depth(ty, owning_class_name, all_classes, class_loader, 0)
 }
 
-/// Inner implementation of [`type_hint_to_classes`] with a recursion
-/// depth guard to prevent infinite loops from circular type aliases.
-fn type_hint_to_classes_depth(
-    type_hint: &str,
-    owning_class_name: &str,
-    all_classes: &[Arc<ClassInfo>],
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    depth: u8,
-) -> Vec<ClassInfo> {
-    if depth > MAX_ALIAS_DEPTH {
-        return vec![];
-    }
-
-    // Parse first — PhpType::parse handles `?Foo`, `(A&B)|C`, and all
-    // other syntax natively, making manual string preprocessing redundant.
-    // Alias resolution is handled by `resolve_named_type` when the parsed
-    // type turns out to be a `Named` variant.
-    let parsed = PhpType::parse(type_hint);
-    type_hint_to_classes_typed_depth(&parsed, owning_class_name, all_classes, class_loader, depth)
-}
-
-/// Inner implementation that operates on a pre-parsed [`PhpType`].
-///
-/// Union and intersection members are recursed directly without
-/// stringifying and re-parsing.  Named types still go through
-/// string-based alias resolution when necessary.
+/// Inner implementation with a recursion depth guard to prevent
+/// infinite loops from circular type aliases.
 fn type_hint_to_classes_typed_depth(
     ty: &PhpType,
     owning_class_name: &str,

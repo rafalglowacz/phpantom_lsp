@@ -122,15 +122,15 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
         // the AST) include the `$` prefix, so compare them directly.
         let name_matches = var_name.as_ref().is_none_or(|n| *n == value_var_name);
         if name_matches {
-            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &var_type,
+            let parsed = PhpType::parse(&var_type);
+            let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
             );
             if !resolved.is_empty() {
-                let resolved_types =
-                    ResolvedType::from_classes_with_hint(resolved, PhpType::parse(&var_type));
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, parsed);
                 if conditional {
                     ResolvedType::extend_unique(results, resolved_types);
                 } else {
@@ -248,18 +248,23 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     });
 
     // Extract the generic element type (e.g. `list<User>` → `User`).
-    if let Some(ref rt) = raw_type {
-        let parsed = crate::php_type::PhpType::parse(rt);
+    // Parse once so the parsed PhpType is available for both the
+    // extract_value_type check and the fallback class resolution.
+    let parsed_raw = raw_type
+        .as_ref()
+        .map(|rt| crate::php_type::PhpType::parse(rt));
+
+    if let Some(ref parsed) = parsed_raw
+        && let Some(element_type) = parsed.extract_value_type(false)
+    {
         // Use `extract_value_type(false)` to include non-class element
         // types such as array shapes (`array{key: Type}`), scalars, and
         // generic arrays.  The foreach value variable may be used with
         // bracket access (`$item['key']->`) or other operations where
         // a non-class type is meaningful.  `push_foreach_resolved_types_typed`
         // handles both class and non-class element types.
-        if let Some(element_type) = parsed.extract_value_type(false) {
-            push_foreach_resolved_types_typed(element_type, ctx, results, conditional);
-            return;
-        }
+        push_foreach_resolved_types_typed(element_type, ctx, results, conditional);
+        return;
     }
 
     // ── Fallback: resolve the iterated expression to ClassInfo and
@@ -273,11 +278,11 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     // Also handles the case where a method/property returns a class
     // name like `PaymentOptionLocaleCollection` without generic syntax
     // in the return type string.
-    let iterable_classes = if let Some(ref rt) = raw_type {
+    let iterable_classes = if let Some(ref parsed) = parsed_raw {
         // raw_type is a class name like "PaymentOptionLocaleCollection"
         // (PhpType::extract_value_type returned None above).
-        crate::completion::type_resolution::type_hint_to_classes(
-            rt,
+        crate::completion::type_resolution::type_hint_to_classes_typed(
+            parsed,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,
@@ -417,19 +422,24 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     });
 
     // Extract the generic key type (e.g. `array<Request, Response>` → `Request`).
-    if let Some(ref rt) = raw_type {
-        let parsed = crate::php_type::PhpType::parse(rt);
-        if let Some(key_type) = parsed.extract_key_type(true) {
-            push_foreach_resolved_types_typed(key_type, ctx, results, conditional);
-            return;
-        }
+    // Parse once so the parsed PhpType is available for both the
+    // extract_key_type check and the fallback class resolution.
+    let parsed_raw = raw_type
+        .as_ref()
+        .map(|rt| crate::php_type::PhpType::parse(rt));
+
+    if let Some(ref parsed) = parsed_raw
+        && let Some(key_type) = parsed.extract_key_type(true)
+    {
+        push_foreach_resolved_types_typed(key_type, ctx, results, conditional);
+        return;
     }
 
     // ── Fallback: resolve the iterated expression to ClassInfo and
     //    extract the key type from its generic annotations ───────────
-    let iterable_classes = if let Some(ref rt) = raw_type {
-        crate::completion::type_resolution::type_hint_to_classes(
-            rt,
+    let iterable_classes = if let Some(ref parsed) = parsed_raw {
+        crate::completion::type_resolution::type_hint_to_classes_typed(
+            parsed,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,

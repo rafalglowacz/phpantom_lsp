@@ -1811,7 +1811,7 @@ impl ResolvedType {
     /// class's name as the type string.
     ///
     /// This is a migration helper for code paths that still produce
-    /// `Vec<ClassInfo>` internally (e.g. `type_hint_to_classes`).
+    /// `Vec<ClassInfo>` internally (e.g. `type_hint_to_classes_typed`).
     /// Future sprints will populate proper type strings at the source.
     pub(crate) fn from_classes(classes: Vec<ClassInfo>) -> Vec<ResolvedType> {
         classes.into_iter().map(ResolvedType::from_class).collect()
@@ -1823,7 +1823,7 @@ impl ResolvedType {
     /// When exactly one class was resolved, the full `type_hint` is
     /// attached (preserving generics like `"Collection<int, User>"`).
     /// When multiple classes were resolved (union split by
-    /// `type_hint_to_classes`), each class uses its own name as the
+    /// `type_hint_to_classes_typed`), each class uses its own name as the
     /// type string because the hint was already split into parts.
     pub(crate) fn from_classes_with_hint(
         classes: Vec<ClassInfo>,

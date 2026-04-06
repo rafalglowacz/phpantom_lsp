@@ -20,7 +20,7 @@ impl Backend {
     ///
     /// Candidates returned by `resolve_target_classes` may be
     /// fully-resolved classes with virtual/mixin members baked into
-    /// their `methods` list (this happens when `type_hint_to_classes`
+    /// their `methods` list (this happens when `type_hint_to_classes_typed`
     /// calls `resolve_class_fully` to apply generic substitutions).
     /// `find_declaring_class` needs the raw class so it can trace
     /// member declarations through the real inheritance and mixin

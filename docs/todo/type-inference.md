@@ -470,25 +470,6 @@ delegate to the typed variants for backward compatibility.
 
 ---
 
-## T27. Migrate `type_hint_to_classes` callers to typed variant
-**Impact: Medium · Effort: Low**
-
-`type_hint_to_classes_typed()` in `completion/types/resolution.rs`
-already exists and accepts a `&PhpType`. The string-based
-`type_hint_to_classes()` entry point just parses and delegates.
-Several callers still use the string version even when they already
-have a parsed `PhpType` available, causing redundant parse round-trips.
-
-**Task:** Audit all call sites of `type_hint_to_classes()`, migrate
-those that already hold a `PhpType` to use `type_hint_to_classes_typed()`,
-and deprecate or remove the string entry point once all callers are
-migrated.
-
-**Files:** `src/completion/types/resolution.rs` and all call sites
-(grep for `type_hint_to_classes(`)
-
----
-
 ## T28. Migrate enrichment functions to accept `PhpType`
 **Impact: Low · Effort: Low**
 

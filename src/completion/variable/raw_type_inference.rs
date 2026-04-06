@@ -334,7 +334,7 @@ pub(in crate::completion) fn try_infer_from_generator_yield(
 ) -> Vec<ClassInfo> {
     // Only applies to Generator return types.
     let value_type = match return_type.extract_value_type(false) {
-        Some(vt) => vt.to_string(),
+        Some(vt) => vt,
         None => return vec![],
     };
 
@@ -410,8 +410,8 @@ pub(in crate::completion) fn try_infer_from_generator_yield(
         return vec![];
     }
 
-    crate::completion::type_resolution::type_hint_to_classes(
-        &value_type,
+    crate::completion::type_resolution::type_hint_to_classes_typed(
+        value_type,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,

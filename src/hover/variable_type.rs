@@ -18,6 +18,7 @@ use mago_syntax::ast::*;
 use crate::completion::types::narrowing::is_subtype_of;
 use crate::docblock;
 use crate::parser::{extract_hint_string, with_parsed_program};
+use crate::php_type::PhpType;
 use crate::types::{AccessKind, ClassInfo, ResolvedType};
 use crate::util::short_name;
 
@@ -993,8 +994,9 @@ fn resolve_expression_to_classes(
         if let Some(raw_type) =
             docblock::find_var_raw_type_in_source(content, cursor_offset as usize, expr_text)
         {
-            return crate::completion::type_resolution::type_hint_to_classes(
-                &raw_type,
+            let parsed_raw = PhpType::parse(&raw_type);
+            return crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed_raw,
                 &current_class.name,
                 all_classes,
                 class_loader,
@@ -1421,8 +1423,9 @@ fn try_infer_more_specific_type_from_call(
         .map(|c| c.name.as_str())
         .unwrap_or(&dummy.name);
 
-    let explicit_classes = crate::completion::type_resolution::type_hint_to_classes(
-        explicit_type,
+    let parsed_explicit = PhpType::parse(explicit_type);
+    let explicit_classes = crate::completion::type_resolution::type_hint_to_classes_typed(
+        &parsed_explicit,
         current_name,
         closure_ctx.all_classes,
         closure_ctx.class_loader,
@@ -1431,8 +1434,9 @@ fn try_infer_more_specific_type_from_call(
         return None;
     }
 
-    let inferred_classes = crate::completion::type_resolution::type_hint_to_classes(
-        inferred,
+    let parsed_inferred = PhpType::parse(inferred);
+    let inferred_classes = crate::completion::type_resolution::type_hint_to_classes_typed(
+        &parsed_inferred,
         current_name,
         closure_ctx.all_classes,
         closure_ctx.class_loader,

@@ -6959,7 +6959,7 @@ fn hover_variable_narrowed_by_var_and_instanceof_with_use_import() {
 /// Cross-file variant where the hover target is reached through a method
 /// return type chain: `$this->getJob()->class_name`.  The method returns
 /// `ScheduledJob`, whose `@property` docblock is edited in another file.
-/// This exercises the `PropertyChain` → `CallExpr` → `type_hint_to_classes`
+/// This exercises the `PropertyChain` → `CallExpr` → `type_hint_to_classes_typed`
 /// path in `resolve_target_classes`, which may cache the resolved class
 /// differently from a bare variable.
 #[test]

@@ -852,7 +852,7 @@ impl Backend {
         // `collect($x)->`) doesn't crash the LSP server process.
         // The variable-resolution path already has its own
         // catch_unwind, but the direct call-expression path
-        // (resolve_call_return_types_expr → type_hint_to_classes →
+        // (resolve_call_return_types_expr → type_hint_to_classes_typed →
         // class_loader → find_or_load_class → parse_php →
         // resolve_class_with_inheritance) does not.
         let member_items = crate::util::catch_panic_unwind_safe(

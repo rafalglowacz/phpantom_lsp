@@ -565,9 +565,8 @@ fn walk_array_segments_and_resolve(
             // its iterable generics (`@extends`, `@implements`) for the
             // element type.  This handles bracket access on classes that
             // implement `ArrayAccess` with generic type parameters.
-            let type_str = current.to_string();
-            let class_element = crate::completion::type_resolution::type_hint_to_classes(
-                &type_str,
+            let class_element = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &current,
                 current_class_name,
                 all_classes,
                 class_loader,

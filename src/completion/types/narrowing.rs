@@ -96,8 +96,9 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
     {
         let mut union = Vec::new();
         for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
+            let parsed = PhpType::parse(cls_name);
+            let resolved = super::resolution::type_hint_to_classes_typed(
+                &parsed,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
@@ -124,8 +125,9 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
     {
         let mut union = Vec::new();
         for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
+            let parsed = PhpType::parse(cls_name);
+            let resolved = super::resolution::type_hint_to_classes_typed(
+                &parsed,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
@@ -213,8 +215,9 @@ pub(in crate::completion) fn apply_instanceof_inclusion(
     ctx: &VarResolutionCtx<'_>,
     results: &mut Vec<ClassInfo>,
 ) {
-    let narrowed = super::resolution::type_hint_to_classes(
-        cls_name,
+    let parsed = PhpType::parse(cls_name);
+    let narrowed = super::resolution::type_hint_to_classes_typed(
+        &parsed,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,
@@ -402,8 +405,9 @@ pub(in crate::completion) fn apply_instanceof_exclusion(
     ctx: &VarResolutionCtx<'_>,
     results: &mut Vec<ClassInfo>,
 ) {
-    let excluded = super::resolution::type_hint_to_classes(
-        cls_name,
+    let parsed = PhpType::parse(cls_name);
+    let excluded = super::resolution::type_hint_to_classes_typed(
+        &parsed,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,
@@ -1094,8 +1098,9 @@ pub(in crate::completion) fn try_apply_assert_instanceof_narrowing(
     {
         let mut union = Vec::new();
         for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
+            let parsed = PhpType::parse(cls_name);
+            let resolved = super::resolution::type_hint_to_classes_typed(
+                &parsed,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
@@ -1798,8 +1803,9 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
     {
         let mut union = Vec::new();
         for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
+            let parsed = PhpType::parse(cls_name);
+            let resolved = super::resolution::type_hint_to_classes_typed(
+                &parsed,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
@@ -2229,8 +2235,9 @@ fn would_exclude_all_results(
     results: &[ClassInfo],
     ctx: &VarResolutionCtx<'_>,
 ) -> bool {
-    let excluded = super::resolution::type_hint_to_classes(
-        element_type,
+    let parsed = PhpType::parse(element_type);
+    let excluded = super::resolution::type_hint_to_classes_typed(
+        &parsed,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,

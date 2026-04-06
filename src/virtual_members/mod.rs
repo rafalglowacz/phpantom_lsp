@@ -95,7 +95,7 @@ pub fn new_resolved_class_cache() -> ResolvedClassCache {
 
 // ─── Thread-local resolved-class cache access ───────────────────────────────
 //
-// Many code paths (e.g. `type_hint_to_classes`) call `resolve_class_fully`
+// Many code paths (e.g. `type_hint_to_classes_typed`) call `resolve_class_fully`
 // without access to the `Backend`'s `resolved_class_cache`.  Rather than
 // threading the cache through dozens of function signatures, we use the
 // same thread-local guard pattern as the parse cache: the caller activates

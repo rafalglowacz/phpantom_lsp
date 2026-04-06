@@ -191,14 +191,15 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
             // succeeds even inside a namespace block (unqualified
             // class names are prefixed with the current namespace
             // and do NOT fall back to the global scope in PHP).
+            let closure_ty = PhpType::parse("Closure");
             ResolvedType::from_classes_with_hint(
-                crate::completion::type_resolution::type_hint_to_classes(
-                    "\\Closure",
+                crate::completion::type_resolution::type_hint_to_classes_typed(
+                    &closure_ty,
                     &ctx.current_class.name,
                     ctx.all_classes,
                     ctx.class_loader,
                 ),
-                PhpType::parse("Closure"),
+                closure_ty,
             )
         }
         // ── Generator yield-assignment: `$var = yield $expr` ──
@@ -431,8 +432,9 @@ fn resolve_rhs_instantiation(
         _ => None,
     };
     if let Some(name) = class_name {
-        let classes = crate::completion::type_resolution::type_hint_to_classes(
-            name,
+        let parsed_name = PhpType::parse(name);
+        let classes = crate::completion::type_resolution::type_hint_to_classes_typed(
+            &parsed_name,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,
@@ -901,9 +903,8 @@ fn resolve_rhs_array_access<'b>(
             // generics (`@extends`, `@implements`) for the element type.
             // This handles `$obj->prop['key']` where `prop` is a collection
             // class like `OpeningHours extends DataCollection<string, Day>`.
-            let type_str = current.to_string();
-            let class_element = crate::completion::type_resolution::type_hint_to_classes(
-                &type_str,
+            let class_element = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &current,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
@@ -1281,14 +1282,15 @@ fn resolve_rhs_function_call<'b>(
             ctx,
         )
     {
-        let resolved = crate::completion::type_resolution::type_hint_to_classes(
-            &element_type,
+        let parsed_element = PhpType::parse(&element_type);
+        let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+            &parsed_element,
             current_class_name,
             all_classes,
             class_loader,
         );
         if !resolved.is_empty() {
-            return ResolvedType::from_classes_with_hint(resolved, PhpType::parse(&element_type));
+            return ResolvedType::from_classes_with_hint(resolved, parsed_element);
         }
     }
 
@@ -1304,18 +1306,19 @@ fn resolve_rhs_function_call<'b>(
             ctx,
         )
     {
-        let resolved = crate::completion::type_resolution::type_hint_to_classes(
-            &raw_type,
+        let parsed_raw = PhpType::parse(&raw_type);
+        let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+            &parsed_raw,
             current_class_name,
             all_classes,
             class_loader,
         );
         if !resolved.is_empty() {
-            return ResolvedType::from_classes_with_hint(resolved, PhpType::parse(&raw_type));
+            return ResolvedType::from_classes_with_hint(resolved, parsed_raw);
         }
         // The type string is informative (e.g. `list<User>`) but
         // doesn't resolve to a class — return as type-string-only.
-        return vec![ResolvedType::from_type_string(PhpType::parse(&raw_type))];
+        return vec![ResolvedType::from_type_string(parsed_raw)];
     }
 
     if let Some(ref name) = func_name
@@ -1333,14 +1336,15 @@ fn resolve_rhs_function_call<'b>(
                 Some(current_class_name),
             );
             if let Some(ref ty) = resolved_type {
-                let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                    ty,
+                let parsed_ty = PhpType::parse(ty);
+                let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                    &parsed_ty,
                     current_class_name,
                     all_classes,
                     class_loader,
                 );
                 if !resolved.is_empty() {
-                    return ResolvedType::from_classes_with_hint(resolved, PhpType::parse(ty));
+                    return ResolvedType::from_classes_with_hint(resolved, parsed_ty);
                 }
             }
         }
@@ -1386,7 +1390,7 @@ fn resolve_rhs_function_call<'b>(
                 return ResolvedType::from_classes_with_hint(resolved, ret.clone());
             }
             // The function has a return type string but
-            // `type_hint_to_classes` found no matching class (e.g.
+            // `type_hint_to_classes_typed` found no matching class (e.g.
             // `list<Widget>`, `int`, `array{name: string}`).  Return a
             // type-string-only entry so that consumers reading
             // `.type_string` still get the information.
@@ -1467,14 +1471,15 @@ fn resolve_rhs_function_call<'b>(
                 ctx.cursor_offset,
             )
         {
-            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &ret,
+            let parsed_ret = PhpType::parse(&ret);
+            let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed_ret,
                 current_class_name,
                 all_classes,
                 class_loader,
             );
             if !resolved.is_empty() {
-                return ResolvedType::from_classes_with_hint(resolved, PhpType::parse(&ret));
+                return ResolvedType::from_classes_with_hint(resolved, parsed_ret);
             }
         }
 
@@ -1488,14 +1493,15 @@ fn resolve_rhs_function_call<'b>(
                 &var_name, &rctx,
             )
         {
-            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &ret,
+            let parsed_ret = PhpType::parse(&ret);
+            let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed_ret,
                 current_class_name,
                 all_classes,
                 class_loader,
             );
             if !resolved.is_empty() {
-                return ResolvedType::from_classes_with_hint(resolved, PhpType::parse(&ret));
+                return ResolvedType::from_classes_with_hint(resolved, parsed_ret);
             }
         }
 
@@ -1523,7 +1529,7 @@ fn resolve_rhs_function_call<'b>(
                 if !resolved.is_empty() {
                     return ResolvedType::from_classes_with_hint(resolved, ret.clone());
                 }
-                // When type_hint_to_classes can't resolve the return
+                // When type_hint_to_classes_typed can't resolve the return
                 // type (e.g. `Item[]` where the `[]` suffix prevents
                 // class lookup), emit a type-string-only entry so that
                 // callers like foreach resolution can still extract the
@@ -1550,14 +1556,15 @@ fn resolve_rhs_function_call<'b>(
         // Extract the return type from the literal instead of going
         // through `__invoke()` on the generic `Closure` stub.
         if let Some(ret_type) = extract_closure_or_arrow_return_type(callee_expr) {
-            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &ret_type,
+            let parsed_ret_type = PhpType::parse(&ret_type);
+            let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed_ret_type,
                 current_class_name,
                 all_classes,
                 class_loader,
             );
             if !resolved.is_empty() {
-                return ResolvedType::from_classes_with_hint(resolved, PhpType::parse(&ret_type));
+                return ResolvedType::from_classes_with_hint(resolved, parsed_ret_type);
             }
         }
 
@@ -1726,7 +1733,7 @@ fn resolve_rhs_method_call_inner<'b>(
             };
         }
 
-        // The method has a return type string but `type_hint_to_classes`
+        // The method has a return type string but `type_hint_to_classes_typed`
         // found no matching class (e.g. `list<Widget>`, `int`,
         // `array{name: string}`).  Return a type-string-only entry so
         // that consumers reading `.type_string` (hover, foreach
@@ -1911,7 +1918,7 @@ fn resolve_rhs_static_call(
                 };
             }
 
-            // The method has a return type string but `type_hint_to_classes`
+            // The method has a return type string but `type_hint_to_classes_typed`
             // found no matching class (e.g. `list<Widget>`, `int`,
             // `array{name: string}`).  Return a type-string-only entry so
             // that consumers reading `.type_string` (hover, raw-type
@@ -1942,7 +1949,7 @@ fn resolve_rhs_property_access(
     /// property's type hint string in each result.
     ///
     /// When the property type is a scalar (e.g. `string`, `int`) and
-    /// `type_hint_to_classes` returns no `ClassInfo`, a type-string-only
+    /// `type_hint_to_classes_typed` returns no `ClassInfo`, a type-string-only
     /// `ResolvedType` is produced so that the type information is not lost.
     fn resolve_property_with_hint(
         prop_name: &str,
@@ -1961,7 +1968,7 @@ fn resolve_rhs_property_access(
             class_loader,
         );
         if resolved.is_empty() {
-            // The property has a type hint but `type_hint_to_classes`
+            // The property has a type hint but `type_hint_to_classes_typed`
             // found no matching class (e.g. `list<Widget>`, `int`,
             // `array{name: string}`).  Return a type-string-only
             // entry when the type is informative (carries generics,
@@ -1991,12 +1998,11 @@ fn resolve_rhs_property_access(
             _ => None,
         };
         if let Some(class_name) = class_name {
-            let resolved_name = crate::php_type::PhpType::parse(&class_name)
-                .base_name()
-                .unwrap_or(&class_name)
-                .to_string();
-            let target_classes = crate::completion::type_resolution::type_hint_to_classes(
-                &resolved_name,
+            let class_parsed = PhpType::parse(&class_name);
+            let resolved_name = class_parsed.base_name().unwrap_or(&class_name).to_string();
+            let resolved_parsed = PhpType::parse(&resolved_name);
+            let target_classes = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &resolved_parsed,
                 current_class_name,
                 all_classes,
                 class_loader,
@@ -2032,19 +2038,18 @@ fn resolve_rhs_property_access(
                         if let Some(ref val) = c.value
                             && let Some(ts) = infer_type_from_constant_value(val)
                         {
-                            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                                &ts,
-                                current_class_name,
-                                all_classes,
-                                class_loader,
-                            );
-                            if !resolved.is_empty() {
-                                return ResolvedType::from_classes_with_hint(
-                                    resolved,
-                                    PhpType::parse(&ts),
+                            let parsed_ts = PhpType::parse(&ts);
+                            let resolved =
+                                crate::completion::type_resolution::type_hint_to_classes_typed(
+                                    &parsed_ts,
+                                    current_class_name,
+                                    all_classes,
+                                    class_loader,
                                 );
+                            if !resolved.is_empty() {
+                                return ResolvedType::from_classes_with_hint(resolved, parsed_ts);
                             }
-                            return vec![ResolvedType::from_type_string(PhpType::parse(&ts))];
+                            return vec![ResolvedType::from_type_string(parsed_ts)];
                         }
                     }
                 }

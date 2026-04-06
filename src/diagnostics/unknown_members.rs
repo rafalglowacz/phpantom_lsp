@@ -577,7 +577,7 @@ impl Backend {
     ) -> MemberCheckResult {
         // ── Quick check on pre-resolved base classes ────────────────
         // `resolve_target_classes` already returns fully-resolved
-        // classes in many code paths (e.g. `type_hint_to_classes`
+        // classes in many code paths (e.g. `type_hint_to_classes_typed`
         // calls `resolve_class_fully` and injects model-specific
         // scope methods onto Eloquent Builders).  Check the member
         // on these classes FIRST, before re-resolving through the

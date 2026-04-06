@@ -147,7 +147,7 @@ impl Backend {
             // Candidates from resolve_target_classes may be fully-resolved
             // (merged) classes that include virtual/mixin members directly
             // in their methods list (e.g. when generic args triggered
-            // resolve_class_fully inside type_hint_to_classes).
+            // resolve_class_fully inside type_hint_to_classes_typed).
             // find_declaring_class needs the raw (unmerged) class so it
             // can trace the member to the actual declaring class through
             // the real inheritance/mixin chain.

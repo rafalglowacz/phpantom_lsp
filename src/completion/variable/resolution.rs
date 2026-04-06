@@ -881,17 +881,17 @@ fn resolve_variable_in_members<'b>(
                     // a more specific non-class type such as
                     // `object{foo: int, bar: string}`.
                     if let Some(ref raw_docblock_type) = raw_docblock_type {
-                        let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                            raw_docblock_type,
-                            &ctx.current_class.name,
-                            ctx.all_classes,
-                            ctx.class_loader,
-                        );
-                        if !resolved.is_empty() {
-                            param_results = ResolvedType::from_classes_with_hint(
-                                resolved,
-                                PhpType::parse(raw_docblock_type),
+                        let parsed_docblock = PhpType::parse(raw_docblock_type);
+                        let resolved =
+                            crate::completion::type_resolution::type_hint_to_classes_typed(
+                                &parsed_docblock,
+                                &ctx.current_class.name,
+                                ctx.all_classes,
+                                ctx.class_loader,
                             );
+                        if !resolved.is_empty() {
+                            param_results =
+                                ResolvedType::from_classes_with_hint(resolved, parsed_docblock);
                             break;
                         }
                     }
@@ -2722,8 +2722,9 @@ fn walk_try_statement<'b>(
             && var.name == ctx.var_name
         {
             let hint_str = extract_hint_string(&catch.hint);
-            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &hint_str,
+            let parsed_hint = PhpType::parse(&hint_str);
+            let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed_hint,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
@@ -2847,7 +2848,7 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
     );
 
     if resolved.is_empty() {
-        // When `type_hint_to_classes` can't resolve the type (e.g.
+        // When `type_hint_to_classes_typed` can't resolve the type (e.g.
         // `list<User>`, `array{name: string}`, `int[]`), emit a
         // type-string-only entry so that downstream consumers like
         // foreach resolution can still extract element types via

@@ -528,9 +528,10 @@ impl Backend {
                             resolve_conditional_without_args(cond, &func_info.parameters)
                         };
                         if let Some(ref ty) = resolved_type {
+                            let parsed_ty = PhpType::parse(ty);
                             let classes: Vec<Arc<ClassInfo>> =
-                                super::type_resolution::type_hint_to_classes(
-                                    ty,
+                                super::type_resolution::type_hint_to_classes_typed(
+                                    &parsed_ty,
                                     "",
                                     ctx.all_classes,
                                     ctx.class_loader,
@@ -631,9 +632,10 @@ impl Backend {
                         cursor_offset,
                     )
                 {
+                    let parsed_ret = PhpType::parse(&ret);
                     let classes: Vec<Arc<ClassInfo>> =
-                        super::type_resolution::type_hint_to_classes(
-                            &ret,
+                        super::type_resolution::type_hint_to_classes_typed(
+                            &parsed_ret,
                             "",
                             ctx.all_classes,
                             ctx.class_loader,
@@ -650,9 +652,10 @@ impl Backend {
                 if let Some(ret) =
                     super::source::helpers::extract_first_class_callable_return_type(var_name, ctx)
                 {
+                    let parsed_ret = PhpType::parse(&ret);
                     let classes: Vec<Arc<ClassInfo>> =
-                        super::type_resolution::type_hint_to_classes(
-                            &ret,
+                        super::type_resolution::type_hint_to_classes_typed(
+                            &parsed_ret,
                             "",
                             ctx.all_classes,
                             ctx.class_loader,

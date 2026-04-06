@@ -833,7 +833,7 @@ pub(crate) fn resolve_target_classes_expr(
             // the property's raw type hint.  This preserves generic
             // parameters like `array<string, IntCollection>` or
             // `Collection<int, Translation>` that would be lost if
-            // we resolved through `type_hint_to_classes` first.
+            // we resolved through `type_hint_to_classes_typed` first.
             let property_raw_type: Option<PhpType> = if let SubjectExpr::PropertyChain {
                 base: prop_base,
                 property,

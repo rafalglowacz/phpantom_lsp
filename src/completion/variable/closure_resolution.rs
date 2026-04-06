@@ -1240,22 +1240,18 @@ pub(in crate::completion) fn try_standalone_var_docblock(
         ctx.cursor_offset as usize,
         ctx.var_name,
     ) {
-        let resolved = crate::completion::type_resolution::type_hint_to_classes(
-            &raw_type,
+        let parsed = PhpType::parse(&raw_type);
+        let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+            &parsed,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,
         );
         if !resolved.is_empty() {
-            *results = ResolvedType::from_classes_with_hint(
-                resolved,
-                crate::php_type::PhpType::parse(&raw_type),
-            );
-        } else if crate::php_type::PhpType::parse(&raw_type).is_informative() {
+            *results = ResolvedType::from_classes_with_hint(resolved, parsed);
+        } else if parsed.is_informative() {
             // Non-class types like `array{key: string}` or `int[]`.
-            *results = vec![ResolvedType::from_type_string(
-                crate::php_type::PhpType::parse(&raw_type),
-            )];
+            *results = vec![ResolvedType::from_type_string(parsed)];
         }
     }
 }
@@ -1284,6 +1280,9 @@ fn resolve_closure_params_with_inferred(
         let pname = param.variable.name.to_string();
         if pname == ctx.var_name {
             matched_param_is_variadic = param.ellipsis.is_some();
+            // Pre-parse the inferred type (if any) so that all
+            // branches below can reuse it without redundant parsing.
+            let parsed_inferred = inferred_types.get(idx).map(|s| PhpType::parse(s));
             // 1. Try the explicit type hint first.
             if let Some(hint) = &param.hint {
                 let type_str = extract_hint_string(hint);
@@ -1300,8 +1299,9 @@ fn resolve_closure_params_with_inferred(
                 if let Some(inferred) = inferred_types.get(idx)
                     && inferred_type_is_more_specific(&type_str, inferred)
                 {
-                    let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                        inferred,
+                    let pi = parsed_inferred.as_ref().unwrap();
+                    let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                        pi,
                         &ctx.current_class.name,
                         ctx.all_classes,
                         ctx.class_loader,
@@ -1309,18 +1309,20 @@ fn resolve_closure_params_with_inferred(
                     if !resolved.is_empty() {
                         *results = ResolvedType::from_classes_with_hint(
                             resolved,
-                            PhpType::parse(inferred),
+                            parsed_inferred.unwrap(),
                         );
                         break;
                     }
                 }
 
-                let resolved_classes = crate::completion::type_resolution::type_hint_to_classes(
-                    &type_str,
-                    &ctx.current_class.name,
-                    ctx.all_classes,
-                    ctx.class_loader,
-                );
+                let parsed_type_str = PhpType::parse(&type_str);
+                let resolved_classes =
+                    crate::completion::type_resolution::type_hint_to_classes_typed(
+                        &parsed_type_str,
+                        &ctx.current_class.name,
+                        ctx.all_classes,
+                        ctx.class_loader,
+                    );
                 if !resolved_classes.is_empty() {
                     // When the inferred type from the callable signature
                     // is a subclass of the explicit type hint, prefer
@@ -1329,10 +1331,10 @@ fn resolve_closure_params_with_inferred(
                     // says `callable(BrandTranslation): void` where
                     // `BrandTranslation extends Model`.  The narrower
                     // inferred type gives better completion results.
-                    if let Some(inferred) = inferred_types.get(idx) {
+                    if let Some(ref pi) = parsed_inferred {
                         let inferred_resolved =
-                            crate::completion::type_resolution::type_hint_to_classes(
-                                inferred,
+                            crate::completion::type_resolution::type_hint_to_classes_typed(
+                                pi,
                                 &ctx.current_class.name,
                                 ctx.all_classes,
                                 ctx.class_loader,
@@ -1350,7 +1352,7 @@ fn resolve_closure_params_with_inferred(
                         {
                             *results = ResolvedType::from_classes_with_hint(
                                 inferred_resolved,
-                                PhpType::parse(inferred),
+                                parsed_inferred.unwrap(),
                             );
                             break;
                         }
@@ -1371,15 +1373,15 @@ fn resolve_closure_params_with_inferred(
                     ctx.var_name,
                 );
                 if let Some(ref dt) = docblock_type {
-                    let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                        dt,
+                    let parsed_dt = PhpType::parse(dt);
+                    let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                        &parsed_dt,
                         &ctx.current_class.name,
                         ctx.all_classes,
                         ctx.class_loader,
                     );
                     if !resolved.is_empty() {
-                        *results =
-                            ResolvedType::from_classes_with_hint(resolved, PhpType::parse(dt));
+                        *results = ResolvedType::from_classes_with_hint(resolved, parsed_dt);
                         break;
                     }
                 }
@@ -1394,16 +1396,16 @@ fn resolve_closure_params_with_inferred(
             }
             // 2. Fall back to the inferred type from the callable
             //    signature of the enclosing method/function call.
-            if let Some(inferred) = inferred_types.get(idx) {
-                let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                    inferred,
+            if let Some(ref pi) = parsed_inferred {
+                let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                    pi,
                     &ctx.current_class.name,
                     ctx.all_classes,
                     ctx.class_loader,
                 );
                 if !resolved.is_empty() {
                     *results =
-                        ResolvedType::from_classes_with_hint(resolved, PhpType::parse(inferred));
+                        ResolvedType::from_classes_with_hint(resolved, parsed_inferred.unwrap());
                 }
             }
             break;
