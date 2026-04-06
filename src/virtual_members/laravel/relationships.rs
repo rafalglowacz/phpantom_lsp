@@ -138,13 +138,18 @@ pub(super) enum RelationshipKind {
 /// Unqualified names (no `\`) are matched by short name only, which
 /// is the common case for body-inferred types and docblock annotations
 /// that use `use` imports.
+#[cfg(test)]
 pub(super) fn classify_relationship(return_type: &str) -> Option<RelationshipKind> {
-    let parsed = PhpType::parse(return_type);
-    let base = parsed.base_name().unwrap_or(return_type);
+    classify_relationship_typed(&PhpType::parse(return_type))
+}
+
+/// Typed variant of [`classify_relationship`] that accepts a pre-parsed
+/// [`PhpType`], avoiding a redundant parse round-trip when the caller
+/// already has a structured type.
+pub(super) fn classify_relationship_typed(return_type: &PhpType) -> Option<RelationshipKind> {
+    let base = return_type.base_name()?;
     let sname = short_name(base);
 
-    // When the base type is qualified (contains `\`), verify it belongs
-    // to the Eloquent Relations namespace.
     if base.contains('\\') && !base.starts_with(ELOQUENT_RELATIONS_NS) {
         return None;
     }
@@ -170,9 +175,15 @@ pub(super) fn classify_relationship(return_type: &str) -> Option<RelationshipKin
 /// `Some("\\App\\Models\\Post")`.
 ///
 /// Returns `None` if no generic parameters are present.
+#[cfg(test)]
 pub(super) fn extract_related_type(return_type: &str) -> Option<String> {
-    let parsed = PhpType::parse(return_type);
-    if let PhpType::Generic(_, args) = &parsed {
+    extract_related_type_typed(&PhpType::parse(return_type))
+}
+
+/// Typed variant of [`extract_related_type`] that accepts a pre-parsed
+/// [`PhpType`], avoiding a redundant parse round-trip.
+pub(super) fn extract_related_type_typed(return_type: &PhpType) -> Option<String> {
+    if let PhpType::Generic(_, args) = return_type {
         let first = args.first()?;
         let s = first.to_string();
         if s.is_empty() {
@@ -229,8 +240,8 @@ pub(crate) fn count_property_to_relationship_method(
     }
     let method_name = snake_to_camel(base);
     let method = class.methods.iter().find(|m| m.name == method_name)?;
-    let return_type = method.return_type_str()?;
-    if classify_relationship(&return_type).is_some() {
+    let return_type = method.return_type.as_ref()?;
+    if classify_relationship_typed(return_type).is_some() {
         Some(method_name)
     } else {
         None
@@ -396,9 +407,9 @@ fn extract_related_type_for_chain(
     return_type: &str,
     declaring_class: &ClassInfo,
 ) -> Option<String> {
-    // First check that it's actually a relationship type.
-    classify_relationship(return_type)?;
-    let related = extract_related_type(return_type)?;
+    let parsed = PhpType::parse(return_type);
+    classify_relationship_typed(&parsed)?;
+    let related = extract_related_type_typed(&parsed)?;
 
     // `$this` in generic args means the declaring class itself.
     if related == "$this" || related == "static" {

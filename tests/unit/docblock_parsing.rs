@@ -886,7 +886,7 @@ fn conditional_simple_class_string() {
             assert!(!negated);
             assert!(matches!(condition.as_ref(), PhpType::ClassString(_)));
             assert_eq!(**then_type, PhpType::Named("TClass".into()));
-            assert_eq!(**else_type, PhpType::Named("mixed".into()));
+            assert_eq!(**else_type, PhpType::mixed());
         }
         _ => panic!("Expected Conditional, got {:?}", cond),
     }
@@ -910,7 +910,7 @@ fn conditional_null_check() {
         } => {
             assert_eq!(param, "$guard");
             assert!(!negated);
-            assert_eq!(*condition, PhpType::Named("null".into()));
+            assert_eq!(*condition, PhpType::null());
             assert_eq!(
                 *then_type,
                 PhpType::Named("\\Illuminate\\Contracts\\Auth\\Factory".into())
@@ -955,12 +955,12 @@ fn conditional_nested() {
                 } => {
                     assert_eq!(inner_param, "$abstract");
                     assert!(!inner_negated);
-                    assert_eq!(**inner_cond, PhpType::Named("null".into()));
+                    assert_eq!(**inner_cond, PhpType::null());
                     assert_eq!(
                         **inner_then,
                         PhpType::Named("\\Illuminate\\Foundation\\Application".into())
                     );
-                    assert_eq!(**inner_else, PhpType::Named("mixed".into()));
+                    assert_eq!(**inner_else, PhpType::mixed());
                 }
                 _ => panic!("Expected nested Conditional"),
             }
@@ -1618,7 +1618,7 @@ fn conditional_resolves_with_template_default_false() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: false,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("Response".to_string())),
         else_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
     };
@@ -1640,7 +1640,7 @@ fn conditional_resolves_with_template_default_true() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: false,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("Response".to_string())),
         else_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
     };
@@ -1662,7 +1662,7 @@ fn conditional_no_template_default_falls_through() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: false,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("Response".to_string())),
         else_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
     };
@@ -1685,7 +1685,7 @@ fn conditional_negated_with_template_default() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: true,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
         else_type: Box::new(PhpType::Named("Response".to_string())),
     };

@@ -138,7 +138,7 @@ pub fn build_where_property_methods_for_class(
     let value_param = ParameterInfo {
         name: "$value".to_string(),
         is_required: true,
-        type_hint: Some(PhpType::Named("mixed".to_string())),
+        type_hint: Some(PhpType::mixed()),
         native_type_hint: None,
         description: None,
         default_value: None,

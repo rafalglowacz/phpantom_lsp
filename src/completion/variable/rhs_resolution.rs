@@ -158,7 +158,7 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
                             }
                             // Not nullable/union: bare `null` is filtered out,
                             // everything else (including `mixed`) passes through.
-                            None if rt.type_string == PhpType::Named("null".to_owned()) => None,
+                            None if rt.type_string == PhpType::null() => None,
                             None => Some(rt),
                         }
                     })
@@ -1282,15 +1282,14 @@ fn resolve_rhs_function_call<'b>(
             ctx,
         )
     {
-        let parsed_element = PhpType::parse(&element_type);
         let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
-            &parsed_element,
+            &element_type,
             current_class_name,
             all_classes,
             class_loader,
         );
         if !resolved.is_empty() {
-            return ResolvedType::from_classes_with_hint(resolved, parsed_element);
+            return ResolvedType::from_classes_with_hint(resolved, element_type);
         }
     }
 
@@ -1306,19 +1305,18 @@ fn resolve_rhs_function_call<'b>(
             ctx,
         )
     {
-        let parsed_raw = PhpType::parse(&raw_type);
         let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
-            &parsed_raw,
+            &raw_type,
             current_class_name,
             all_classes,
             class_loader,
         );
         if !resolved.is_empty() {
-            return ResolvedType::from_classes_with_hint(resolved, parsed_raw);
+            return ResolvedType::from_classes_with_hint(resolved, raw_type);
         }
         // The type string is informative (e.g. `list<User>`) but
         // doesn't resolve to a class — return as type-string-only.
-        return vec![ResolvedType::from_type_string(parsed_raw)];
+        return vec![ResolvedType::from_type_string(raw_type)];
     }
 
     if let Some(ref name) = func_name
@@ -1396,10 +1394,8 @@ fn resolve_rhs_function_call<'b>(
             //
             // When the return type is `void`, PHP yields `null` at
             // runtime — mirror that so the variable type is correct.
-            if *ret == PhpType::Named("void".into()) {
-                return vec![ResolvedType::from_type_string(PhpType::Named(
-                    "null".into(),
-                ))];
+            if *ret == PhpType::void() {
+                return vec![ResolvedType::from_type_string(PhpType::null())];
             }
             return vec![ResolvedType::from_type_string(ret.clone())];
         }
@@ -1425,10 +1421,8 @@ fn resolve_rhs_function_call<'b>(
         if !resolved.is_empty() {
             return ResolvedType::from_classes_with_hint(resolved, parsed_ret);
         }
-        if parsed_ret == PhpType::Named("void".into()) {
-            return vec![ResolvedType::from_type_string(PhpType::Named(
-                "null".into(),
-            ))];
+        if parsed_ret == PhpType::void() {
+            return vec![ResolvedType::from_type_string(PhpType::null())];
         }
         return vec![ResolvedType::from_type_string(parsed_ret)];
     }
@@ -1772,10 +1766,8 @@ fn resolve_rhs_method_call_inner<'b>(
                 Some(e) => e,
                 None => hint.clone(),
             };
-            if parsed_effective == PhpType::Named("void".into()) {
-                return vec![ResolvedType::from_type_string(PhpType::Named(
-                    "null".into(),
-                ))];
+            if parsed_effective == PhpType::void() {
+                return vec![ResolvedType::from_type_string(PhpType::null())];
             }
             return vec![ResolvedType::from_type_string(parsed_effective)];
         }
@@ -1951,10 +1943,8 @@ fn resolve_rhs_static_call(
             // that consumers reading `.type_string` (hover, raw-type
             // pipeline, null-coalesce stripping) still get the information.
             if let Some(ref hint) = ret_type_string {
-                if *hint == PhpType::Named("void".into()) {
-                    return vec![ResolvedType::from_type_string(PhpType::Named(
-                        "null".into(),
-                    ))];
+                if *hint == PhpType::void() {
+                    return vec![ResolvedType::from_type_string(PhpType::null())];
                 }
                 return vec![ResolvedType::from_type_string(hint.clone())];
             }

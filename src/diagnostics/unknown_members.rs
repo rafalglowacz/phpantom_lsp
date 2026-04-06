@@ -235,7 +235,7 @@ impl Backend {
         // The file content is immutable during a single diagnostic pass.
         // Activating the thread-local parse cache means every call to
         // `with_parsed_program(content, …)` in the resolution pipeline
-        // (resolve_variable_types, resolve_variable_type_string, etc.)
+        // (resolve_variable_types, resolve_variable_type, etc.)
         // will reuse the same parsed AST instead of re-parsing the
         // entire file from scratch.
         let _parse_guard = with_parse_cache(content);

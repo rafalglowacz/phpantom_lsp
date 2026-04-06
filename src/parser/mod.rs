@@ -697,7 +697,7 @@ impl Drop for ParseCacheGuard {
 ///
 /// ```ignore
 /// let _guard = with_parse_cache(content);
-/// // … many calls to resolve_variable_types / resolve_variable_type_string / etc.
+/// // … many calls to resolve_variable_types / resolve_variable_type / etc.
 /// // All of them hit the cache instead of re-parsing.
 /// // Guard is dropped here, clearing the cache.
 /// ```
@@ -829,14 +829,14 @@ pub(crate) fn extract_hint_type(hint: &Hint) -> PhpType {
             collect_intersection_members(intersection.right, &mut members);
             PhpType::Intersection(members)
         }
-        Hint::Null(_) => PhpType::Named("null".to_string()),
-        Hint::True(_) => PhpType::Named("true".to_string()),
-        Hint::False(_) => PhpType::Named("false".to_string()),
-        Hint::Array(_) => PhpType::Named("array".to_string()),
-        Hint::Callable(_) => PhpType::Named("callable".to_string()),
-        Hint::Static(_) => PhpType::Named("static".to_string()),
-        Hint::Self_(_) => PhpType::Named("self".to_string()),
-        Hint::Parent(_) => PhpType::Named("parent".to_string()),
+        Hint::Null(_) => PhpType::null(),
+        Hint::True(_) => PhpType::true_(),
+        Hint::False(_) => PhpType::false_(),
+        Hint::Array(_) => PhpType::array(),
+        Hint::Callable(_) => PhpType::callable(),
+        Hint::Static(_) => PhpType::static_(),
+        Hint::Self_(_) => PhpType::self_(),
+        Hint::Parent(_) => PhpType::parent_(),
         Hint::Void(i)
         | Hint::Never(i)
         | Hint::Float(i)

@@ -287,7 +287,7 @@ fn resolve_variable_type_names(
     }
 
     // Try the type-string path first (preserves generics, union types).
-    if let Some(type_str) = variable_type::resolve_variable_type_string(
+    if let Some(resolved_type) = variable_type::resolve_variable_type(
         &var_name,
         content,
         cursor_offset,
@@ -296,7 +296,7 @@ fn resolve_variable_type_names(
         class_loader,
         crate::completion::resolver::Loaders::with_function(Some(function_loader)),
     ) {
-        return PhpType::parse(&type_str).top_level_class_names();
+        return resolved_type.top_level_class_names();
     }
 
     // Fall back to ClassInfo-based resolution.

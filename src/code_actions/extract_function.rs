@@ -435,7 +435,7 @@ fn resolve_var_type(
     content: &str,
     cursor_offset: u32,
     uri: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     let ctx = backend.file_context(uri);
     let class_loader = backend.class_loader(&ctx);
     let function_loader = backend.function_loader(&ctx);
@@ -449,7 +449,7 @@ fn resolve_var_type(
 
     let current_class = find_class_at_offset(&ctx.classes, cursor_offset);
 
-    crate::hover::variable_type::resolve_variable_type_string(
+    crate::hover::variable_type::resolve_variable_type(
         var_name,
         content,
         cursor_offset,
@@ -2241,8 +2241,9 @@ impl Backend {
                 } else {
                     format!("${}", name)
                 };
-                let type_hint =
-                    resolve_var_type(self, &dollar_name, content, offset, uri).unwrap_or_default();
+                let type_hint = resolve_var_type(self, &dollar_name, content, offset, uri)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
                 // Clean up the type hint for use in a signature.
                 let cleaned = clean_type_for_signature(&type_hint);
                 (dollar_name, cleaned, type_hint)

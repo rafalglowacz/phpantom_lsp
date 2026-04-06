@@ -3128,7 +3128,7 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
                     .last()
                     .map(|rt| &rt.type_string)
                     .cloned()
-                    .unwrap_or_else(|| PhpType::Named("array".to_string()));
+                    .unwrap_or_else(PhpType::array);
                 let value_php_type = PhpType::parse(&value_type);
                 let merged = merge_shape_key(&base, &key, &value_php_type);
                 // Replace results with the enriched shape type.
@@ -3153,13 +3153,13 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
                 let value_php_type = if !resolved.is_empty() {
                     ResolvedType::types_joined(&resolved)
                 } else {
-                    PhpType::Named("mixed".to_string())
+                    PhpType::mixed()
                 };
                 let base_type = results
                     .last()
                     .map(|rt| &rt.type_string)
                     .cloned()
-                    .unwrap_or_else(|| PhpType::Named("array".to_string()));
+                    .unwrap_or_else(PhpType::array);
                 // When the base already has a shape type from prior
                 // string-keyed assignments, do not overwrite it with
                 // a generic element type — shapes take precedence.
@@ -3210,7 +3210,7 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
                 .last()
                 .map(|rt| &rt.type_string)
                 .cloned()
-                .unwrap_or_else(|| PhpType::Named("array".to_string()));
+                .unwrap_or_else(PhpType::array);
             if base_type.is_array_shape() {
                 return;
             }
@@ -3345,7 +3345,7 @@ fn merge_push_type(base: &PhpType, value_type: &PhpType) -> PhpType {
     }
 
     if elem_types.is_empty() {
-        return PhpType::Named("array".to_string());
+        return PhpType::array();
     }
 
     let elem_type = if elem_types.len() == 1 {
@@ -3407,7 +3407,7 @@ fn merge_keyed_type(base: &PhpType, key_type: &PhpType, value_type: &PhpType) ->
     }
 
     if elem_types.is_empty() {
-        return PhpType::Named("array".to_string());
+        return PhpType::array();
     }
 
     let val_type = if elem_types.len() == 1 {
@@ -3438,8 +3438,8 @@ fn merge_keyed_type(base: &PhpType, key_type: &PhpType, value_type: &PhpType) ->
 fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> PhpType {
     // Fast path: literal values.
     match index {
-        Expression::Literal(Literal::Integer(_)) => return PhpType::Named("int".to_string()),
-        Expression::Literal(Literal::String(_)) => return PhpType::Named("string".to_string()),
+        Expression::Literal(Literal::Integer(_)) => return PhpType::int(),
+        Expression::Literal(Literal::String(_)) => return PhpType::string(),
         _ => {}
     }
 
@@ -3451,16 +3451,13 @@ fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> P
         // PHP array keys are always int or string; bool and null are
         // coerced to int, float is truncated to int.
         if is_int_like_key_typed(&joined) {
-            return PhpType::Named("int".to_string());
+            return PhpType::int();
         }
         if is_string_like_key(&joined) {
-            return PhpType::Named("string".to_string());
+            return PhpType::string();
         }
         if joined.is_mixed() || is_array_key_type(&joined) {
-            return PhpType::Union(vec![
-                PhpType::Named("int".to_string()),
-                PhpType::Named("string".to_string()),
-            ]);
+            return PhpType::Union(vec![PhpType::int(), PhpType::string()]);
         }
         // For anything else (e.g. a class-string<T>, or a union),
         // return as-is if it is composed entirely of int/string
@@ -3468,10 +3465,7 @@ fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> P
         return joined;
     }
 
-    PhpType::Union(vec![
-        PhpType::Named("int".to_string()),
-        PhpType::Named("string".to_string()),
-    ])
+    PhpType::Union(vec![PhpType::int(), PhpType::string()])
 }
 
 /// Returns `true` when the [`PhpType`] represents a PHP type that
@@ -3557,20 +3551,20 @@ pub(in crate::completion) fn nth_arg_expr<'b>(
 /// Resolve the raw iterable type of an argument expression.
 ///
 /// Handles `$variable` (via docblock scanning) and delegates to
-/// `resolve_expression_type_string` for method calls, property access,
+/// `resolve_expression_type` for method calls, property access,
 /// etc.
 pub(in crate::completion) fn resolve_arg_raw_type<'b>(
     arg_expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Direct variable — scan for @var / @param annotation.
     if let Expression::Variable(Variable::Direct(dv)) = arg_expr {
         let var_text = dv.name.to_string();
         let offset = arg_expr.span().start.offset as usize;
         let from_docblock =
             docblock::find_iterable_raw_type_in_source(ctx.content, offset, &var_text);
-        if from_docblock.is_some() {
-            return from_docblock;
+        if let Some(raw) = from_docblock {
+            return Some(PhpType::parse(&raw));
         }
 
         // No docblock — walk the AST for the variable's assignment
@@ -3590,12 +3584,12 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
         if !resolved.is_empty() {
             let joined = crate::types::ResolvedType::types_joined(&resolved);
             if joined.extract_value_type(true).is_some() {
-                return Some(joined.to_string());
+                return Some(joined);
             }
         }
     }
     // Fall back to the unified pipeline (method calls, etc.)
-    super::foreach_resolution::resolve_expression_type_string(arg_expr, ctx)
+    super::foreach_resolution::resolve_expression_type(arg_expr, ctx)
 }
 
 /// Check whether a call expression passes the target variable to a

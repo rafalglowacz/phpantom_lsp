@@ -34,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Tighter `PhpType` integration.** Type information now flows through the entire pipeline as structured values instead of being serialized to strings and re-parsed at intermediate steps. This eliminates unnecessary work during indexing, completion, hover, and diagnostics, and removes a class of potential bugs from string-level type manipulation.
+- **Tighter `PhpType` integration.** Type information now flows through the entire pipeline as structured values instead of being serialized to strings and re-parsed at intermediate steps. This eliminates unnecessary work during indexing, completion, hover, and diagnostics, and removes a class of potential bugs from string-level type manipulation. Eloquent relationship classification, related-type extraction, collection replacement, variable hover, and instanceof narrowing all operate directly on structured types, removing redundant parse-stringify cycles from hot paths.
 - **Faster file parsing.** Type override resolution (`resolve_effective_type`, `should_override_type`) now accepts pre-parsed types directly, eliminating redundant stringify-parse round-trips on every method and property during indexing.
 - **Fewer false-positive diagnostics.** Variable resolution now produces the same result across completions, hover, and diagnostics, eliminating cases where diagnostics disagreed about a variable's type.
 - **`@phpstan-ignore` is never the preferred quickfix.** The "Ignore PHPStan error" code action is explicitly non-preferred, so editor keyboard shortcuts no longer accidentally apply it when another fix is available.

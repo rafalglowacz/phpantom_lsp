@@ -25,9 +25,15 @@ use super::ELOQUENT_BUILDER_FQN;
 
 /// Replace `\Illuminate\Database\Eloquent\Collection` with a custom
 /// collection class in a type string, preserving generic parameters.
+#[cfg(test)]
 pub(super) fn replace_eloquent_collection(type_str: &str, custom_collection: &str) -> String {
-    let parsed = PhpType::parse(type_str);
-    replace_collection_in_type(&parsed, custom_collection).to_string()
+    replace_eloquent_collection_typed(&PhpType::parse(type_str), custom_collection).to_string()
+}
+
+/// Typed variant of [`replace_eloquent_collection`] that operates
+/// directly on a [`PhpType`], avoiding a parse→stringify round-trip.
+pub(super) fn replace_eloquent_collection_typed(ty: &PhpType, custom_collection: &str) -> PhpType {
+    replace_collection_in_type(ty, custom_collection)
 }
 
 /// Recursively walk a `PhpType` tree and replace any `Generic` whose
@@ -179,8 +185,7 @@ pub(super) fn build_builder_forwarded_methods(
         if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.as_ref())
             && let Some(ref mut ret) = forwarded.return_type
         {
-            let ret_str = ret.to_string();
-            *ret = PhpType::parse(&replace_eloquent_collection(&ret_str, coll));
+            *ret = replace_eloquent_collection_typed(ret, coll);
         }
 
         methods.push(forwarded);

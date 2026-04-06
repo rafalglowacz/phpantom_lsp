@@ -113,7 +113,7 @@ fn remove_type_from_union(full_type: &str, unused_type: &str) -> Option<String> 
         }
         PhpType::Nullable(inner) => {
             // `?T` is equivalent to `T|null`.
-            if types_match(&unused_parsed, &PhpType::Named("null".to_string())) {
+            if types_match(&unused_parsed, &PhpType::null()) {
                 // Remove the null → just `T`.
                 Some(format!("{}", inner))
             } else if types_match(inner, &unused_parsed) {

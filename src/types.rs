@@ -1896,7 +1896,7 @@ impl ResolvedType {
     /// [`PhpType`] for any intermediate consumers that benefit from it.
     pub(crate) fn types_joined(resolved: &[ResolvedType]) -> PhpType {
         match resolved.len() {
-            0 => PhpType::Named("mixed".to_owned()),
+            0 => PhpType::mixed(),
             1 => resolved[0].type_string.clone(),
             _ => {
                 let members: Vec<PhpType> =
@@ -2221,7 +2221,7 @@ mod tests {
     #[test]
     fn method_signature_eq_detects_conditional_return() {
         let mut a = method("foo");
-        a.conditional_return = Some(PhpType::Named("int".to_string()));
+        a.conditional_return = Some(PhpType::int());
         let b = method("foo");
         assert!(!a.signature_eq(&b));
     }

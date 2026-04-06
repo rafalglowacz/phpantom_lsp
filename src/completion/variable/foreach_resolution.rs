@@ -22,22 +22,20 @@ use crate::util::short_name;
 
 use crate::completion::resolver::{Loaders, VarResolutionCtx};
 
-/// Resolve an expression's type string via the unified pipeline.
+/// Resolve an expression's structured type via the unified pipeline.
 ///
 /// Wraps `resolve_rhs_expression` + `types_joined` into a single
-/// `Option<String>` suitable for callers that previously used
-/// `extract_rhs_iterable_raw_type`.  Returns `None` when the unified
-/// pipeline produces no results or an empty type string.
-pub(in crate::completion) fn resolve_expression_type_string<'b>(
+/// `Option<PhpType>`.  Returns `None` when the unified pipeline
+/// produces no results or an empty type string.
+pub(in crate::completion) fn resolve_expression_type<'b>(
     expr: &'b mago_syntax::ast::Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let resolved = super::rhs_resolution::resolve_rhs_expression(expr, ctx);
     if resolved.is_empty() {
         return None;
     }
-    let ts = ResolvedType::types_joined(&resolved).to_string();
-    if ts.is_empty() { None } else { Some(ts) }
+    Some(ResolvedType::types_joined(&resolved))
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
@@ -166,8 +164,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
         // Skip expression-based resolution to avoid the cycle.
         None
     } else {
-        resolve_expression_type_string(foreach.expression, ctx)
-            .filter(|ts| PhpType::parse(ts).has_type_structure())
+        resolve_expression_type(foreach.expression, ctx).filter(|pt| pt.has_type_structure())
     }
     .or_else(|| {
         // Fallback 1: for simple `$variable` expressions, search backward
@@ -183,6 +180,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
 
         let foreach_offset = foreach.foreach.span().start.offset as usize;
         docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
+            .map(|s| PhpType::parse(&s))
     })
     .or_else(|| {
         // Fallback 2: for simple `$variable` expressions, resolve the
@@ -227,7 +225,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
             if !joined.has_type_structure() {
                 None
             } else {
-                Some(joined.to_string())
+                Some(joined)
             }
         }
     });
@@ -237,24 +235,17 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     // `@phpstan-type UserList array<int, User>`), expand it so that
     // `PhpType::extract_value_type` can see the underlying generic type.
     let raw_type = raw_type.map(|rt| {
+        let rt_str = rt.to_string();
         crate::completion::type_resolution::resolve_type_alias(
-            &rt,
+            &rt_str,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,
         )
-        .map(|t| t.to_string())
         .unwrap_or(rt)
     });
 
-    // Extract the generic element type (e.g. `list<User>` → `User`).
-    // Parse once so the parsed PhpType is available for both the
-    // extract_value_type check and the fallback class resolution.
-    let parsed_raw = raw_type
-        .as_ref()
-        .map(|rt| crate::php_type::PhpType::parse(rt));
-
-    if let Some(ref parsed) = parsed_raw
+    if let Some(ref parsed) = raw_type
         && let Some(element_type) = parsed.extract_value_type(false)
     {
         // Use `extract_value_type(false)` to include non-class element
@@ -278,7 +269,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     // Also handles the case where a method/property returns a class
     // name like `PaymentOptionLocaleCollection` without generic syntax
     // in the return type string.
-    let iterable_classes = if let Some(ref parsed) = parsed_raw {
+    let iterable_classes = if let Some(ref parsed) = raw_type {
         // raw_type is a class name like "PaymentOptionLocaleCollection"
         // (PhpType::extract_value_type returned None above).
         crate::completion::type_resolution::type_hint_to_classes_typed(
@@ -347,8 +338,8 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     // Try to resolve the iterable type from the foreach expression
     // via the unified pipeline.  Same bare-class-name filter as the
     // value-type path above.
-    let raw_type = resolve_expression_type_string(foreach.expression, ctx)
-        .filter(|ts| PhpType::parse(ts).has_type_structure())
+    let raw_type = resolve_expression_type(foreach.expression, ctx)
+        .filter(|pt| pt.has_type_structure())
         .or_else(|| {
             // Fallback 1: for simple `$variable` expressions, search backward
             // from the foreach for @var or @param annotations.
@@ -363,6 +354,7 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
 
             let foreach_offset = foreach.foreach.span().start.offset as usize;
             docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
+                .map(|s| PhpType::parse(&s))
         })
         .or_else(|| {
             // Fallback 2: for simple `$variable` expressions, resolve the
@@ -400,7 +392,7 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
                 if !joined.has_type_structure() {
                     None
                 } else {
-                    Some(joined.to_string())
+                    Some(joined)
                 }
             }
         });
@@ -411,24 +403,17 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     // expand it so that `PhpType::extract_key_type` can see the underlying
     // generic type.
     let raw_type = raw_type.map(|rt| {
+        let rt_str = rt.to_string();
         crate::completion::type_resolution::resolve_type_alias(
-            &rt,
+            &rt_str,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,
         )
-        .map(|t| t.to_string())
         .unwrap_or(rt)
     });
 
-    // Extract the generic key type (e.g. `array<Request, Response>` → `Request`).
-    // Parse once so the parsed PhpType is available for both the
-    // extract_key_type check and the fallback class resolution.
-    let parsed_raw = raw_type
-        .as_ref()
-        .map(|rt| crate::php_type::PhpType::parse(rt));
-
-    if let Some(ref parsed) = parsed_raw
+    if let Some(ref parsed) = raw_type
         && let Some(key_type) = parsed.extract_key_type(true)
     {
         push_foreach_resolved_types_typed(key_type, ctx, results, conditional);
@@ -437,7 +422,7 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
 
     // ── Fallback: resolve the iterated expression to ClassInfo and
     //    extract the key type from its generic annotations ───────────
-    let iterable_classes = if let Some(ref parsed) = parsed_raw {
+    let iterable_classes = if let Some(ref parsed) = raw_type {
         crate::completion::type_resolution::type_hint_to_classes_typed(
             parsed,
             &ctx.current_class.name,
@@ -824,7 +809,7 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
     }
 
     // ── 4. Try to resolve the iterable type from the RHS ────────────
-    let raw_type: Option<String> = resolve_expression_type_string(assignment.rhs, ctx);
+    let raw_type: Option<PhpType> = resolve_expression_type(assignment.rhs, ctx);
 
     // ── Expand type aliases before shape/generic extraction ─────────
     // Same as the foreach value/key paths: when the raw type is a type
@@ -832,20 +817,20 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
     // that `extract_array_shape_value_type` and
     // `PhpType::extract_value_type` can see the underlying type.
     let raw_type = raw_type.map(|rt| {
+        let rt_str = rt.to_string();
         crate::completion::type_resolution::resolve_type_alias(
-            &rt,
+            &rt_str,
             current_class_name,
             all_classes,
             class_loader,
         )
-        .map(|t| t.to_string())
         .unwrap_or(rt)
     });
 
     if let Some(ref raw) = raw_type {
         // First try array shape lookup with the destructured key.
         if let Some(ref key) = shape_key
-            && let Some(entry_type) = crate::php_type::PhpType::parse(raw).shape_value_type(key)
+            && let Some(entry_type) = raw.shape_value_type(key)
         {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 entry_type,
@@ -865,8 +850,7 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
         }
 
         // Fall back to generic element type extraction.
-        let raw_parsed = crate::php_type::PhpType::parse(raw);
-        if let Some(element_type) = raw_parsed.extract_value_type(true) {
+        if let Some(element_type) = raw.extract_value_type(true) {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 element_type,
                 current_class_name,

@@ -99,7 +99,7 @@ pub fn apply_laravel_patches(class: &mut ClassInfo, fqn: &str) {
 /// consumer of the resolved Builder (completion, diagnostics, hover)
 /// automatically gets correct chain continuation through unknown methods.
 fn patch_eloquent_builder_call_return_type(class: &mut ClassInfo) {
-    let static_type = PhpType::Named("static".to_string());
+    let static_type = PhpType::static_();
     for method in class.methods.make_mut().iter_mut() {
         if (method.name == "__call" || method.name == "__callStatic")
             && method.return_type.as_ref().is_some_and(|rt| rt.is_mixed())
@@ -232,10 +232,7 @@ fn is_likely_template_param(ty: &PhpType) -> bool {
 fn patch_db_select_return_types(class: &mut ClassInfo) {
     let array_of_std = PhpType::Generic(
         "array".to_string(),
-        vec![
-            PhpType::Named("int".to_string()),
-            PhpType::Named("stdClass".to_string()),
-        ],
+        vec![PhpType::int(), PhpType::Named("stdClass".to_string())],
     );
     let std_or_null = PhpType::Nullable(Box::new(PhpType::Named("stdClass".to_string())));
 

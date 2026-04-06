@@ -229,13 +229,15 @@ fn shorten_type_string_parenthesized_callable_union() {
 
 #[test]
 fn variable_hover_body_single_type() {
-    let body = build_variable_hover_body("$user", "User", &|_| None, None);
+    let ty = PhpType::parse("User");
+    let body = build_variable_hover_body("$user", &ty, &|_| None, None);
     assert_eq!(body, "```php\n<?php\n$user = User\n```");
 }
 
 #[test]
 fn variable_hover_body_union_splits_into_blocks() {
-    let body = build_variable_hover_body("$ambiguous", "Lamp|Faucet", &|_| None, None);
+    let ty = PhpType::parse("Lamp|Faucet");
+    let body = build_variable_hover_body("$ambiguous", &ty, &|_| None, None);
     assert!(body.contains("$ambiguous = Lamp"), "got: {}", body);
     assert!(body.contains("---"), "got: {}", body);
     assert!(body.contains("$ambiguous = Faucet"), "got: {}", body);
@@ -243,8 +245,8 @@ fn variable_hover_body_union_splits_into_blocks() {
 
 #[test]
 fn variable_hover_body_union_with_template_line() {
-    let body =
-        build_variable_hover_body("$item", "Lamp|Faucet", &|_| None, Some("**template** `T`"));
+    let ty = PhpType::parse("Lamp|Faucet");
+    let body = build_variable_hover_body("$item", &ty, &|_| None, Some("**template** `T`"));
     assert!(body.starts_with("**template** `T`\n\n"));
     assert!(body.contains("$item = Lamp"));
     assert!(body.contains("---"));
@@ -254,14 +256,16 @@ fn variable_hover_body_union_with_template_line() {
 #[test]
 fn variable_hover_body_generic_union_not_split() {
     // A single generic type is not split even though it contains `|` inside `<>`.
-    let body = build_variable_hover_body("$gen", "Generator<int, Foo>", &|_| None, None);
+    let ty = PhpType::parse("Generator<int, Foo>");
+    let body = build_variable_hover_body("$gen", &ty, &|_| None, None);
     assert!(!body.contains("---"), "got: {}", body);
     assert!(body.contains("Generator<int, Foo>"), "got: {}", body);
 }
 
 #[test]
 fn variable_hover_body_three_way_union() {
-    let body = build_variable_hover_body("$x", "A|B|C", &|_| None, None);
+    let ty = PhpType::parse("A|B|C");
+    let body = build_variable_hover_body("$x", &ty, &|_| None, None);
     let blocks: Vec<&str> = body.split("\n\n---\n\n").collect();
     assert_eq!(blocks.len(), 3);
     assert!(blocks[0].contains("$x = A"));
@@ -272,14 +276,16 @@ fn variable_hover_body_three_way_union() {
 #[test]
 fn variable_hover_body_nullable_class_not_split() {
     // `Foo|null` has only one class-like type, so it should stay in a single block.
-    let body = build_variable_hover_body("$x", "Foo|null", &|_| None, None);
+    let ty = PhpType::parse("Foo|null");
+    let body = build_variable_hover_body("$x", &ty, &|_| None, None);
     assert!(!body.contains("---"), "Foo|null should not split: {}", body);
     assert!(body.contains("$x = Foo|null"), "got: {}", body);
 }
 
 #[test]
 fn variable_hover_body_scalar_not_split() {
-    let body = build_variable_hover_body("$val", "string", &|_| None, None);
+    let ty = PhpType::parse("string");
+    let body = build_variable_hover_body("$val", &ty, &|_| None, None);
     assert!(!body.contains("---"));
     assert!(body.contains("$val = string"));
 }

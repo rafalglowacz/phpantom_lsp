@@ -34,6 +34,32 @@ use crate::types::{AssertionKind, ClassInfo, ParameterInfo, ResolvedType, TypeAs
 use super::conditional::extract_class_string_from_expr;
 use crate::completion::resolver::VarResolutionCtx;
 
+/// Resolve a list of class name strings into a deduplicated `Vec<ClassInfo>`.
+///
+/// This is a shared helper for the compound instanceof/assert narrowing
+/// patterns that produce a union of classes from multiple branches.
+/// Uses `PhpType::Named` directly instead of `PhpType::parse` since
+/// the class names are always simple identifiers extracted from
+/// instanceof expressions.
+fn resolve_class_names_to_union(classes: &[String], ctx: &VarResolutionCtx<'_>) -> Vec<ClassInfo> {
+    let mut union = Vec::new();
+    for cls_name in classes {
+        let ty = PhpType::Named(cls_name.clone());
+        let resolved = super::resolution::type_hint_to_classes_typed(
+            &ty,
+            &ctx.current_class.name,
+            ctx.all_classes,
+            ctx.class_loader,
+        );
+        for cls in resolved {
+            if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
+                union.push(cls);
+            }
+        }
+    }
+    union
+}
+
 /// Convert an AST expression to a subject key string for narrowing comparison.
 ///
 /// Handles:
@@ -94,21 +120,7 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
     if let Some(classes) = try_extract_compound_or_instanceof(condition, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let parsed = PhpType::parse(cls_name);
-            let resolved = super::resolution::type_hint_to_classes_typed(
-                &parsed,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -123,21 +135,7 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
     if let Some(classes) = try_extract_compound_and_instanceof(condition, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let parsed = PhpType::parse(cls_name);
-            let resolved = super::resolution::type_hint_to_classes_typed(
-                &parsed,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -1111,21 +1109,7 @@ pub(in crate::completion) fn try_apply_assert_instanceof_narrowing(
     if let Some(classes) = try_extract_assert_compound_or_instanceof(expr, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let parsed = PhpType::parse(cls_name);
-            let resolved = super::resolution::type_hint_to_classes_typed(
-                &parsed,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -1816,21 +1800,7 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
         try_extract_compound_negated_and_instanceof(if_stmt.condition, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let parsed = PhpType::parse(cls_name);
-            let resolved = super::resolution::type_hint_to_classes_typed(
-                &parsed,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -2163,9 +2133,7 @@ fn resolve_in_array_element_type(
 ) -> Option<String> {
     let raw_type =
         crate::completion::variable::resolution::resolve_arg_raw_type(haystack_expr, ctx)?;
-    crate::php_type::PhpType::parse(&raw_type)
-        .extract_element_type()
-        .map(|t| t.to_string())
+    raw_type.extract_element_type().map(|t| t.to_string())
 }
 
 /// Apply `in_array($var, $haystack, true)` narrowing when the call
@@ -2601,14 +2569,14 @@ enum TypeGuardKind {
 /// PHP type it asserts.
 fn guard_kind_to_narrowed_type(kind: TypeGuardKind) -> PhpType {
     match kind {
-        TypeGuardKind::Array => PhpType::Named("array".to_string()),
-        TypeGuardKind::String => PhpType::Named("string".to_string()),
-        TypeGuardKind::Int => PhpType::Named("int".to_string()),
-        TypeGuardKind::Float => PhpType::Named("float".to_string()),
-        TypeGuardKind::Bool => PhpType::Named("bool".to_string()),
-        TypeGuardKind::Object => PhpType::Named("object".to_string()),
-        TypeGuardKind::Numeric => PhpType::Named("numeric".to_string()),
-        TypeGuardKind::Callable => PhpType::Named("callable".to_string()),
+        TypeGuardKind::Array => PhpType::array(),
+        TypeGuardKind::String => PhpType::string(),
+        TypeGuardKind::Int => PhpType::int(),
+        TypeGuardKind::Float => PhpType::float(),
+        TypeGuardKind::Bool => PhpType::bool(),
+        TypeGuardKind::Object => PhpType::object(),
+        TypeGuardKind::Numeric => PhpType::numeric(),
+        TypeGuardKind::Callable => PhpType::callable(),
     }
 }
 
@@ -2827,14 +2795,14 @@ fn filter_type_by_guard(ty: &PhpType, kind: TypeGuardKind, keep_matching: bool) 
             // so we keep only the inner type (if it matches) or only
             // null (if it doesn't).
             let inner_matches = type_matches_guard(inner, kind);
-            let null_matches = type_matches_guard(&PhpType::Named("null".to_string()), kind);
+            let null_matches = type_matches_guard(&PhpType::null(), kind);
             match (
                 inner_matches == keep_matching,
                 null_matches == keep_matching,
             ) {
                 (true, true) => None, // keep both → no change
                 (true, false) => Some(inner.as_ref().clone()),
-                (false, true) => Some(PhpType::Named("null".to_string())),
+                (false, true) => Some(PhpType::null()),
                 (false, false) => Some(PhpType::Named("__empty".to_string())),
             }
         }

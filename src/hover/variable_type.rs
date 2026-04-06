@@ -1,14 +1,15 @@
-//! Variable type string resolution for hover.
+//! Variable type resolution for hover.
 //!
 //! Unlike the completion pipeline (which resolves variables to
-//! `Vec<ClassInfo>`), hover needs the **full type string** so that
+//! `Vec<ClassInfo>`), hover needs the **full type** so that
 //! generic parameters and scalar types are preserved.  For example,
 //! a parameter typed as `\Generator<int, Pencil>` should display
 //! exactly that, not just `Generator`.
 //!
-//! The entry point is [`resolve_variable_type_string`], which walks
+//! The entry point is [`resolve_variable_type`], which walks
 //! the AST to find the variable's definition context and returns the
-//! effective type string (docblock overriding native where applicable).
+//! effective type as a [`PhpType`] (docblock overriding native where
+//! applicable).
 
 use std::sync::Arc;
 
@@ -67,17 +68,17 @@ fn is_cursor_in_self_assignment_rhs(content: &str, cursor_offset: usize, var_nam
     false
 }
 
-/// Resolve the type string for a variable at `cursor_offset` for hover.
+/// Resolve the type for a variable at `cursor_offset` for hover.
 ///
 /// Tries, in order:
 /// 1. Inline `/** @var Type $var */` docblock override
 /// 2. Parameter type (native + `@param` → effective)
 /// 3. Foreach value/key binding (iterable element type from `@param`/`@var`)
-/// 4. Catch variable (catch clause hint string)
+/// 4. Catch variable (catch clause hint)
 /// 5. Assignment type via [`resolve_variable_types_branch_aware`]
 ///
 /// Returns `None` when no type information could be determined.
-pub(crate) fn resolve_variable_type_string(
+pub(crate) fn resolve_variable_type(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
@@ -85,7 +86,7 @@ pub(crate) fn resolve_variable_type_string(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // 1. Inline @var override: `/** @var Type $var */`
     //
     // Skip when the cursor is inside the RHS of an assignment whose
@@ -97,7 +98,7 @@ pub(crate) fn resolve_variable_type_string(
         docblock::find_var_raw_type_in_source(content, cursor_offset as usize, var_name)
         && !is_cursor_in_self_assignment_rhs(content, cursor_offset as usize, var_name)
     {
-        return Some(var_type);
+        return Some(PhpType::parse(&var_type));
     }
 
     // 2–4. AST-based: parameter, foreach, catch
@@ -107,8 +108,8 @@ pub(crate) fn resolve_variable_type_string(
         class_loader,
         content,
     };
-    let ast_result: Option<String> =
-        with_parsed_program(content, "resolve_variable_type_string", |program, _| {
+    let ast_result: Option<PhpType> =
+        with_parsed_program(content, "resolve_variable_type", |program, _| {
             find_variable_type_in_statements(
                 program.statements.iter(),
                 var_name,
@@ -133,7 +134,7 @@ pub(crate) fn resolve_variable_type_string(
                 &dummy_class
             }
         };
-        let foreach_result: Option<String> =
+        let foreach_result: Option<PhpType> =
             with_parsed_program(content, "resolve_foreach_via_class", |program, _| {
                 resolve_foreach_type_via_class(
                     &program.statements.iter().collect::<Vec<_>>(),
@@ -174,8 +175,9 @@ pub(crate) fn resolve_variable_type_string(
         loaders,
     );
     if !resolved.is_empty() {
-        let joined = ResolvedType::types_joined(&resolved).to_string();
-        if !joined.is_empty() {
+        let joined = ResolvedType::types_joined(&resolved);
+        let joined_str = joined.to_string();
+        if !joined_str.is_empty() {
             // When the AST-based result (step 2–4) carries richer type
             // information than the unified pipeline (e.g. the docblock
             // says `Generator<int, Pencil>` but the pipeline only
@@ -184,16 +186,16 @@ pub(crate) fn resolve_variable_type_string(
             // `@var` type string including generic parameters, while
             // the unified pipeline resolves to ClassInfo objects that
             // may lose that detail.
-            if let Some(ref ast) = ast_result
-                && ast.len() > joined.len()
-                && ast.starts_with(&joined)
-            {
-                // Don't prefer the AST result when the only difference
-                // is a trailing `|null` — the unified pipeline may have
-                // stripped it via guard clause narrowing.
-                let suffix = &ast[joined.len()..];
-                if suffix != "|null" {
-                    return ast_result;
+            if let Some(ref ast) = ast_result {
+                let ast_str = ast.to_string();
+                if ast_str.len() > joined_str.len() && ast_str.starts_with(&joined_str) {
+                    // Don't prefer the AST result when the only difference
+                    // is a trailing `|null` — the unified pipeline may have
+                    // stripped it via guard clause narrowing.
+                    let suffix = &ast_str[joined_str.len()..];
+                    if suffix != "|null" {
+                        return ast_result;
+                    }
                 }
             }
             return Some(joined);
@@ -212,7 +214,7 @@ fn find_variable_type_in_statements<'a, I>(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String>
+) -> Option<PhpType>
 where
     I: Iterator<Item = &'a Statement<'a>>,
 {
@@ -352,7 +354,7 @@ fn find_type_in_class_members<'a, I>(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String>
+) -> Option<PhpType>
 where
     I: Iterator<Item = &'a ClassLikeMember<'a>>,
 {
@@ -399,7 +401,7 @@ where
     None
 }
 
-/// Extract the effective type string for a parameter matching `var_name`.
+/// Extract the effective type for a parameter matching `var_name`.
 ///
 /// Uses the native type hint and `@param` docblock type, preferring the
 /// docblock when it is more specific (via `resolve_effective_type`).
@@ -409,7 +411,7 @@ fn find_type_in_params(
     content: &str,
     _cursor_offset: u32,
     method_start_offset: usize,
-) -> Option<String> {
+) -> Option<PhpType> {
     for param in parameter_list.parameters.iter() {
         let pname = param.variable.name.to_string();
         if pname != var_name {
@@ -431,27 +433,26 @@ fn find_type_in_params(
 
         let doc_parsed = docblock_type.as_ref().map(|s| PhpType::parse(s));
         let effective =
-            docblock::resolve_effective_type_typed(native_parsed.as_ref(), doc_parsed.as_ref())
-                .map(|t| t.to_string());
+            docblock::resolve_effective_type_typed(native_parsed.as_ref(), doc_parsed.as_ref());
 
         if effective.is_some() {
             return effective;
         }
 
         // Return native type if no effective type
-        return native_parsed.as_ref().map(|t| t.to_string());
+        return native_parsed;
     }
     None
 }
 
-/// Walk body statements looking for foreach/catch/closure type strings.
+/// Walk body statements looking for foreach/catch/closure types.
 fn find_type_in_body_stmts(
     stmts: &[&Statement<'_>],
     var_name: &str,
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for &stmt in stmts {
         let stmt_span = stmt.span();
         if cursor_offset < stmt_span.start.offset || cursor_offset > stmt_span.end.offset {
@@ -481,8 +482,8 @@ fn find_type_in_body_stmts(
     None
 }
 
-/// Extract the catch clause type hint string for a matching variable.
-fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) -> Option<String> {
+/// Extract the catch clause type hint for a matching variable.
+fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) -> Option<PhpType> {
     match stmt {
         Statement::Try(try_stmt) => {
             for catch in try_stmt.catch_clauses.iter() {
@@ -492,7 +493,7 @@ fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) 
                     let var_start = var.span.start.offset;
                     let var_end = var.span.end.offset;
                     if cursor_offset >= var_start && cursor_offset < var_end {
-                        return Some(extract_hint_type(&catch.hint).to_string());
+                        return Some(extract_hint_type(&catch.hint));
                     }
                 }
                 // Recurse into catch block
@@ -599,7 +600,7 @@ fn find_type_in_foreach(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Check if the cursor is on the foreach value or key variable, or inside the body
     let foreach_start = foreach.foreach.span().start.offset;
     let body_end = foreach.body.span().end.offset;
@@ -672,12 +673,12 @@ fn find_type_in_foreach(
             // `User[]` → `User`
             let parsed = crate::php_type::PhpType::parse(rt);
             if let Some(element_type) = parsed.extract_value_type(true) {
-                return Some(element_type.to_string());
+                return Some(element_type.clone());
             }
         } else if is_key_var {
             let parsed = crate::php_type::PhpType::parse(rt);
             if let Some(key_type) = parsed.extract_key_type(true) {
-                return Some(key_type.to_string());
+                return Some(key_type.clone());
             }
         }
     }
@@ -733,7 +734,7 @@ fn resolve_foreach_type_via_class(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for stmt in stmts {
         match stmt {
             Statement::Class(class) => {
@@ -798,7 +799,7 @@ fn resolve_foreach_in_members<'a>(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for member in members {
         if let ClassLikeMember::Method(method) = member
             && let MethodBody::Concrete(block) = &method.body
@@ -832,7 +833,7 @@ fn resolve_foreach_in_body(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for stmt in stmts {
         if let Statement::Foreach(foreach) = stmt {
             let stmt_span = stmt.span();
@@ -893,7 +894,7 @@ fn resolve_foreach_binding_via_class(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let foreach_start = foreach.foreach.span().start.offset;
     let body_end = foreach.body.span().end.offset;
     if cursor_offset < foreach_start || cursor_offset > body_end {
@@ -1030,15 +1031,15 @@ fn extract_iterable_type_from_merged(
     class: &ClassInfo,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     is_key: bool,
-) -> Option<String> {
+) -> Option<PhpType> {
     // 1. Direct check on implements_generics.
     for (name, args) in &class.implements_generics {
         let s = short_name(name);
         if ITERABLE_IFACE_NAMES.contains(&s) {
             if is_key && args.len() >= 2 {
-                return Some(args[0].to_string());
+                return Some(args[0].clone());
             } else if !is_key && !args.is_empty() {
-                return Some(args.last().unwrap().to_string());
+                return Some(args.last().unwrap().clone());
             }
         }
     }
@@ -1053,9 +1054,9 @@ fn extract_iterable_type_from_merged(
             && !args.is_empty()
         {
             if is_key && args.len() >= 2 {
-                return Some(args[0].to_string());
+                return Some(args[0].clone());
             } else if !is_key {
-                return Some(args.last().unwrap().to_string());
+                return Some(args.last().unwrap().clone());
             }
         }
     }
@@ -1073,9 +1074,9 @@ fn extract_iterable_type_from_merged(
                 .unwrap_or(false);
         if parent_is_iterable {
             if is_key && args.len() >= 2 {
-                return Some(args[0].to_string());
+                return Some(args[0].clone());
             } else if !is_key && !args.is_empty() {
-                return Some(args.last().unwrap().to_string());
+                return Some(args.last().unwrap().clone());
             }
         }
     }
@@ -1149,7 +1150,7 @@ fn find_type_in_closure_stmt(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match stmt {
         Statement::Expression(expr_stmt) => find_type_in_closure_expr(
             expr_stmt.expression,
@@ -1239,7 +1240,7 @@ fn find_type_in_closure_expr(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match expr {
         Expression::Closure(closure) => {
             let closure_span = closure.span();
@@ -1313,7 +1314,7 @@ fn find_type_in_closure_call(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let arg_list = call.get_argument_list();
 
     for (arg_idx, arg) in arg_list.arguments.iter().enumerate() {
@@ -1412,7 +1413,7 @@ fn try_infer_more_specific_type_from_call(
     param_idx: usize,
     explicit_type: &str,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let inferred_types = infer_callable_param_types_for_call(call, arg_idx, closure_ctx)?;
     let inferred = inferred_types.get(param_idx)?;
     if inferred.is_empty() {
@@ -1466,7 +1467,7 @@ fn try_infer_more_specific_type_from_call(
             .all(|(a, b)| a.name == b.name);
 
     if all_subtypes && !is_same {
-        Some(inferred.clone())
+        Some(PhpType::parse(inferred))
     } else {
         None
     }

@@ -98,8 +98,8 @@ pub(crate) use relationships::count_property_to_relationship_method;
 pub use relationships::infer_relationship_from_body;
 pub(crate) use relationships::{RELATION_QUERY_METHODS, resolve_relation_chain};
 use relationships::{
-    RelationshipKind, build_property_type, classify_relationship, count_property_name,
-    extract_related_type,
+    RelationshipKind, build_property_type, classify_relationship_typed, count_property_name,
+    extract_related_type_typed,
 };
 
 pub use scopes::build_scope_methods_for_builder;
@@ -681,18 +681,17 @@ impl VirtualMemberProvider for LaravelModelProvider {
             }
 
             // ── Relationship properties ─────────────────────────────
-            let return_type_str = method.return_type_str();
-            let return_type = match return_type_str.as_deref() {
+            let return_type = match method.return_type.as_ref() {
                 Some(rt) => rt,
                 None => continue,
             };
 
-            let kind = match classify_relationship(return_type) {
+            let kind = match classify_relationship_typed(return_type) {
                 Some(k) => k,
                 None => continue,
             };
 
-            let related_type = extract_related_type(return_type);
+            let related_type = extract_related_type_typed(return_type);
 
             // For collection relationships, use the *related* model's
             // custom_collection, not the owning model's.  For example,
@@ -730,12 +729,11 @@ impl VirtualMemberProvider for LaravelModelProvider {
         // property with that name already exists (e.g. from an explicit
         // `@property` tag).
         for method in &class.methods {
-            let return_type_str = method.return_type_str();
-            let return_type = match return_type_str.as_deref() {
+            let return_type = match method.return_type.as_ref() {
                 Some(rt) => rt,
                 None => continue,
             };
-            if classify_relationship(return_type).is_none() {
+            if classify_relationship_typed(return_type).is_none() {
                 continue;
             }
             let count_name = count_property_name(&method.name);

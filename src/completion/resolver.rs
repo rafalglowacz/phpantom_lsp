@@ -1042,7 +1042,7 @@ fn resolve_call_raw_return_type(
 ///
 /// Every `SubjectOutcome` **must** be derived from the same resolution
 /// pass that completion and hover use.  Re-resolving a variable
-/// through a secondary helper (e.g. `resolve_variable_type_string`)
+/// through a secondary helper (e.g. `resolve_variable_type`)
 /// bypasses narrowing (instanceof, assert, ternary, `&&`) and
 /// produces false positives.  See [`resolve_subject_outcome`] for
 /// how this is enforced for each subject variant.
@@ -1051,9 +1051,9 @@ pub(crate) enum SubjectOutcome {
     /// Subject resolved to one or more classes.
     Resolved(Vec<Arc<ClassInfo>>),
     /// Subject resolved to a scalar type — member access is always a
-    /// runtime crash.  The string is the display name of the scalar
-    /// type (e.g. `"int"`, `"string"`, `"bool|int"`).
-    Scalar(String),
+    /// runtime crash.  The `PhpType` is the resolved scalar type
+    /// (e.g. `int`, `string`, `bool|int`) with null stripped.
+    Scalar(PhpType),
     /// Subject resolved to a class name that couldn't be loaded.
     UnresolvableClass(String),
     /// Subject type could not be resolved — no class information
@@ -1118,10 +1118,8 @@ pub(crate) fn resolve_subject_outcome(
 
         // Pure scalar — member access is a runtime crash.
         if joined.all_members_primitive_scalar() {
-            let display = joined
-                .non_null_type()
-                .map_or_else(|| joined.to_string(), |t| t.to_string());
-            return SubjectOutcome::Scalar(display);
+            let scalar = joined.non_null_type().unwrap_or(joined);
+            return SubjectOutcome::Scalar(scalar);
         }
 
         // stdClass / object — synthetic resolution.
@@ -1175,10 +1173,8 @@ pub(crate) fn resolve_subject_outcome(
                 resolve_class_fully_maybe_cached(cls, ctx.class_loader, ctx.resolved_class_cache);
             if let Some(parsed) = resolve_property_type_hint(&merged, property, ctx.class_loader) {
                 if parsed.all_members_primitive_scalar() {
-                    let display = parsed
-                        .non_null_type()
-                        .map_or_else(|| parsed.to_string(), |t| t.to_string());
-                    return SubjectOutcome::Scalar(display);
+                    let scalar = parsed.non_null_type().unwrap_or(parsed);
+                    return SubjectOutcome::Scalar(scalar);
                 }
                 return SubjectOutcome::Untyped;
             }
@@ -1188,7 +1184,7 @@ pub(crate) fn resolve_subject_outcome(
     // For bare variables, try the hover fallback for UnresolvableClass
     // detection only.
     if let SubjectExpr::Variable(var_name) = &expr
-        && let Some(raw_type) = crate::hover::variable_type::resolve_variable_type_string(
+        && let Some(resolved_type) = crate::hover::variable_type::resolve_variable_type(
             var_name,
             ctx.content,
             ctx.cursor_offset,
@@ -1197,8 +1193,7 @@ pub(crate) fn resolve_subject_outcome(
             ctx.class_loader,
             Loaders::with_function(ctx.function_loader),
         )
-        && let Some(unresolved) =
-            check_unresolvable_class_name(&PhpType::parse(&raw_type), ctx.class_loader)
+        && let Some(unresolved) = check_unresolvable_class_name(&resolved_type, ctx.class_loader)
     {
         return SubjectOutcome::UnresolvableClass(unresolved);
     }
@@ -1214,7 +1209,7 @@ fn resolve_call_scalar_return(
     callee: &SubjectExpr,
     access_kind: AccessKind,
     ctx: &ResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match callee {
         // Instance method call: $obj->getAge()
         SubjectExpr::MethodCall { base, method } => {
@@ -1232,10 +1227,8 @@ fn resolve_call_scalar_return(
                     && let Some(ref hint) = m.return_type
                     && hint.all_members_primitive_scalar()
                 {
-                    let display = hint
-                        .non_null_type()
-                        .map_or_else(|| hint.to_string(), |t| t.to_string());
-                    return Some(display);
+                    let scalar = hint.non_null_type().unwrap_or_else(|| hint.clone());
+                    return Some(scalar);
                 }
             }
             None
@@ -1247,10 +1240,8 @@ fn resolve_call_scalar_return(
                 && let Some(ref hint) = func_info.return_type
                 && hint.all_members_primitive_scalar()
             {
-                let display = hint
-                    .non_null_type()
-                    .map_or_else(|| hint.to_string(), |t| t.to_string());
-                return Some(display);
+                let scalar = hint.non_null_type().unwrap_or_else(|| hint.clone());
+                return Some(scalar);
             }
             None
         }
@@ -1270,10 +1261,8 @@ fn resolve_call_scalar_return(
                     && let Some(ref hint) = m.return_type
                     && hint.all_members_primitive_scalar()
                 {
-                    let display = hint
-                        .non_null_type()
-                        .map_or_else(|| hint.to_string(), |t| t.to_string());
-                    return Some(display);
+                    let scalar = hint.non_null_type().unwrap_or_else(|| hint.clone());
+                    return Some(scalar);
                 }
             }
             None

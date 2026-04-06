@@ -21,7 +21,7 @@ use super::helpers::extends_eloquent_model;
 fn default_scope_return_type() -> String {
     PhpType::Generic(
         "Illuminate\\Database\\Eloquent\\Builder".to_string(),
-        vec![PhpType::Named("static".to_string())],
+        vec![PhpType::static_()],
     )
     .to_string()
 }

@@ -927,7 +927,7 @@ impl Backend {
         // Try the type-string path first.  This preserves generic
         // parameters (e.g. `Generator<int, Pencil>`) and scalar types
         // (e.g. `int`) that the ClassInfo-based path would lose.
-        if let Some(type_str) = variable_type::resolve_variable_type_string(
+        if let Some(resolved_type) = variable_type::resolve_variable_type(
             &var_name,
             content,
             cursor_offset,
@@ -939,11 +939,12 @@ impl Backend {
             // When the type is a template parameter, show its variance
             // and bound (e.g. "**template-covariant** `TNode` of `AstNode`")
             // above the code block so the user sees the constraint.
+            let type_str = resolved_type.to_string();
             let template_line = self.find_template_info_for_type(&type_str, uri, cursor_offset);
 
             let hover_body = build_variable_hover_body(
                 &var_name,
-                &type_str,
+                &resolved_type,
                 &class_loader,
                 template_line.as_deref(),
             );
@@ -969,7 +970,8 @@ impl Backend {
 
         let type_str = ResolvedType::types_joined(&resolved).to_string();
 
-        let hover_body = build_variable_hover_body(&var_name, &type_str, &class_loader, None);
+        let parsed = PhpType::parse(&type_str);
+        let hover_body = build_variable_hover_body(&var_name, &parsed, &class_loader, None);
         Some(make_hover(hover_body))
     }
 
@@ -1444,12 +1446,11 @@ impl Backend {
 /// markdown horizontal rule so the editor renders a visible divider.
 fn build_variable_hover_body(
     var_name: &str,
-    type_str: &str,
+    ty: &PhpType,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     template_line: Option<&str>,
 ) -> String {
-    let parsed = PhpType::parse(type_str);
-    let members = parsed.union_members();
+    let members = ty.union_members();
 
     // Count how many members are non-trivial class types (not scalars,
     // not `null`, not `void`, etc.).  Only render separate blocks when
@@ -1460,8 +1461,8 @@ fn build_variable_hover_body(
     // When there is only one component, or only one class-like type
     // (the rest being scalars / null), render a single code block.
     if members.len() <= 1 || class_like_count < 2 {
-        let short_type = parsed.shorten().to_string();
-        let ns = resolve_type_namespace_structured(&parsed, class_loader);
+        let short_type = ty.shorten().to_string();
+        let ns = resolve_type_namespace_structured(ty, class_loader);
         let ns_line = namespace_line(&ns);
         let code_block = format!(
             "```php\n<?php\n{}{} = {}\n```",

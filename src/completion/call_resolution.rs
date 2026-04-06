@@ -1199,7 +1199,7 @@ impl Backend {
                     if let Some(param) = method.parameters.get(param_idx)
                         && param.default_value.as_deref().is_some_and(|d| d == "null")
                     {
-                        subs.insert(tpl_name.clone(), PhpType::Named("null".into()));
+                        subs.insert(tpl_name.clone(), PhpType::null());
                     }
                     continue;
                 }

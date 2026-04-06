@@ -1602,7 +1602,7 @@ fn build_constant_snippet(
 /// hover type-resolution pipeline.
 ///
 /// Given `$var = ['']`, this resolves to `list<string>` by delegating
-/// to the same `resolve_variable_type_string` that powers hover.
+/// to the same `resolve_variable_type` that powers hover.
 pub(crate) fn infer_inline_variable_type(
     sym: &SymbolInfo,
     content: &str,
@@ -1636,7 +1636,7 @@ pub(crate) fn infer_inline_variable_type(
 
     let current_class = crate::util::find_class_at_offset(all_classes, cursor_offset);
 
-    crate::hover::variable_type::resolve_variable_type_string(
+    crate::hover::variable_type::resolve_variable_type(
         var_name,
         effective_content,
         cursor_offset,
@@ -1645,6 +1645,7 @@ pub(crate) fn infer_inline_variable_type(
         class_loader,
         crate::completion::resolver::Loaders::with_function(function_loader),
     )
+    .map(|t| t.to_string())
 }
 
 /// Replace the `/**` (or `/** */`) block around `trigger_offset` with

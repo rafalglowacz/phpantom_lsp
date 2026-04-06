@@ -590,8 +590,8 @@ pub fn synthesize_template_conditional_from_info(
         param: format!("${param_name}"),
         negated: false,
         condition: Box::new(PhpType::ClassString(None)),
-        then_type: Box::new(PhpType::Named("mixed".into())),
-        else_type: Box::new(PhpType::Named("mixed".into())),
+        then_type: Box::new(PhpType::mixed()),
+        else_type: Box::new(PhpType::mixed()),
     })
 }
 

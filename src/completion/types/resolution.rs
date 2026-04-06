@@ -406,12 +406,13 @@ pub(crate) fn resolve_type_alias(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
     let mut current = hint.to_string();
+    let mut current_parsed = PhpType::parse(&current);
     let mut last_resolved: Option<PhpType> = None;
 
     for _ in 0..10 {
         // Only bare identifiers can be type aliases.  Skip anything that
         // looks like a complex type expression to avoid false matches.
-        if !matches!(PhpType::parse(&current), PhpType::Named(_)) {
+        if !matches!(current_parsed, PhpType::Named(_)) {
             break;
         }
 
@@ -421,6 +422,7 @@ pub(crate) fn resolve_type_alias(
         match expanded {
             Some(php_type) => {
                 current = php_type.to_string();
+                current_parsed = php_type.clone();
                 last_resolved = Some(php_type);
             }
             None => break,

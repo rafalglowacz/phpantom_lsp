@@ -21,9 +21,17 @@ within the same impact tier.
 
 ## Sprint 4 — Refactoring toolkit & type inference
 
-| #   | Item                                                                                                                                                      | Impact | Effort     |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- |
-|     | **Release 0.7.0**                                                                                                                                         |        |            |
+| #   | Item                                                                                                                                                   | Impact | Effort      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ----------- |
+|     | Clear [refactoring gate](todo/refactor.md)                                                                                                             | —      | —           |
+| PM1 | [Eliminate PhpType → String → PhpType round-trips](todo/php-type-migration.md#round-trips-phptype--string--phptype) (~20 sites)                        | Medium | Medium      |
+| PM2 | [Functions returning `String` that should return `PhpType`](todo/php-type-migration.md#functions-returning-string-that-should-return-phptype) (~9 functions) | Medium | Medium  |
+| PM3 | [Replace `format!`-based type construction with `PhpType` constructors](todo/php-type-migration.md#format-based-type-construction) (~7 sites)          | Medium | Medium      |
+| PM4 | [Remove ad-hoc string parsers](todo/php-type-migration.md#ad-hoc-string-parsers-to-remove) (`strip_generic_params`, `find_phpdoc_type_end`, naive bracket matching) | Medium | Low |
+| PM5 | [Switch `shorten_type_string` callers to `shorten_php_type`](todo/php-type-migration.md#shorten_type_string-callers-with-phptype-available) (3 sites)  | Low    | Low         |
+| PM6 | [Change `&str`-accepting functions to `&PhpType`](todo/php-type-migration.md#str-accepting-functions-that-always-re-parse) (~6 functions)              | Low    | Low-Medium  |
+| PM7 | [Add `PhpType` convenience constructors and `SubjectOutcome::Scalar(PhpType)`](todo/php-type-migration.md#enum-variant-improvements)                   | Low    | Low         |
+|     | **Release 0.7.0**                                                                                                                                      |        |             |
 
 ## Sprint 5 — Polish for office adoption
 
