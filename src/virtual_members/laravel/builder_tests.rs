@@ -1,4 +1,5 @@
 use super::*;
+use crate::php_type::PhpType;
 use crate::test_fixtures::{
     make_class, make_method, make_method_with_params, make_param, no_loader,
 };
@@ -16,10 +17,11 @@ fn make_builder(methods: Vec<MethodInfo>) -> ClassInfo {
 
 #[test]
 fn replace_eloquent_collection_in_return_type() {
-    let result = replace_eloquent_collection(
-        "Illuminate\\Database\\Eloquent\\Collection<int, App\\Models\\User>",
+    let result = replace_eloquent_collection_typed(
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Collection<int, App\\Models\\User>"),
         "App\\Collections\\UserCollection",
-    );
+    )
+    .to_string();
     assert_eq!(
         result,
         "App\\Collections\\UserCollection<int, App\\Models\\User>"
@@ -28,19 +30,21 @@ fn replace_eloquent_collection_in_return_type() {
 
 #[test]
 fn replace_eloquent_collection_preserves_other_types() {
-    let result = replace_eloquent_collection(
-        "Illuminate\\Support\\Collection<int, string>",
+    let result = replace_eloquent_collection_typed(
+        &PhpType::parse("Illuminate\\Support\\Collection<int, string>"),
         "App\\Collections\\UserCollection",
-    );
+    )
+    .to_string();
     assert_eq!(result, "Illuminate\\Support\\Collection<int, string>");
 }
 
 #[test]
 fn replace_eloquent_collection_in_union() {
-    let result = replace_eloquent_collection(
-        "Illuminate\\Database\\Eloquent\\Collection<int, App\\Models\\User>|null",
+    let result = replace_eloquent_collection_typed(
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Collection<int, App\\Models\\User>|null"),
         "App\\Collections\\UserCollection",
-    );
+    )
+    .to_string();
     assert_eq!(
         result,
         "App\\Collections\\UserCollection<int, App\\Models\\User>|null"

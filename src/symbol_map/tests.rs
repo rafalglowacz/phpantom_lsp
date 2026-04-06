@@ -1532,8 +1532,8 @@ fn template_param_def_recorded_for_class() {
         "name_offset should point to the TKey text"
     );
     assert_eq!(
-        tkey.bound.as_deref(),
-        Some("array-key"),
+        tkey.bound,
+        Some(crate::php_type::PhpType::parse("array-key")),
         "TKey should have bound 'array-key'"
     );
 

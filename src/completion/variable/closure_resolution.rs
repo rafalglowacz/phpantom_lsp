@@ -1343,9 +1343,9 @@ fn resolve_closure_params_with_inferred(
                         if !inferred_resolved.is_empty()
                             && inferred_resolved.iter().all(|inferred_cls| {
                                 resolved_classes.iter().any(|explicit_cls| {
-                                    crate::completion::types::narrowing::is_subtype_of(
-                                        inferred_cls,
-                                        &explicit_cls.name,
+                                    crate::util::is_subtype_of_typed(
+                                        &PhpType::Named(inferred_cls.fqn().to_string()),
+                                        &PhpType::Named(explicit_cls.name.clone()),
                                         ctx.class_loader,
                                     )
                                 })
@@ -1833,12 +1833,9 @@ fn build_receiver_self_type(
     // For Eloquent Builder, extract the model name from method return
     // types where generic substitution has already been applied.
     if (receiver.name == "Builder" || fqn == ELOQUENT_BUILDER_FQN)
-        && let Some(model_fqn) = extract_model_from_builder(receiver)
+        && let Some(model_type) = extract_model_from_builder(receiver)
     {
-        return PhpType::Generic(
-            ELOQUENT_BUILDER_FQN.to_string(),
-            vec![PhpType::Named(model_fqn)],
-        );
+        return PhpType::Generic(ELOQUENT_BUILDER_FQN.to_string(), vec![model_type]);
     }
 
     // General case: try to recover concrete generic args from method
@@ -1907,8 +1904,8 @@ fn find_model_from_receivers(
         // from any method's return type that is `Builder<X>`.
         let cls_fqn = cls.fqn();
         if (cls.name == "Builder" || cls_fqn == ELOQUENT_BUILDER_FQN)
-            && let Some(model_fqn) = extract_model_from_builder(cls)
-            && let Some(model_cls) = class_loader(&model_fqn)
+            && let Some(model_type) = extract_model_from_builder(cls)
+            && let Some(model_cls) = class_loader(&model_type.to_string())
             && extends_eloquent_model(&model_cls, class_loader)
         {
             return Some(model_cls);
@@ -1917,19 +1914,19 @@ fn find_model_from_receivers(
     None
 }
 
-/// Extract the model FQN from a resolved `Builder<Model>` class by
+/// Extract the model type from a resolved `Builder<Model>` class by
 /// scanning its method return types for `Builder<X>` and returning `X`.
-fn extract_model_from_builder(builder: &ClassInfo) -> Option<String> {
+fn extract_model_from_builder(builder: &ClassInfo) -> Option<PhpType> {
     for method in &builder.methods {
         if let Some(ref ret) = method.return_type
             && let PhpType::Generic(base, args) = ret
             && !args.is_empty()
             && (base == ELOQUENT_BUILDER_FQN || base == "Builder")
         {
-            let model = args[0].to_string();
+            let model_str = args[0].to_string();
             // Skip unsubstituted template params like "TModel".
-            if !model.is_empty() && model != "TModel" {
-                return Some(model);
+            if !model_str.is_empty() && model_str != "TModel" {
+                return Some(args[0].clone());
             }
         }
     }

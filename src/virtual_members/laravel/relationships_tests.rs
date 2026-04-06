@@ -1,4 +1,5 @@
 use super::*;
+use crate::php_type::PhpType;
 use crate::test_fixtures::{make_class, make_method};
 
 // ── classify_relationship ───────────────────────────────────────────
@@ -6,7 +7,7 @@ use crate::test_fixtures::{make_class, make_method};
 #[test]
 fn classify_has_one() {
     assert_eq!(
-        classify_relationship("HasOne<Profile, $this>"),
+        classify_relationship_typed(&PhpType::parse("HasOne<Profile, $this>")),
         Some(RelationshipKind::Singular)
     );
 }
@@ -14,7 +15,7 @@ fn classify_has_one() {
 #[test]
 fn classify_has_many() {
     assert_eq!(
-        classify_relationship("HasMany<Post, $this>"),
+        classify_relationship_typed(&PhpType::parse("HasMany<Post, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -22,7 +23,7 @@ fn classify_has_many() {
 #[test]
 fn classify_belongs_to() {
     assert_eq!(
-        classify_relationship("BelongsTo<User, $this>"),
+        classify_relationship_typed(&PhpType::parse("BelongsTo<User, $this>")),
         Some(RelationshipKind::Singular)
     );
 }
@@ -30,7 +31,7 @@ fn classify_belongs_to() {
 #[test]
 fn classify_belongs_to_many() {
     assert_eq!(
-        classify_relationship("BelongsToMany<Role, $this>"),
+        classify_relationship_typed(&PhpType::parse("BelongsToMany<Role, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -38,7 +39,7 @@ fn classify_belongs_to_many() {
 #[test]
 fn classify_morph_one() {
     assert_eq!(
-        classify_relationship("MorphOne<Image, $this>"),
+        classify_relationship_typed(&PhpType::parse("MorphOne<Image, $this>")),
         Some(RelationshipKind::Singular)
     );
 }
@@ -46,7 +47,7 @@ fn classify_morph_one() {
 #[test]
 fn classify_morph_many() {
     assert_eq!(
-        classify_relationship("MorphMany<Comment, $this>"),
+        classify_relationship_typed(&PhpType::parse("MorphMany<Comment, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -54,7 +55,7 @@ fn classify_morph_many() {
 #[test]
 fn classify_morph_to() {
     assert_eq!(
-        classify_relationship("MorphTo"),
+        classify_relationship_typed(&PhpType::parse("MorphTo")),
         Some(RelationshipKind::MorphTo)
     );
 }
@@ -62,7 +63,7 @@ fn classify_morph_to() {
 #[test]
 fn classify_morph_to_many() {
     assert_eq!(
-        classify_relationship("MorphToMany<Tag, $this>"),
+        classify_relationship_typed(&PhpType::parse("MorphToMany<Tag, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -70,7 +71,7 @@ fn classify_morph_to_many() {
 #[test]
 fn classify_has_many_through() {
     assert_eq!(
-        classify_relationship("HasManyThrough<Post, Country>"),
+        classify_relationship_typed(&PhpType::parse("HasManyThrough<Post, Country>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -78,36 +79,46 @@ fn classify_has_many_through() {
 #[test]
 fn classify_fqn_relationship() {
     assert_eq!(
-        classify_relationship("Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post, $this>"),
+        classify_relationship_typed(&PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post, $this>"
+        )),
         Some(RelationshipKind::Collection)
     );
 }
 
 #[test]
 fn classify_non_relationship() {
-    assert_eq!(classify_relationship("string"), None);
-    assert_eq!(classify_relationship("Collection<User>"), None);
+    assert_eq!(classify_relationship_typed(&PhpType::parse("string")), None);
+    assert_eq!(
+        classify_relationship_typed(&PhpType::parse("Collection<User>")),
+        None,
+    );
 }
 
 #[test]
 fn classify_custom_fqn_has_many_is_not_relationship() {
     // A user class whose short name collides with an Eloquent relationship
     // should NOT be classified as a relationship.
-    assert_eq!(classify_relationship("App\\Relations\\HasMany<Post>"), None);
+    assert_eq!(
+        classify_relationship_typed(&PhpType::parse("App\\Relations\\HasMany<Post>")),
+        None,
+    );
 }
 
 #[test]
 fn classify_custom_fqn_belongs_to_is_not_relationship() {
     assert_eq!(
-        classify_relationship("MyApp\\Custom\\BelongsTo<User>"),
-        None
+        classify_relationship_typed(&PhpType::parse("MyApp\\Custom\\BelongsTo<User>")),
+        None,
     );
 }
 
 #[test]
 fn classify_eloquent_fqn_without_leading_backslash() {
     assert_eq!(
-        classify_relationship("Illuminate\\Database\\Eloquent\\Relations\\HasOne<Profile, $this>"),
+        classify_relationship_typed(&PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Relations\\HasOne<Profile, $this>"
+        )),
         Some(RelationshipKind::Singular)
     );
 }
@@ -115,7 +126,9 @@ fn classify_eloquent_fqn_without_leading_backslash() {
 #[test]
 fn classify_eloquent_fqn_morph_to() {
     assert_eq!(
-        classify_relationship("Illuminate\\Database\\Eloquent\\Relations\\MorphTo"),
+        classify_relationship_typed(&PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Relations\\MorphTo"
+        )),
         Some(RelationshipKind::MorphTo)
     );
 }
@@ -123,7 +136,7 @@ fn classify_eloquent_fqn_morph_to() {
 #[test]
 fn classify_bare_name_without_generics() {
     assert_eq!(
-        classify_relationship("HasMany"),
+        classify_relationship_typed(&PhpType::parse("HasMany")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -133,7 +146,7 @@ fn classify_bare_name_without_generics() {
 #[test]
 fn extracts_first_generic_arg() {
     assert_eq!(
-        extract_related_type("HasMany<Post, $this>"),
+        extract_related_type_typed(&PhpType::parse("HasMany<Post, $this>")),
         Some("Post".to_string())
     );
 }
@@ -141,14 +154,14 @@ fn extracts_first_generic_arg() {
 #[test]
 fn extracts_fqn_related_type() {
     assert_eq!(
-        extract_related_type("HasOne<\\App\\Models\\Profile, $this>"),
+        extract_related_type_typed(&PhpType::parse("HasOne<\\App\\Models\\Profile, $this>")),
         Some("\\App\\Models\\Profile".to_string())
     );
 }
 
 #[test]
 fn returns_none_without_generics() {
-    assert_eq!(extract_related_type("HasMany"), None);
+    assert_eq!(extract_related_type_typed(&PhpType::parse("HasMany")), None);
 }
 
 // ── build_property_type ─────────────────────────────────────────────

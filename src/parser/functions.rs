@@ -157,13 +157,10 @@ impl Backend {
                         func_template_bindings,
                         throws,
                     ) = if let Some(ctx) = doc_ctx {
-                        let doc_type = info
+                        let parsed_doc_return = info
                             .as_ref()
                             .and_then(docblock::extract_return_type_from_info);
 
-                        let parsed_doc_return = doc_type
-                            .as_ref()
-                            .and_then(|s| docblock::sanitise_and_parse_docblock_type(s));
                         let effective = docblock::resolve_effective_type_typed(
                             native_return_type.as_ref(),
                             parsed_doc_return.as_ref(),
@@ -201,12 +198,11 @@ impl Backend {
                         //   @return T
                         // becomes a conditional that resolves T from the
                         // call-site argument (e.g. resolve(User::class) → User).
-                        let effective_str = effective.as_ref().map(|t| t.to_string());
                         let conditional = conditional.or_else(|| {
                             docblock::synthesize_template_conditional_from_info(
                                 info.as_ref()?,
                                 &tpl_params,
-                                effective_str.as_deref(),
+                                effective.as_ref(),
                                 false,
                             )
                         });
@@ -290,11 +286,9 @@ impl Backend {
                             let param_doc_type =
                                 docblock::extract_param_raw_type_from_info(info, &param.name);
                             if let Some(ref doc_type) = param_doc_type {
-                                let parsed_doc =
-                                    docblock::sanitise_and_parse_docblock_type(doc_type);
                                 let effective = docblock::resolve_effective_type_typed(
                                     param.type_hint.as_ref(),
-                                    parsed_doc.as_ref(),
+                                    Some(doc_type),
                                 );
                                 if effective.is_some() {
                                     param.type_hint = effective;
@@ -322,12 +316,10 @@ impl Backend {
                                 continue;
                             }
                             // Find the positional @param tag at this index.
-                            if let Some(&(None, ref doc_type)) = positional_tags.get(idx) {
-                                let parsed_doc =
-                                    docblock::sanitise_and_parse_docblock_type(doc_type);
+                            if let Some((None, doc_type)) = positional_tags.get(idx) {
                                 let effective = docblock::resolve_effective_type_typed(
                                     param.type_hint.as_ref(),
-                                    parsed_doc.as_ref(),
+                                    Some(doc_type),
                                 );
                                 if effective.is_some() {
                                     param.type_hint = effective;
@@ -358,11 +350,10 @@ impl Backend {
                             if !parameters.iter().any(|p| p.name == tag_name) {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
-                                let type_hint = Some(tag_type);
                                 parameters.push(ParameterInfo {
                                     name: tag_name,
                                     is_required: false,
-                                    type_hint: type_hint.map(|s| PhpType::parse(&s)),
+                                    type_hint: Some(tag_type),
                                     native_type_hint: None,
                                     description,
                                     default_value: None,

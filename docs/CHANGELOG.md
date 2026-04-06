@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **PhpType migration complete.** All type-string manipulation now uses structured `PhpType` operations. Over 60 call sites that round-tripped through `PhpType::parse()` and `.to_string()` have been eliminated, type construction uses `PhpType` constructors instead of `format!`, and ad-hoc string parsers (`strip_generic_params`, `find_phpdoc_type_end`, naive bracket matching) have been replaced with proper `PhpType` methods and `split_type_token`. Duplicated keyword lists, literal-type inference functions, and type-shortening logic have been consolidated into shared utilities. Return type inference, iterable type inference, PHPDoc tag editing, method stub generation, and diagnostics all operate on structured types end-to-end.
+- **PhpType migration complete.** All internal type manipulation now uses structured type operations end-to-end, from docblock extraction through completion, hover, code actions, and diagnostics. Types are parsed once at extraction time and flow through the entire pipeline without redundant re-parsing. Type-guard narrowing and subtype checking use shared predicates instead of ad-hoc string matching, improving consistency and reducing the surface area for type-comparison bugs.
 
 ### Added
 

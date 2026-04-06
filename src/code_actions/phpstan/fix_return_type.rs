@@ -466,9 +466,9 @@ pub(crate) fn infer_return_type(
                     class_loader,
                     Loaders::with_function(function_loader),
                 );
-                let type_str = ResolvedType::types_joined(&results).to_string();
-                if !type_str.is_empty() {
-                    return_types.push(PhpType::parse(&type_str));
+                let joined = ResolvedType::types_joined(&results);
+                if !joined.is_mixed() {
+                    return_types.push(joined);
                     continue;
                 }
             }
@@ -492,14 +492,13 @@ pub(crate) fn infer_return_type(
         });
     }
 
-    // Deduplicate types.
-    let mut type_strings: Vec<String> = return_types.iter().map(|t| t.to_string()).collect();
-    type_strings.sort();
-    type_strings.dedup();
-    let mut deduped: Vec<PhpType> = type_strings
-        .into_iter()
-        .map(|s| PhpType::parse(&s))
-        .collect();
+    // Deduplicate types structurally (no string round-trip).
+    let mut deduped: Vec<PhpType> = Vec::with_capacity(return_types.len());
+    for ty in &return_types {
+        if !deduped.iter().any(|existing| existing.equivalent(ty)) {
+            deduped.push(ty.clone());
+        }
+    }
 
     if has_bare_return {
         let has_null = deduped.iter().any(|t| t.is_null());
@@ -518,11 +517,10 @@ pub(crate) fn infer_return_type(
 
     // Convert effective type → native PHP type hint.
     let native = effective
-        .to_native_hint()
-        .map(|s| PhpType::parse(&s))
+        .to_native_hint_typed()
         .unwrap_or_else(PhpType::mixed);
 
-    let needs_docblock = native.to_string() != effective.to_string();
+    let needs_docblock = !native.equivalent(&effective);
     Some(InferredReturnType {
         native,
         effective: if needs_docblock {
@@ -549,7 +547,7 @@ pub(crate) fn enrichment_return_type(
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // The position is on or near the docblock / function signature.
     // Search forward from that line to find the `function` keyword.
     let lines: Vec<&str> = content.lines().collect();
@@ -569,7 +567,7 @@ pub(crate) fn enrichment_return_type(
     // Return the effective type if it's richer than the native hint,
     // otherwise return the native type (which may still be useful for
     // callers that want any inferred type, e.g. `void`).
-    Some(inferred.effective.unwrap_or(inferred.native).to_string())
+    Some(inferred.effective.unwrap_or(inferred.native))
 }
 
 impl Backend {
@@ -1026,21 +1024,22 @@ fn should_use_own_inference(our: &Option<InferredReturnType>, current: &CurrentR
 
     // The effective type our inference would write (prefers the rich
     // docblock type, falls back to the native hint).
-    let our_effective_str = inferred
-        .effective
-        .as_ref()
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| inferred.native.to_string());
+    let our_effective = inferred.effective.as_ref().unwrap_or(&inferred.native);
 
     // The effective type currently declared (prefers the @return tag,
     // falls back to the native hint).
-    let current_effective = current
+    let current_effective_str = current
         .docblock
         .as_deref()
         .or(current.native.as_deref())
         .unwrap_or("");
 
-    our_effective_str != current_effective
+    if current_effective_str.is_empty() {
+        return true;
+    }
+
+    let current_effective = PhpType::parse(current_effective_str);
+    !our_effective.equivalent(&current_effective)
 }
 
 /// Build edits using pre-split native and effective types from our

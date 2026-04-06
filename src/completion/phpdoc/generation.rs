@@ -754,7 +754,7 @@ fn extract_class_supertypes(decl: &str) -> (Vec<String>, Vec<String>) {
 }
 
 /// Parse a comma-separated parameter list into `(type_hint, $name)` pairs.
-fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
+fn parse_params(params_str: &str) -> Vec<(Option<PhpType>, String)> {
     if params_str.trim().is_empty() {
         return Vec::new();
     }
@@ -803,7 +803,7 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
             let type_hint = if type_parts.is_empty() {
                 None
             } else {
-                Some(type_parts.join(" "))
+                Some(PhpType::parse(&type_parts.join(" ")))
             };
             result.push((type_hint, name));
         }
@@ -813,7 +813,7 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
 }
 
 /// Extract the return type from the text after the closing `)`.
-fn extract_return_type_from_decl(after_close: &str) -> Option<String> {
+fn extract_return_type_from_decl(after_close: &str) -> Option<PhpType> {
     // Look for `: Type` pattern.
     let trimmed = after_close.trim_start();
     if !trimmed.starts_with(':') {
@@ -841,12 +841,12 @@ fn extract_return_type_from_decl(after_close: &str) -> Option<String> {
     if ret_type.is_empty() {
         None
     } else {
-        Some(ret_type.to_string())
+        Some(PhpType::parse(ret_type))
     }
 }
 
 /// Extract the type hint from a property or constant declaration.
-fn extract_property_type(decl: &str) -> Option<String> {
+fn extract_property_type(decl: &str) -> Option<PhpType> {
     // Strip modifiers.
     let modifiers = [
         "public",
@@ -918,7 +918,7 @@ fn extract_property_type(decl: &str) -> Option<String> {
     if type_str.is_empty() {
         None
     } else {
-        Some(type_str.to_string())
+        Some(PhpType::parse(type_str))
     }
 }
 
@@ -1234,14 +1234,12 @@ fn build_function_snippet(
     // Each entry is (snippet_type, display_len, escaped_name).
     let mut param_tags: Vec<(String, usize, String)> = Vec::new();
     for (type_hint, name) in &sym.params {
-        let parsed_hint = type_hint.as_ref().map(|s| PhpType::parse(s));
-        if let Some(enriched) =
-            enrichment_snippet(parsed_hint.as_ref(), &mut tab_stop, class_loader)
+        if let Some(enriched) = enrichment_snippet(type_hint.as_ref(), &mut tab_stop, class_loader)
         {
             // Use the plain-text version to measure the rendered width for
             // alignment.  The snippet version contains `${N:...}` markers
             // that inflate its length.
-            let display_len = enrichment_plain(parsed_hint.as_ref(), class_loader)
+            let display_len = enrichment_plain(type_hint.as_ref(), class_loader)
                 .map(|p| p.len())
                 .unwrap_or(enriched.len());
             // Escape `$` in PHP parameter names so the snippet parser
@@ -1256,10 +1254,7 @@ fn build_function_snippet(
         .method_name
         .as_ref()
         .is_some_and(|n| n.eq_ignore_ascii_case("__construct"));
-    let is_void = sym
-        .return_type
-        .as_ref()
-        .is_some_and(|r| PhpType::parse(r).is_void());
+    let is_void = sym.return_type.as_ref().is_some_and(|r| r.is_void());
     let return_tag = if is_void || is_constructor {
         None
     } else {
@@ -1273,18 +1268,19 @@ fn build_function_snippet(
             function_loader,
         );
         let inferred = body_inferred.filter(|t| {
-            let parsed = PhpType::parse(t);
-            !parsed.is_void()
-                && !parsed.is_mixed()
-                && Some(t.as_str()) != sym.return_type.as_deref()
+            !t.is_void()
+                && !t.is_mixed()
+                && sym
+                    .return_type
+                    .as_ref()
+                    .is_none_or(|s| t.to_string() != s.to_string())
         });
         // Fall back to signature-based enrichment when body inference
         // doesn't produce anything useful.
         if let Some(t) = inferred {
-            Some(t)
+            Some(t.to_string())
         } else {
-            let parsed_ret = sym.return_type.as_ref().map(|s| PhpType::parse(s));
-            enrichment_snippet(parsed_ret.as_ref(), &mut tab_stop, class_loader)
+            enrichment_snippet(sym.return_type.as_ref(), &mut tab_stop, class_loader)
         }
     };
 
@@ -1359,8 +1355,7 @@ fn build_function_plain(
     // Collect @param tags that need enrichment.
     let mut param_tags: Vec<(String, String)> = Vec::new();
     for (type_hint, name) in &sym.params {
-        let parsed_hint = type_hint.as_ref().map(|s| PhpType::parse(s));
-        if let Some(enriched) = enrichment_plain(parsed_hint.as_ref(), class_loader) {
+        if let Some(enriched) = enrichment_plain(type_hint.as_ref(), class_loader) {
             param_tags.push((enriched, name.clone()));
         }
     }
@@ -1370,10 +1365,7 @@ fn build_function_plain(
         .method_name
         .as_ref()
         .is_some_and(|n| n.eq_ignore_ascii_case("__construct"));
-    let is_void = sym
-        .return_type
-        .as_ref()
-        .is_some_and(|r| PhpType::parse(r).is_void());
+    let is_void = sym.return_type.as_ref().is_some_and(|r| r.is_void());
     let return_tag = if is_void || is_constructor {
         None
     } else {
@@ -1389,17 +1381,18 @@ fn build_function_plain(
         // Filter out types that don't need a @return tag (void, scalars
         // that match the native hint exactly).
         let inferred = body_inferred.filter(|t| {
-            let parsed = PhpType::parse(t);
-            !parsed.is_void()
-                && !parsed.is_mixed()
-                && Some(t.as_str()) != sym.return_type.as_deref()
+            !t.is_void()
+                && !t.is_mixed()
+                && sym
+                    .return_type
+                    .as_ref()
+                    .is_none_or(|s| t.to_string() != s.to_string())
         });
         // Fall back to signature-based enrichment when body inference
         // doesn't produce anything useful.
-        inferred.or_else(|| {
-            let parsed_ret = sym.return_type.as_ref().map(|s| PhpType::parse(s));
-            enrichment_plain(parsed_ret.as_ref(), class_loader)
-        })
+        inferred
+            .map(|t| t.to_string())
+            .or_else(|| enrichment_plain(sym.return_type.as_ref(), class_loader))
     };
 
     let has_throws = !uncaught.is_empty();
@@ -1502,7 +1495,7 @@ fn build_property_plain(
     indent: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
-    let var_type = property_var_type_plain(&sym.type_hint, class_loader);
+    let var_type = property_var_type_plain(sym.type_hint.as_ref(), class_loader);
     format!("{indent}/** @var {var_type} */\n")
 }
 
@@ -1514,7 +1507,7 @@ fn build_constant_plain(
     indent: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
-    let var_type = property_var_type_plain(&sym.type_hint, class_loader);
+    let var_type = property_var_type_plain(sym.type_hint.as_ref(), class_loader);
     format!("{indent}/** @var {var_type} */\n")
 }
 
@@ -1581,7 +1574,7 @@ fn build_property_snippet(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
     let mut tab_stop = 1u32;
-    let var_type = property_var_type_snippet(&sym.type_hint, &mut tab_stop, class_loader);
+    let var_type = property_var_type_snippet(sym.type_hint.as_ref(), &mut tab_stop, class_loader);
     format!("/** @var {} */", var_type)
 }
 
@@ -1594,7 +1587,7 @@ fn build_constant_snippet(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
     let mut tab_stop = 1u32;
-    let var_type = property_var_type_snippet(&sym.type_hint, &mut tab_stop, class_loader);
+    let var_type = property_var_type_snippet(sym.type_hint.as_ref(), &mut tab_stop, class_loader);
     format!("/** @var {} */", var_type)
 }
 
@@ -1610,7 +1603,7 @@ pub(crate) fn infer_inline_variable_type(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoaderFn<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let var_name = sym.variable_name.as_deref()?;
 
     // The cursor is at the `/**` trigger, which is above the variable
@@ -1645,7 +1638,6 @@ pub(crate) fn infer_inline_variable_type(
         class_loader,
         crate::completion::resolver::Loaders::with_function(function_loader),
     )
-    .map(|t| t.to_string())
 }
 
 /// Replace the `/**` (or `/** */`) block around `trigger_offset` with
@@ -1692,7 +1684,7 @@ fn patch_docblock_trigger(content: &str, trigger_offset: usize) -> Option<String
 /// - Class with templates → `ClassName<${N:T1}, ...>` tab stops
 /// - Other → literal type string
 fn property_var_type_snippet(
-    type_hint: &Option<String>,
+    type_hint: Option<&PhpType>,
     tab_stop: &mut u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
@@ -1702,22 +1694,22 @@ fn property_var_type_snippet(
             *tab_stop += 1;
             s
         }
-        Some(th) if th == "array" => {
+        Some(th) if th.to_string() == "array" => {
             let s = format!("${{{}:array}}", *tab_stop);
             *tab_stop += 1;
             s
         }
         Some(th) => {
-            let clean = th.trim_start_matches('\\');
+            let display = th.to_string();
+            let clean = display.trim_start_matches('\\');
             // Callable types get a signature placeholder.
-            if PhpType::parse(th).is_callable() {
+            if th.is_callable() {
                 let s = format!("(${{{}:{}()}})", *tab_stop, clean);
                 *tab_stop += 1;
                 return s;
             }
-            let parsed = PhpType::parse(th);
             if !matches!(
-                parsed,
+                th,
                 PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
             ) && !is_keyword_type(clean)
                 && let Some(cls) = class_loader(clean)
@@ -1730,27 +1722,27 @@ fn property_var_type_snippet(
                 }
                 return format!("{}<{}>", clean, parts.join(", "));
             }
-            th.clone()
+            display
         }
     }
 }
 
 /// Compute the `@var` type string for a property/constant in plain text.
 fn property_var_type_plain(
-    type_hint: &Option<String>,
+    type_hint: Option<&PhpType>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
     match type_hint {
         None => "mixed".to_string(),
-        Some(th) if th == "array" => "array".to_string(),
+        Some(th) if th.to_string() == "array" => "array".to_string(),
         Some(th) => {
-            let clean = th.trim_start_matches('\\');
-            if PhpType::parse(th).is_callable() {
+            let display = th.to_string();
+            let clean = display.trim_start_matches('\\');
+            if th.is_callable() {
                 return format!("({}())", clean);
             }
-            let parsed = PhpType::parse(th);
             if !matches!(
-                parsed,
+                th,
                 PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
             ) && !is_keyword_type(clean)
                 && let Some(cls) = class_loader(clean)
@@ -1759,7 +1751,7 @@ fn property_var_type_plain(
                 let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
                 return format!("{}<{}>", clean, parts.join(", "));
             }
-            th.clone()
+            display
         }
     }
 }
@@ -2026,13 +2018,13 @@ mod tests {
         assert_eq!(info.params.len(), 2);
         assert_eq!(
             info.params[0],
-            (Some("string".to_string()), "$name".to_string())
+            (Some(PhpType::parse("string")), "$name".to_string())
         );
         assert_eq!(
             info.params[1],
-            (Some("int".to_string()), "$age".to_string())
+            (Some(PhpType::parse("int")), "$age".to_string())
         );
-        assert_eq!(info.return_type, Some("void".to_string()));
+        assert_eq!(info.return_type, Some(PhpType::parse("void")));
     }
 
     #[test]
@@ -2048,16 +2040,16 @@ mod tests {
     fn parses_nullable_type() {
         let text = "function test(?string $name): ?int {}";
         let info = parse_declaration_info(text);
-        assert_eq!(info.params[0].0, Some("?string".to_string()));
-        assert_eq!(info.return_type, Some("?int".to_string()));
+        assert_eq!(info.params[0].0, Some(PhpType::parse("?string")));
+        assert_eq!(info.return_type, Some(PhpType::parse("?int")));
     }
 
     #[test]
     fn parses_union_type() {
         let text = "function test(string|int $value): string|false {}";
         let info = parse_declaration_info(text);
-        assert_eq!(info.params[0].0, Some("string|int".to_string()));
-        assert_eq!(info.return_type, Some("string|false".to_string()));
+        assert_eq!(info.params[0].0, Some(PhpType::parse("string|int")));
+        assert_eq!(info.return_type, Some(PhpType::parse("string|false")));
     }
 
     #[test]
@@ -2067,7 +2059,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("string".to_string()), "$names".to_string())
+            (Some(PhpType::parse("string")), "$names".to_string())
         );
     }
 
@@ -2078,7 +2070,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("array".to_string()), "$data".to_string())
+            (Some(PhpType::parse("array")), "$data".to_string())
         );
     }
 
@@ -2089,7 +2081,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("string".to_string()), "$name".to_string())
+            (Some(PhpType::parse("string")), "$name".to_string())
         );
     }
 
@@ -2098,35 +2090,35 @@ mod tests {
         let text = "function test(): void {}";
         let info = parse_declaration_info(text);
         assert!(info.params.is_empty());
-        assert_eq!(info.return_type, Some("void".to_string()));
+        assert_eq!(info.return_type, Some(PhpType::parse("void")));
     }
 
     #[test]
     fn parses_property_type() {
         let text = "    public string $name;";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("string".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("string")));
     }
 
     #[test]
     fn parses_readonly_property_type() {
         let text = "    public readonly string $name;";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("string".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("string")));
     }
 
     #[test]
     fn parses_typed_constant_extracts_only_type() {
         let text = "    const int COW = 0;";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("int".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("int")));
     }
 
     #[test]
     fn parses_public_typed_constant_extracts_only_type() {
         let text = "    public const string NAME = 'foo';";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("string".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("string")));
     }
 
     #[test]
@@ -2143,7 +2135,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("bool".to_string()), "$selected".to_string())
+            (Some(PhpType::parse("bool")), "$selected".to_string())
         );
     }
 
@@ -2308,7 +2300,7 @@ mod tests {
         // match the text-edit range's start column.
         let sym = SymbolInfo {
             params: vec![(None, "$data".to_string())],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2345,7 +2337,7 @@ mod tests {
     fn snippet_escapes_dollar_in_param_names() {
         let sym = SymbolInfo {
             params: vec![(None, "$data".to_string())],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2385,10 +2377,10 @@ mod tests {
         // Only @return for User should be skipped (no templates).
         let sym = SymbolInfo {
             params: vec![
-                (Some("string".to_string()), "$name".to_string()),
-                (Some("int".to_string()), "$age".to_string()),
+                (Some(PhpType::parse("string")), "$name".to_string()),
+                (Some(PhpType::parse("int")), "$age".to_string()),
             ],
-            return_type: Some("User".to_string()),
+            return_type: Some(PhpType::parse("User")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2438,9 +2430,9 @@ mod tests {
         let sym = SymbolInfo {
             params: vec![
                 (None, "$data".to_string()),
-                (Some("string".to_string()), "$name".to_string()),
+                (Some(PhpType::parse("string")), "$name".to_string()),
             ],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2486,8 +2478,8 @@ mod tests {
     #[test]
     fn generates_function_snippet_for_array_param_and_return() {
         let sym = SymbolInfo {
-            params: vec![(Some("array".to_string()), "$items".to_string())],
-            return_type: Some("array".to_string()),
+            params: vec![(Some(PhpType::parse("array")), "$items".to_string())],
+            return_type: Some(PhpType::parse("array")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2518,7 +2510,7 @@ mod tests {
     fn generates_void_function_snippet_without_return() {
         let sym = SymbolInfo {
             params: vec![(None, "$name".to_string())],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2548,7 +2540,7 @@ mod tests {
     fn paramless_void_generates_summary_skeleton() {
         let sym = SymbolInfo {
             params: vec![],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2673,7 +2665,7 @@ mod tests {
     #[test]
     fn generates_property_snippet_always_has_var() {
         let sym = SymbolInfo {
-            type_hint: Some("string".to_string()),
+            type_hint: Some(PhpType::parse("string")),
             ..Default::default()
         };
         let snippet = build_property_snippet(&sym, "    ", &no_classes);
@@ -2704,7 +2696,7 @@ mod tests {
     #[test]
     fn generates_constant_snippet_with_type() {
         let sym = SymbolInfo {
-            type_hint: Some("int".to_string()),
+            type_hint: Some(PhpType::parse("int")),
             ..Default::default()
         };
         let snippet = build_constant_snippet(&sym, "    ", &no_classes);
@@ -2725,7 +2717,7 @@ mod tests {
                 (None, "$activeAlerts".to_string()),
                 (None, "$x".to_string()),
             ],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2774,9 +2766,12 @@ mod tests {
         let sym = SymbolInfo {
             params: vec![
                 (None, "$data".to_string()),
-                (Some("TypedCollection".to_string()), "$primary".to_string()),
+                (
+                    Some(PhpType::parse("TypedCollection")),
+                    "$primary".to_string(),
+                ),
             ],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();

@@ -480,10 +480,12 @@ fn format_return_type(
         }
     }
 
-    // Fall back to the docblock return type string.
-    if let Some(ret_str) = method.return_type_str().filter(|s| !s.is_empty()) {
-        let shortened = shorten_type(&ret_str, use_map, file_namespace);
-        return format!(": {}", shortened);
+    // Fall back to the docblock return type.
+    if let Some(ref ret) = method.return_type {
+        let shortened = shorten_php_type_direct(ret, use_map, file_namespace);
+        if !shortened.is_empty() {
+            return format!(": {}", shortened);
+        }
     }
 
     String::new()
@@ -495,6 +497,7 @@ fn format_return_type(
 /// For example, if the file has `use App\Models\User;`, then
 /// `App\Models\User` becomes `User`.  If the class is in the same
 /// namespace, the namespace prefix is dropped.
+#[cfg(test)]
 fn shorten_type(
     type_str: &str,
     use_map: &HashMap<String, String>,

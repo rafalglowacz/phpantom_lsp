@@ -1194,6 +1194,28 @@ pub enum ClassLikeKind {
     Enum,
 }
 
+/// The backing type of a PHP backed enum.
+///
+/// PHP enums can optionally declare a scalar backing type, which must be
+/// either `string` or `int`.  Unit enums (no backing type) are represented
+/// by `None` at the `ClassInfo` level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackedEnumType {
+    /// `enum Foo: string { ... }`
+    String,
+    /// `enum Foo: int { ... }`
+    Int,
+}
+
+impl fmt::Display for BackedEnumType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackedEnumType::String => write!(f, "string"),
+            BackedEnumType::Int => write!(f, "int"),
+        }
+    }
+}
+
 /// PHP `\Attribute` target flags.
 ///
 /// These mirror the constants defined on the built-in `\Attribute` class
@@ -1484,9 +1506,9 @@ pub struct ClassInfo {
     /// namespace blocks (e.g. `Illuminate\Database\Eloquent\Builder` vs
     /// `Illuminate\Database\Query\Builder`).
     pub file_namespace: Option<String>,
-    /// The backing type of a backed enum (e.g. `"string"` or `"int"`).
+    /// The backing type of a backed enum (e.g. `string` or `int`).
     /// `None` for unit enums and non-enum class-like declarations.
-    pub backed_type: Option<String>,
+    pub backed_type: Option<BackedEnumType>,
     /// PHP attribute target bitmask.
     ///
     /// `0` means this class is **not** a PHP attribute.  A non-zero value
@@ -2672,13 +2694,13 @@ mod tests {
         let a = ClassInfo {
             name: "Status".to_string(),
             kind: ClassLikeKind::Enum,
-            backed_type: Some("string".to_string()),
+            backed_type: Some(BackedEnumType::String),
             ..Default::default()
         };
         let b = ClassInfo {
             name: "Status".to_string(),
             kind: ClassLikeKind::Enum,
-            backed_type: Some("int".to_string()),
+            backed_type: Some(BackedEnumType::Int),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));

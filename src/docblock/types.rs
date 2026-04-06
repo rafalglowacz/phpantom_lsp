@@ -18,10 +18,8 @@ pub(crate) use super::type_strings::split_type_token;
 // ─── Re-exports: shapes ─────────────────────────────────────────────────────
 
 pub use super::shapes::{
-    extract_array_shape_value_type, extract_array_shape_value_type_typed,
-    extract_object_shape_property_type, extract_object_shape_property_type_typed, is_object_shape,
-    is_object_shape_typed, parse_array_shape, parse_array_shape_typed, parse_object_shape,
-    parse_object_shape_typed,
+    extract_array_shape_value_type_typed, extract_object_shape_property_type_typed,
+    is_object_shape_typed, parse_array_shape_typed, parse_object_shape_typed,
 };
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

@@ -120,15 +120,14 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
         // the AST) include the `$` prefix, so compare them directly.
         let name_matches = var_name.as_ref().is_none_or(|n| *n == value_var_name);
         if name_matches {
-            let parsed = PhpType::parse(&var_type);
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
-                &parsed,
+                &var_type,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
             );
             if !resolved.is_empty() {
-                let resolved_types = ResolvedType::from_classes_with_hint(resolved, parsed);
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, var_type);
                 if conditional {
                     ResolvedType::extend_unique(results, resolved_types);
                 } else {
@@ -752,8 +751,7 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
         docblock::find_inline_var_docblock(content, stmt_offset)
     {
         if let Some(ref key) = shape_key
-            && let Some(entry_type) =
-                crate::php_type::PhpType::parse(&var_type).shape_value_type(key)
+            && let Some(entry_type) = var_type.shape_value_type(key)
         {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 entry_type,
@@ -772,8 +770,7 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
             }
         }
 
-        let var_parsed = crate::php_type::PhpType::parse(&var_type);
-        if let Some(element_type) = var_parsed.extract_value_type(true) {
+        if let Some(element_type) = var_type.extract_value_type(true) {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 element_type,
                 current_class_name,

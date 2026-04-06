@@ -130,7 +130,7 @@ pub(in crate::completion) fn build_var_resolver_from_ctx<'a>(
 /// convention (name starts with `scope`, len > 5) **or** when
 /// `has_scope_attr` is `true` (the method has `#[Scope]`).
 fn enrich_builder_type_in_scope(
-    type_str: &str,
+    type_hint: &PhpType,
     method_name: &str,
     has_scope_attr: bool,
     current_class: &ClassInfo,
@@ -155,17 +155,21 @@ fn enrich_builder_type_in_scope(
     // imports).  If the type already has generic args (e.g.
     // `Builder<User>`), do not enrich — the user-supplied generics
     // should be used as-is.
-    if PhpType::parse(type_str).has_type_structure() {
+    if type_hint.has_type_structure() {
         return None;
     }
-    let is_eloquent_builder = type_str == ELOQUENT_BUILDER_FQN || type_str == "Builder";
+    let type_name = match type_hint {
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
+    let is_eloquent_builder = type_name == ELOQUENT_BUILDER_FQN || type_name == "Builder";
     if !is_eloquent_builder {
         return None;
     }
 
     // Build the enriched type with the enclosing model as the generic arg.
     Some(PhpType::Generic(
-        type_str.to_string(),
+        type_name.to_string(),
         vec![PhpType::Named(current_class.name.clone())],
     ))
 }
@@ -638,8 +642,7 @@ fn try_resolve_in_function(
     // own `{` and does NOT get confused by intermediate `{`/`}`
     // from nested control-flow.
     let enclosing_ret =
-        crate::docblock::find_enclosing_return_type(ctx.content, (body_start + 1) as usize)
-            .map(|s| PhpType::parse(&s));
+        crate::docblock::find_enclosing_return_type(ctx.content, (body_start + 1) as usize);
     let body_ctx = ctx.with_enclosing_return_type(enclosing_ret);
     // The cursor is inside this function body.  PHP function scopes
     // are isolated, so return the result directly (even if empty
@@ -802,7 +805,7 @@ fn resolve_variable_in_members<'b>(
                     // `Builder` (without generics), enrich it to
                     // `Builder<EnclosingModel>` so that the
                     // generic-args path injects scope methods.
-                    let enriched_type = native_type_str.as_deref().and_then(|ts| {
+                    let enriched_type = native_type.as_ref().and_then(|nt| {
                         let method_name = method.name.value.to_string();
                         // Check whether the method has a #[Scope]
                         // attribute so that the enrichment also
@@ -813,7 +816,7 @@ fn resolve_variable_in_members<'b>(
                                 .any(|a| a.name.last_segment() == "Scope")
                         });
                         enrich_builder_type_in_scope(
-                            ts,
+                            nt,
                             &method_name,
                             has_scope_attr,
                             ctx.current_class,
@@ -1029,8 +1032,7 @@ fn resolve_variable_in_members<'b>(
                     let enclosing_ret = crate::docblock::find_enclosing_return_type(
                         ctx.content,
                         (blk_start + 1) as usize,
-                    )
-                    .map(|s| PhpType::parse(&s));
+                    );
                     let body_ctx = ctx.with_enclosing_return_type(enclosing_ret);
                     // Seed the result set with the parameter type hint
                     // (if any) so that instanceof narrowing and
@@ -1144,8 +1146,8 @@ fn substitute_template_param_bounds(
 
     let mut subs = std::collections::HashMap::new();
     for (name, bound) in bounds {
-        if let Some(bound_str) = bound {
-            subs.insert(name, PhpType::parse(&bound_str));
+        if let Some(bound_type) = bound {
+            subs.insert(name, bound_type);
         }
     }
 
@@ -1240,9 +1242,9 @@ fn substitute_class_string_template_bounds(
     let bounds = docblock::extract_template_params_with_bounds(docblock);
     for (name, bound) in bounds {
         if name == tpl_name
-            && let Some(bound_str) = bound
+            && let Some(bound_type) = bound
         {
-            return PhpType::ClassString(Some(Box::new(PhpType::parse(&bound_str))));
+            return PhpType::ClassString(Some(Box::new(bound_type)));
         }
     }
 
@@ -2845,9 +2847,7 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
     // apply the same override check used for `@return` annotations.
     let native_type = extract_native_type_from_rhs(assignment.rhs, ctx);
     let native_parsed = native_type.as_ref().cloned();
-    let doc_parsed = PhpType::parse(&var_type);
-    let effective =
-        docblock::resolve_effective_type_typed(native_parsed.as_ref(), Some(&doc_parsed));
+    let effective = docblock::resolve_effective_type_typed(native_parsed.as_ref(), Some(&var_type));
 
     let eff_type = match effective {
         Some(t) => t,

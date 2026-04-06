@@ -16,6 +16,7 @@ use super::docblock::{
 use super::{
     CallSite, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, VarDefKind, VarDefSite,
 };
+use crate::php_type::PhpType;
 use crate::util::strip_fqn_prefix;
 
 // ─── Extraction context ─────────────────────────────────────────────────────
@@ -574,7 +575,7 @@ fn extract_from_class<'a>(class: &'a Class<'a>, ctx: &mut ExtractionCtx<'a>) {
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound,
+                bound: bound.map(|b| PhpType::parse(&b)),
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -620,7 +621,7 @@ fn extract_from_interface<'a>(iface: &'a Interface<'a>, ctx: &mut ExtractionCtx<
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound,
+                bound: bound.map(|b| PhpType::parse(&b)),
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -654,7 +655,7 @@ fn extract_from_trait<'a>(trait_def: &'a Trait<'a>, ctx: &mut ExtractionCtx<'a>)
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound,
+                bound: bound.map(|b| PhpType::parse(&b)),
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -699,7 +700,7 @@ fn extract_from_enum<'a>(enum_def: &'a Enum<'a>, ctx: &mut ExtractionCtx<'a>) {
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound,
+                bound: bound.map(|b| PhpType::parse(&b)),
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -989,7 +990,7 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound,
+                bound: bound.map(|b| PhpType::parse(&b)),
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -1234,7 +1235,7 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound,
+                bound: bound.map(|b| PhpType::parse(&b)),
                 variance,
                 scope_start: doc_offset,
                 scope_end,

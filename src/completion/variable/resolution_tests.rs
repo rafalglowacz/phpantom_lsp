@@ -28,8 +28,13 @@ fn model_loader(name: &str) -> Option<Arc<ClassInfo>> {
 #[test]
 fn enrich_scope_method_with_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Builder", "scopeActive", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scopeActive",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, Some(PhpType::parse("Builder<App\\Models\\User>")));
 }
 
@@ -37,7 +42,7 @@ fn enrich_scope_method_with_builder_type() {
 fn enrich_scope_method_with_fqn_builder() {
     let model = make_model("App\\Models\\User");
     let result = enrich_builder_type_in_scope(
-        "Illuminate\\Database\\Eloquent\\Builder",
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Builder"),
         "scopeActive",
         false,
         &model,
@@ -54,46 +59,78 @@ fn enrich_scope_method_with_fqn_builder() {
 #[test]
 fn enrich_skips_non_scope_method() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Builder", "getName", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "getName",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_bare_scope_name() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Builder", "scope", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scope",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_non_model_class() {
     let plain = make_class("App\\Services\\SomeService");
-    let result =
-        enrich_builder_type_in_scope("Builder", "scopeActive", false, &plain, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scopeActive",
+        false,
+        &plain,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_non_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Collection", "scopeActive", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Collection"),
+        "scopeActive",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_builder_with_existing_generics() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Builder<User>", "scopeActive", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder<User>"),
+        "scopeActive",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_scope_multi_word_method_name() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Builder", "scopeByAuthor", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scopeByAuthor",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, Some(PhpType::parse("Builder<App\\Models\\User>")));
 }
 
@@ -101,7 +138,7 @@ fn enrich_scope_multi_word_method_name() {
 fn enrich_scope_with_fqn_builder() {
     let model = make_model("App\\Models\\User");
     let result = enrich_builder_type_in_scope(
-        "Illuminate\\Database\\Eloquent\\Builder",
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Builder"),
         "scopeActive",
         false,
         &model,
@@ -120,7 +157,13 @@ fn enrich_scope_with_fqn_builder() {
 #[test]
 fn enrich_scope_attribute_method_with_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Builder", "active", true, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "active",
+        true,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, Some(PhpType::parse("Builder<App\\Models\\User>")));
 }
 
@@ -128,7 +171,7 @@ fn enrich_scope_attribute_method_with_builder_type() {
 fn enrich_scope_attribute_with_fqn_builder() {
     let model = make_model("App\\Models\\User");
     let result = enrich_builder_type_in_scope(
-        "Illuminate\\Database\\Eloquent\\Builder",
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Builder"),
         "active",
         true,
         &model,
@@ -145,14 +188,26 @@ fn enrich_scope_attribute_with_fqn_builder() {
 #[test]
 fn enrich_scope_attribute_skips_non_model_class() {
     let plain = make_class("App\\Services\\SomeService");
-    let result = enrich_builder_type_in_scope("Builder", "active", true, &plain, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "active",
+        true,
+        &plain,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_scope_attribute_skips_non_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Collection", "active", true, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Collection"),
+        "active",
+        true,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
@@ -160,7 +215,13 @@ fn enrich_scope_attribute_skips_non_builder_type() {
 fn enrich_no_scope_attribute_and_no_convention_skips() {
     let model = make_model("App\\Models\\User");
     // Not a scopeX name and no attribute → should skip.
-    let result = enrich_builder_type_in_scope("Builder", "active", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "active",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 

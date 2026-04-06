@@ -633,7 +633,8 @@ impl PhpType {
     pub fn is_callable(&self) -> bool {
         match self {
             PhpType::Named(s) => {
-                s.eq_ignore_ascii_case("callable") || s.eq_ignore_ascii_case("Closure")
+                let trimmed = s.strip_prefix('\\').unwrap_or(s);
+                trimmed.eq_ignore_ascii_case("callable") || trimmed.eq_ignore_ascii_case("Closure")
             }
             PhpType::Callable { .. } => true,
             PhpType::Nullable(inner) => inner.is_callable(),
@@ -685,6 +686,17 @@ impl PhpType {
             PhpType::Array(_) => true,
             PhpType::ArrayShape(_) => true,
             PhpType::Nullable(inner) => inner.is_array_like(),
+            _ => false,
+        }
+    }
+
+    /// Returns true when this type represents an object (class instance, object keyword, or object shape).
+    pub fn is_object_like(&self) -> bool {
+        match self {
+            PhpType::Named(s) => s.eq_ignore_ascii_case("object") || !is_scalar_name(s),
+            PhpType::Generic(name, _) => !is_scalar_name(name),
+            PhpType::ObjectShape(_) => true,
+            PhpType::Nullable(inner) => inner.is_object_like(),
             _ => false,
         }
     }
@@ -801,6 +813,95 @@ impl PhpType {
             PhpType::Callable { kind, .. } => Some(kind.clone()),
             // Conditionals, key-of, value-of, index-access, and raw
             // types have no native form.
+            PhpType::Conditional { .. }
+            | PhpType::KeyOf(_)
+            | PhpType::ValueOf(_)
+            | PhpType::IndexAccess(_, _)
+            | PhpType::Raw(_) => None,
+        }
+    }
+
+    /// Like [`to_native_hint`] but returns a structured [`PhpType`] instead of a string,
+    /// avoiding a parse round-trip.
+    pub fn to_native_hint_typed(&self) -> Option<PhpType> {
+        match self {
+            PhpType::Named(s) => native_scalar_name(s).map(|n| PhpType::Named(n.to_string())),
+            PhpType::Generic(name, _) => {
+                // Generic classes: strip the generic params.
+                // `array<K,V>` → `array`, `Collection<T>` → `Collection`
+                native_scalar_name(name)
+                    .map(|n| PhpType::Named(n.to_string()))
+                    .or_else(|| Some(PhpType::Named(name.clone())))
+            }
+            PhpType::Nullable(inner) => inner
+                .to_native_hint_typed()
+                .map(|n| PhpType::Nullable(Box::new(n))),
+            PhpType::Union(members) => {
+                let native: Vec<PhpType> = members
+                    .iter()
+                    .filter_map(|m| m.to_native_hint_typed())
+                    .collect();
+                if native.len() != members.len() {
+                    return None; // some members have no native form
+                }
+                // Deduplicate (e.g. `list<string>|array<int>` both → `array`)
+                let mut seen = Vec::new();
+                let mut deduped = Vec::new();
+                for ty in native {
+                    let repr = ty.to_string();
+                    if !seen.contains(&repr) {
+                        seen.push(repr);
+                        deduped.push(ty);
+                    }
+                }
+                if deduped.len() == 1 {
+                    Some(deduped.into_iter().next().unwrap())
+                } else {
+                    Some(PhpType::Union(deduped))
+                }
+            }
+            PhpType::Intersection(members) => {
+                let native: Vec<PhpType> = members
+                    .iter()
+                    .filter_map(|m| m.to_native_hint_typed())
+                    .collect();
+                if native.len() != members.len() {
+                    return None;
+                }
+                // Deduplicate
+                let mut seen = Vec::new();
+                let mut deduped = Vec::new();
+                for ty in native {
+                    let repr = ty.to_string();
+                    if !seen.contains(&repr) {
+                        seen.push(repr);
+                        deduped.push(ty);
+                    }
+                }
+                if deduped.len() == 1 {
+                    Some(deduped.into_iter().next().unwrap())
+                } else {
+                    Some(PhpType::Intersection(deduped))
+                }
+            }
+            PhpType::Array(_) => Some(PhpType::Named("array".to_string())),
+            PhpType::ClassString(_) => Some(PhpType::Named("string".to_string())),
+            PhpType::InterfaceString(_) => Some(PhpType::Named("string".to_string())),
+            PhpType::IntRange(_, _) => Some(PhpType::Named("int".to_string())),
+            PhpType::Literal(s) => {
+                if s.parse::<i64>().is_ok() {
+                    Some(PhpType::Named("int".to_string()))
+                } else if s.parse::<f64>().is_ok() {
+                    Some(PhpType::Named("float".to_string()))
+                } else if s.starts_with('\'') || s.starts_with('"') {
+                    Some(PhpType::Named("string".to_string()))
+                } else {
+                    None
+                }
+            }
+            PhpType::ArrayShape(_) => Some(PhpType::Named("array".to_string())),
+            PhpType::ObjectShape(_) => Some(PhpType::Named("object".to_string())),
+            PhpType::Callable { kind, .. } => Some(PhpType::Named(kind.clone())),
             PhpType::Conditional { .. }
             | PhpType::KeyOf(_)
             | PhpType::ValueOf(_)

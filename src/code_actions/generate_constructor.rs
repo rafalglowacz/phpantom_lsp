@@ -35,8 +35,8 @@ use crate::util::offset_to_position;
 struct QualifyingProperty {
     /// Property name without the `$` prefix.
     name: String,
-    /// Type hint string for the constructor parameter, if available.
-    type_hint: Option<String>,
+    /// Structured type hint for the constructor parameter, if available.
+    type_hint: Option<PhpType>,
     /// Default value text (e.g. `'active'`, `[]`), if the property has one.
     default_value: Option<String>,
     /// Visibility keyword (`"public"`, `"protected"`, `"private"`).
@@ -243,10 +243,7 @@ fn collect_qualifying_properties<'a>(
         let is_readonly = has_readonly(plain.modifiers.iter());
 
         // Extract the native type hint for the property.
-        let native_hint = plain
-            .hint
-            .as_ref()
-            .map(|h| extract_hint_type(h).to_string());
+        let native_hint = plain.hint.as_ref().map(|h| extract_hint_type(h));
 
         // Try to get a docblock @var type if there's no native hint
         // or if we want to use it as a fallback.
@@ -270,10 +267,10 @@ fn collect_qualifying_properties<'a>(
             } else if let Some(ref doc_type) = docblock_type {
                 // Only use docblock type if it's a single, non-compound type.
                 // Skip complex types like `array{key: value}` or `int|string`.
-                if is_simple_type(doc_type) {
+                if is_simple_php_type(doc_type) {
                     Some(doc_type.clone())
                 } else {
-                    None::<String>
+                    None::<PhpType>
                 }
             } else {
                 None
@@ -301,15 +298,6 @@ fn collect_qualifying_properties<'a>(
     }
 
     result
-}
-
-/// Check whether a type string is a simple (non-compound) type suitable
-/// for use as a parameter type hint.
-///
-/// Returns `false` for union types (`int|string`), intersection types,
-/// array shapes, generic syntax, etc.
-fn is_simple_type(type_str: &str) -> bool {
-    is_simple_php_type(&PhpType::parse(type_str))
 }
 
 /// Check whether a [`PhpType`] is a simple (non-compound) type suitable
@@ -408,7 +396,7 @@ fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
         let mut param = String::new();
 
         if let Some(ref hint) = prop.type_hint {
-            param.push_str(hint);
+            param.push_str(&hint.to_string());
             param.push(' ');
         }
 
@@ -483,7 +471,7 @@ fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> Str
         // Type hint.
         if let Some(ref hint) = prop.type_hint {
             param.push(' ');
-            param.push_str(hint);
+            param.push_str(&hint.to_string());
         }
 
         param.push_str(" $");
@@ -549,47 +537,47 @@ mod tests {
 
     #[test]
     fn simple_type_accepts_basic() {
-        assert!(is_simple_type("string"));
-        assert!(is_simple_type("int"));
-        assert!(is_simple_type("array"));
-        assert!(is_simple_type("bool"));
+        assert!(is_simple_php_type(&PhpType::parse("string")));
+        assert!(is_simple_php_type(&PhpType::parse("int")));
+        assert!(is_simple_php_type(&PhpType::parse("array")));
+        assert!(is_simple_php_type(&PhpType::parse("bool")));
     }
 
     #[test]
     fn simple_type_accepts_nullable() {
-        assert!(is_simple_type("?string"));
-        assert!(is_simple_type("?Foo"));
+        assert!(is_simple_php_type(&PhpType::parse("?string")));
+        assert!(is_simple_php_type(&PhpType::parse("?Foo")));
     }
 
     #[test]
     fn simple_type_accepts_fqn() {
-        assert!(is_simple_type("App\\Models\\User"));
-        assert!(is_simple_type("?App\\Models\\User"));
+        assert!(is_simple_php_type(&PhpType::parse("App\\Models\\User")));
+        assert!(is_simple_php_type(&PhpType::parse("?App\\Models\\User")));
     }
 
     #[test]
     fn simple_type_rejects_union() {
-        assert!(!is_simple_type("int|string"));
+        assert!(!is_simple_php_type(&PhpType::parse("int|string")));
     }
 
     #[test]
     fn simple_type_rejects_intersection() {
-        assert!(!is_simple_type("Foo&Bar"));
+        assert!(!is_simple_php_type(&PhpType::parse("Foo&Bar")));
     }
 
     #[test]
     fn simple_type_rejects_array_shape() {
-        assert!(!is_simple_type("array{name: string}"));
+        assert!(!is_simple_php_type(&PhpType::parse("array{name: string}")));
     }
 
     #[test]
     fn simple_type_rejects_generic() {
-        assert!(!is_simple_type("Collection<User>"));
+        assert!(!is_simple_php_type(&PhpType::parse("Collection<User>")));
     }
 
     #[test]
     fn simple_type_rejects_empty() {
-        assert!(!is_simple_type(""));
+        assert!(!is_simple_php_type(&PhpType::parse("")));
     }
 
     // ── build_constructor ───────────────────────────────────────────────
@@ -597,7 +585,7 @@ mod tests {
     fn prop(name: &str, type_hint: Option<&str>, default: Option<&str>) -> QualifyingProperty {
         QualifyingProperty {
             name: name.to_string(),
-            type_hint: type_hint.map(|s| s.to_string()),
+            type_hint: type_hint.map(PhpType::parse),
             default_value: default.map(|s| s.to_string()),
             visibility: "public",
             is_readonly: false,
@@ -708,7 +696,7 @@ mod tests {
     ) -> QualifyingProperty {
         QualifyingProperty {
             name: name.to_string(),
-            type_hint: type_hint.map(|s| s.to_string()),
+            type_hint: type_hint.map(PhpType::parse),
             default_value: default.map(|s| s.to_string()),
             visibility,
             is_readonly,
@@ -889,10 +877,24 @@ mod tests {
             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
             assert_eq!(props.len(), 2);
             assert_eq!(props[0].name, "name");
-            assert_eq!(props[0].type_hint.as_deref(), Some("string"));
+            assert_eq!(
+                props[0]
+                    .type_hint
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .as_deref(),
+                Some("string")
+            );
             assert_eq!(props[0].visibility, "public");
             assert_eq!(props[1].name, "age");
-            assert_eq!(props[1].type_hint.as_deref(), Some("int"));
+            assert_eq!(
+                props[1]
+                    .type_hint
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .as_deref(),
+                Some("int")
+            );
             assert_eq!(props[1].visibility, "private");
         } else {
             panic!("should find class");
@@ -930,7 +932,14 @@ mod tests {
             assert_eq!(props[0].name, "name");
             assert!(!props[0].is_readonly);
             assert_eq!(props[1].name, "id");
-            assert_eq!(props[1].type_hint.as_deref(), Some("int"));
+            assert_eq!(
+                props[1]
+                    .type_hint
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .as_deref(),
+                Some("int")
+            );
             assert!(props[1].is_readonly);
         } else {
             panic!("should find class");
@@ -967,7 +976,14 @@ mod tests {
             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
             assert_eq!(props.len(), 1);
             assert_eq!(props[0].name, "name");
-            assert_eq!(props[0].type_hint.as_deref(), Some("string"));
+            assert_eq!(
+                props[0]
+                    .type_hint
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .as_deref(),
+                Some("string")
+            );
         } else {
             panic!("should find class");
         }
@@ -1005,7 +1021,14 @@ mod tests {
         if let CursorContext::InClassLike { all_members, .. } = &ctx {
             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
             assert_eq!(props.len(), 1);
-            assert_eq!(props[0].type_hint.as_deref(), Some("?string"));
+            assert_eq!(
+                props[0]
+                    .type_hint
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .as_deref(),
+                Some("?string")
+            );
         } else {
             panic!("should find class");
         }
@@ -1022,7 +1045,14 @@ mod tests {
         if let CursorContext::InClassLike { all_members, .. } = &ctx {
             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
             assert_eq!(props.len(), 1);
-            assert_eq!(props[0].type_hint.as_deref(), Some("int|string"));
+            assert_eq!(
+                props[0]
+                    .type_hint
+                    .as_ref()
+                    .map(|t| t.to_string())
+                    .as_deref(),
+                Some("int|string")
+            );
         } else {
             panic!("should find class");
         }

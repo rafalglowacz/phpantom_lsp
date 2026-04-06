@@ -374,13 +374,6 @@ pub(crate) fn strip_fqn_prefix(name: &str) -> &str {
     name.strip_prefix('\\').unwrap_or(name)
 }
 
-/// Strip the nullable `?` prefix from a raw PHP type string.
-///
-/// `"?string"` → `"string"`, `"string"` → `"string"`.
-pub(crate) fn strip_nullable(name: &str) -> &str {
-    name.strip_prefix('?').unwrap_or(name)
-}
-
 /// Remove surrounding single or double quotes from a PHP string literal.
 ///
 /// `"'hello'"` → `Some("hello")`, `"\"world\""` → `Some("world")`,
@@ -757,6 +750,177 @@ pub(crate) fn find_class_by_name<'a>(
     } else {
         all_classes.iter().find(|c| c.name == short)
     }
+}
+
+/// Check whether `class` is a subtype of the class identified by
+/// `ancestor_name`.  Returns `true` when:
+///
+/// - `class.name` equals `ancestor_name` (same class), or
+/// - walking the `parent_class` chain reaches `ancestor_name`, or
+/// - `ancestor_name` appears in the `interfaces` list of `class` or any
+///   of its ancestors.
+///
+/// Both short names and fully-qualified names are compared so that
+/// cross-file relationships (where `parent_class` stores FQNs) work.
+pub(crate) fn is_subtype_of(
+    class: &crate::types::ClassInfo,
+    ancestor_name: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> bool {
+    let ancestor_short = short_name(ancestor_name);
+
+    // Same class?  When the ancestor is a FQN, compare against the
+    // class's own FQN to avoid false positives when two classes share
+    // the same short name (e.g. `Contracts\Provider` vs
+    // `Concrete\Provider`).
+    if ancestor_name.contains('\\') {
+        if class.fqn() == ancestor_name {
+            return true;
+        }
+    } else if class.name == ancestor_name {
+        return true;
+    }
+
+    // When the ancestor is qualified, only match against normalised
+    // FQNs — never fall back to short-name comparison, which would
+    // produce false positives when two different classes share the
+    // same short name (e.g. `Contracts\Provider` vs
+    // `Concrete\Provider`).
+    let fqn_mode = ancestor_name.contains('\\');
+
+    // Check interfaces on the class itself.
+    for iface in &class.interfaces {
+        if iface == ancestor_name {
+            return true;
+        }
+        if !fqn_mode {
+            let iface_short = short_name(iface);
+            if iface_short == ancestor_short {
+                return true;
+            }
+        }
+    }
+
+    // Walk the parent chain.
+    let mut current_parent = class.parent_class.clone();
+    let mut depth = 0u32;
+    while let Some(ref name) = current_parent {
+        depth += 1;
+        if depth > 20 {
+            break;
+        }
+        if name == ancestor_name {
+            return true;
+        }
+        if !fqn_mode {
+            let short = short_name(name);
+            if short == ancestor_short {
+                return true;
+            }
+        }
+        // Load the parent to check its interfaces and continue the chain.
+        if let Some(parent_info) = class_loader(name) {
+            for iface in &parent_info.interfaces {
+                if iface == ancestor_name {
+                    return true;
+                }
+                if !fqn_mode {
+                    let iface_short = short_name(iface);
+                    if iface_short == ancestor_short {
+                        return true;
+                    }
+                }
+            }
+            current_parent = parent_info.parent_class.clone();
+        } else {
+            break;
+        }
+    }
+
+    false
+}
+
+/// Check whether `subtype` is a subtype of `supertype`, combining
+/// structural subtyping ([`PhpType::is_subtype_of`]) with nominal
+/// class-hierarchy walking ([`is_subtype_of`]).
+///
+/// This is the single entry point for all subtype checks that need
+/// both layers:
+///
+/// - Scalars, unions, intersections, generics, callables, literals,
+///   and other structural relationships are handled by
+///   `PhpType::is_subtype_of`.
+/// - Nominal class relationships (`Cat <: Animal`) are resolved by
+///   loading the class via `class_loader` and walking its parent
+///   chain and interface list.
+///
+/// Returns `true` when the structural check succeeds, or when both
+/// types are named (class/interface) types and the class hierarchy
+/// confirms the relationship.
+pub(crate) fn is_subtype_of_typed(
+    subtype: &crate::php_type::PhpType,
+    supertype: &crate::php_type::PhpType,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> bool {
+    use crate::php_type::PhpType;
+
+    // Fast path: structural subtyping covers scalars, unions,
+    // intersections, generics, callables, literals, etc.
+    if subtype.is_subtype_of(supertype) {
+        return true;
+    }
+
+    // ── Union subtype: every member must be a subtype ───────────
+    if let PhpType::Union(members) = subtype {
+        return members
+            .iter()
+            .all(|m| is_subtype_of_typed(m, supertype, class_loader));
+    }
+
+    // ── Union supertype: at least one member must accept subtype ─
+    if let PhpType::Union(members) = supertype {
+        return members
+            .iter()
+            .any(|m| is_subtype_of_typed(subtype, m, class_loader));
+    }
+
+    // ── Nullable normalisation ──────────────────────────────────
+    if let PhpType::Nullable(inner) = subtype {
+        let as_union = PhpType::Union(vec![inner.as_ref().clone(), PhpType::null()]);
+        return is_subtype_of_typed(&as_union, supertype, class_loader);
+    }
+    if let PhpType::Nullable(inner) = supertype {
+        let as_union = PhpType::Union(vec![inner.as_ref().clone(), PhpType::null()]);
+        return is_subtype_of_typed(subtype, &as_union, class_loader);
+    }
+
+    // ── Intersection subtype: at least one member suffices ──────
+    if let PhpType::Intersection(members) = subtype {
+        return members
+            .iter()
+            .any(|m| is_subtype_of_typed(m, supertype, class_loader));
+    }
+
+    // ── Intersection supertype: all members required ────────────
+    if let PhpType::Intersection(members) = supertype {
+        return members
+            .iter()
+            .all(|m| is_subtype_of_typed(subtype, m, class_loader));
+    }
+
+    // ── Nominal class hierarchy check ───────────────────────────
+    // Both sides must resolve to a class name for the hierarchy walk.
+    let sub_name = subtype.base_name();
+    let sup_name = supertype.base_name();
+
+    if let (Some(sub), Some(sup)) = (sub_name, sup_name) {
+        // Try to load the subtype class and walk its hierarchy.
+        if let Some(cls) = class_loader(sub) {
+            return is_subtype_of(&cls, sup, class_loader);
+        }
+    }
+
+    false
 }
 
 /// Collapse multi-line method chains around the cursor into a single line.

@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use phpantom_lsp::completion::phpdoc::*;
+use phpantom_lsp::php_type::PhpType;
 use phpantom_lsp::types::ClassInfo;
 use tower_lsp::lsp_types::*;
 
@@ -1160,13 +1161,13 @@ fn symbol_info_function_params() {
     assert_eq!(info.params.len(), 2);
     assert_eq!(
         info.params[0],
-        (Some("string".to_string()), "$name".to_string())
+        (Some(PhpType::parse("string")), "$name".to_string())
     );
     assert_eq!(
         info.params[1],
-        (Some("int".to_string()), "$age".to_string())
+        (Some(PhpType::parse("int")), "$age".to_string())
     );
-    assert_eq!(info.return_type, Some("string".to_string()));
+    assert_eq!(info.return_type, Some(PhpType::parse("string")));
 }
 
 #[test]
@@ -1207,7 +1208,7 @@ fn symbol_info_nullable_return() {
         character: 4,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.return_type, Some("?User".to_string()));
+    assert_eq!(info.return_type, Some(PhpType::parse("?User")));
 }
 
 #[test]
@@ -1225,7 +1226,7 @@ fn symbol_info_property_type() {
         character: 8,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.type_hint, Some("string".to_string()));
+    assert_eq!(info.type_hint, Some(PhpType::parse("string")));
 }
 
 #[test]
@@ -1243,7 +1244,7 @@ fn symbol_info_nullable_property() {
         character: 8,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.type_hint, Some("?int".to_string()));
+    assert_eq!(info.type_hint, Some(PhpType::parse("?int")));
 }
 
 #[test]
@@ -1261,7 +1262,7 @@ fn symbol_info_readonly_property() {
         character: 8,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.type_hint, Some("string".to_string()));
+    assert_eq!(info.type_hint, Some(PhpType::parse("string")));
 }
 
 #[test]
@@ -1281,7 +1282,7 @@ fn symbol_info_variadic_param() {
     assert_eq!(info.params.len(), 1);
     assert_eq!(
         info.params[0],
-        (Some("array".to_string()), "$arrays".to_string())
+        (Some(PhpType::parse("array")), "$arrays".to_string())
     );
 }
 
@@ -1300,8 +1301,14 @@ fn symbol_info_reference_param() {
     };
     let info = extract_symbol_info(content, pos);
     assert_eq!(info.params.len(), 2);
-    assert_eq!(info.params[0], (Some("int".to_string()), "$a".to_string()));
-    assert_eq!(info.params[1], (Some("int".to_string()), "$b".to_string()));
+    assert_eq!(
+        info.params[0],
+        (Some(PhpType::parse("int")), "$a".to_string())
+    );
+    assert_eq!(
+        info.params[1],
+        (Some(PhpType::parse("int")), "$b".to_string())
+    );
 }
 
 #[test]
@@ -1319,7 +1326,7 @@ fn symbol_info_no_params() {
     };
     let info = extract_symbol_info(content, pos);
     assert!(info.params.is_empty());
-    assert_eq!(info.return_type, Some("DateTimeImmutable".to_string()));
+    assert_eq!(info.return_type, Some(PhpType::parse("DateTimeImmutable")));
 }
 
 // ── find_existing_param_tags ─────────────────────────────────────

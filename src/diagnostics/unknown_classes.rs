@@ -24,7 +24,6 @@ use tower_lsp::lsp_types::*;
 
 use crate::Backend;
 use crate::names::OwnedResolvedNames;
-use crate::php_type::PhpType;
 use crate::symbol_map::SymbolKind;
 use crate::types::ClassInfo;
 
@@ -126,13 +125,6 @@ impl Backend {
             } else {
                 resolve_to_fqn(ref_name, &file_use_map, &file_namespace)
             };
-
-            // ── Skip names that are always resolvable ───────────────────
-            // `self`, `static`, `parent`, `$this` are context-dependent
-            // keywords and should never trigger an unknown-class warning.
-            if PhpType::parse(ref_name).is_self_like() {
-                continue;
-            }
 
             // ── Skip @phpstan-type / @psalm-type aliases ────────────────
             // Type aliases defined via `@phpstan-type`, `@psalm-type`, or

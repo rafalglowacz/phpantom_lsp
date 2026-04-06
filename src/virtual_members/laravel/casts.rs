@@ -148,7 +148,7 @@ pub(super) fn cast_type_to_php_type(
     }
 
     // 8. Fallback: unknown cast type.
-    PhpType::Named("mixed".to_string())
+    PhpType::mixed()
 }
 
 /// Extract the `TGet` type from a cast class's `@implements CastsAttributes<TGet, TSet>`.

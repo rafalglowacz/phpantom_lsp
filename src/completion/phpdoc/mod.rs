@@ -641,16 +641,15 @@ pub fn build_phpdoc_completions(
 
                         let (insert, label, fmt) = if let Some(th) = type_hint {
                             // Plain label for display.
-                            let parsed = PhpType::parse(th);
                             let label_type = smart
                                 .class_loader
-                                .and_then(|cl| generation::enrichment_plain(Some(&parsed), cl))
-                                .unwrap_or_else(|| th.clone());
+                                .and_then(|cl| generation::enrichment_plain(Some(th), cl))
+                                .unwrap_or_else(|| th.to_string());
 
                             // Snippet insert text with tab stops on template params.
                             let mut tab_stop = 1u32;
                             let snippet_type = smart.class_loader.and_then(|cl| {
-                                generation::enrichment_snippet(Some(&parsed), &mut tab_stop, cl)
+                                generation::enrichment_snippet(Some(th), &mut tab_stop, cl)
                             });
 
                             if let Some(snippet) = snippet_type {
@@ -699,19 +698,18 @@ pub fn build_phpdoc_completions(
                     continue;
                 }
                 if let Some(ref ret) = sym.return_type
-                    && !PhpType::parse(ret).is_void()
+                    && !ret.is_void()
                 {
                     // Plain label for display.
-                    let parsed_ret = PhpType::parse(ret);
                     let label_type = smart
                         .class_loader
-                        .and_then(|cl| generation::enrichment_plain(Some(&parsed_ret), cl))
-                        .unwrap_or_else(|| ret.clone());
+                        .and_then(|cl| generation::enrichment_plain(Some(ret), cl))
+                        .unwrap_or_else(|| ret.to_string());
 
                     // Snippet insert text with tab stops on template params.
                     let mut tab_stop = 1u32;
                     let snippet_type = smart.class_loader.and_then(|cl| {
-                        generation::enrichment_snippet(Some(&parsed_ret), &mut tab_stop, cl)
+                        generation::enrichment_snippet(Some(ret), &mut tab_stop, cl)
                     });
 
                     let (insert, fmt) = if let Some(snippet) = snippet_type {
@@ -736,7 +734,7 @@ pub fn build_phpdoc_completions(
                     // Smart item emitted — skip the generic fallback.
                     continue;
                 }
-                if sym.return_type.as_deref() == Some("void") {
+                if sym.return_type.as_ref().is_some_and(|t| t.is_void()) {
                     // Explicit `: void` type hint — the hint speaks for
                     // itself, no need to suggest @return in PHPDoc.
                     continue;
@@ -806,17 +804,16 @@ pub fn build_phpdoc_completions(
                 && let Some(ref th) = sym.type_hint
             {
                 // Plain label for display.
-                let parsed_th = PhpType::parse(th);
                 let label_type = smart
                     .class_loader
-                    .and_then(|cl| generation::enrichment_plain(Some(&parsed_th), cl))
-                    .unwrap_or_else(|| th.clone());
+                    .and_then(|cl| generation::enrichment_plain(Some(th), cl))
+                    .unwrap_or_else(|| th.to_string());
 
                 // Snippet insert text with tab stops on template params.
                 let mut tab_stop = 1u32;
-                let snippet_type = smart.class_loader.and_then(|cl| {
-                    generation::enrichment_snippet(Some(&parsed_th), &mut tab_stop, cl)
-                });
+                let snippet_type = smart
+                    .class_loader
+                    .and_then(|cl| generation::enrichment_snippet(Some(th), &mut tab_stop, cl));
 
                 let (insert, fmt) = if let Some(snippet) = snippet_type {
                     (format!("var {}", snippet), Some(InsertTextFormat::SNIPPET))

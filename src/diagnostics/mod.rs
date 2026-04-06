@@ -530,25 +530,14 @@ fn enclosing_docblock_text(content: &str, diag_line: usize) -> String {
 /// Check whether `scope` (typically a single docblock) contains
 /// `@throws <short_name>` (case-insensitive).
 fn scope_has_throws_tag(scope: &str, short_name: &str) -> bool {
-    use mago_docblock::document::TagKind;
-
-    let info = match crate::docblock::parser::parse_docblock_for_tags(scope) {
-        Some(info) => info,
-        None => return false,
-    };
-
     let lower = short_name.to_lowercase();
-    for tag in info.tags_by_kind(TagKind::Throws) {
-        let rest = tag.description.trim();
-        if let Some(tag_type) = rest.split_whitespace().next() {
-            let tag_short = tag_type.trim_start_matches('\\');
-            let tag_short = tag_short.rsplit('\\').next().unwrap_or(tag_short);
-            if tag_short.to_lowercase() == lower {
-                return true;
-            }
-        }
-    }
-    false
+    crate::docblock::extract_throws_tags(scope)
+        .iter()
+        .any(|ty| {
+            ty.base_name()
+                .map(crate::util::short_name)
+                .is_some_and(|s| s.eq_ignore_ascii_case(&lower))
+        })
 }
 
 /// How long to wait after the last keystroke before publishing diagnostics.

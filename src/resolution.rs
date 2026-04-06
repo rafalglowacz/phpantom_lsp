@@ -63,9 +63,9 @@ impl Backend {
             owned_name = base.to_string();
             owned_name.as_str()
         } else {
-            // Not a class-like type (scalar, union, etc.) — strip leading
-            // `?` as a minimal normalisation and try anyway.
-            crate::util::strip_nullable(class_name)
+            // Not a class-like type (scalar, union, etc.) — no useful
+            // normalisation possible, try as-is.
+            class_name
         };
 
         // The class name stored in ClassInfo is just the short name (e.g. "Customer"),

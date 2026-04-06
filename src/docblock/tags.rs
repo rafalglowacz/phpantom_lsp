@@ -5,10 +5,10 @@
 //! `@deprecated`, and `@phpstan-assert` / `@psalm-assert` tags.
 //!
 //! It also provides:
-//!   - [`should_override_type`]: compatibility check so that a docblock type
+//!   - [`should_override_type_typed`]: compatibility check so that a docblock type
 //!     only overrides a native type hint when the native hint is broad enough
 //!     to be refined.
-//!   - [`resolve_effective_type`]: pick the best type between docblock and
+//!   - [`resolve_effective_type_typed`]: pick the best type between docblock and
 //!     native hints.
 //!   - [`get_docblock_text_for_node`]: extract raw docblock text from an AST
 //!     node's preceding trivia.
@@ -23,7 +23,6 @@ use mago_syntax::ast::*;
 
 use crate::symbol_map::docblock::get_docblock_text_with_offset;
 use crate::types::{AssertionKind, PhpVersion, TypeAssertion};
-use crate::util::strip_fqn_prefix;
 
 use super::parser::{DocblockInfo, collapse_newlines, parse_docblock_for_tags};
 use super::types::split_type_token;
@@ -42,7 +41,7 @@ use crate::php_type::PhpType;
 ///
 /// Returns the cleaned type string (leading `\` stripped) or `None` if no
 /// `@return` tag is found.
-pub fn extract_return_type(docblock: &str) -> Option<String> {
+pub fn extract_return_type(docblock: &str) -> Option<PhpType> {
     extract_type_via_mago(
         docblock,
         &[
@@ -54,7 +53,7 @@ pub fn extract_return_type(docblock: &str) -> Option<String> {
 }
 
 /// Like [`extract_return_type`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_return_type_from_info(info: &DocblockInfo) -> Option<String> {
+pub fn extract_return_type_from_info(info: &DocblockInfo) -> Option<PhpType> {
     extract_type_via_mago_from_info(
         info,
         &[
@@ -198,7 +197,7 @@ pub fn extract_deprecation_with_see_from_info(info: &DocblockInfo) -> Option<Str
 /// Returns a list of `(base_class_name, generic_args)` tuples.  The base
 /// class name has its leading `\` and generic parameters stripped.  The
 /// `generic_args` vector is empty when the tag has no `<…>` suffix.
-pub fn extract_mixin_tags(docblock: &str) -> Vec<(String, Vec<String>)> {
+pub fn extract_mixin_tags(docblock: &str) -> Vec<(String, Vec<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -207,7 +206,7 @@ pub fn extract_mixin_tags(docblock: &str) -> Vec<(String, Vec<String>)> {
 }
 
 /// Like [`extract_mixin_tags`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<String>)> {
+pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<PhpType>)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kind(TagKind::Mixin) {
@@ -225,27 +224,16 @@ pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<Str
         let parsed = PhpType::parse(type_token);
         let (base, generic_args) = match &parsed {
             PhpType::Generic(name, args) => {
-                let arg_strs: Vec<String> = args
-                    .iter()
-                    .map(|a| {
-                        let s = a.to_string();
-                        strip_fqn_prefix(&s).to_string()
-                    })
-                    .collect();
-                (name.clone(), arg_strs)
+                let cleaned_args: Vec<PhpType> = args.iter().map(strip_fqn_prefix_typed).collect();
+                (name.clone(), cleaned_args)
             }
             PhpType::Named(name) => (name.clone(), vec![]),
             PhpType::Nullable(inner) => match inner.as_ref() {
                 PhpType::Named(name) => (name.clone(), vec![]),
                 PhpType::Generic(name, args) => {
-                    let arg_strs: Vec<String> = args
-                        .iter()
-                        .map(|a| {
-                            let s = a.to_string();
-                            strip_fqn_prefix(&s).to_string()
-                        })
-                        .collect();
-                    (name.clone(), arg_strs)
+                    let cleaned_args: Vec<PhpType> =
+                        args.iter().map(strip_fqn_prefix_typed).collect();
+                    (name.clone(), cleaned_args)
                 }
                 _ => continue,
             },
@@ -258,6 +246,13 @@ pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<Str
     }
 
     results
+}
+
+/// Strip a leading `\` from a `PhpType` without a `to_string()` →
+/// `PhpType::parse()` round-trip.  Uses `resolve_names` which already
+/// walks the entire type structure recursively.
+fn strip_fqn_prefix_typed(ty: &PhpType) -> PhpType {
+    ty.resolve_names(&|name| name.strip_prefix('\\').unwrap_or(name).to_string())
 }
 
 /// Extract all `@throws` tags from a method-level docblock.
@@ -393,7 +388,7 @@ pub fn extract_type_assertions_from_info(info: &DocblockInfo) -> Vec<TypeAsserti
 /// Used for property type annotations like:
 ///   - `/** @var Session */`
 ///   - `/** @var \App\Models\User */`
-pub fn extract_var_type(docblock: &str) -> Option<String> {
+pub fn extract_var_type(docblock: &str) -> Option<PhpType> {
     extract_type_via_mago(
         docblock,
         &[TagKind::PhpstanVar, TagKind::PsalmVar, TagKind::Var],
@@ -401,7 +396,7 @@ pub fn extract_var_type(docblock: &str) -> Option<String> {
 }
 
 /// Like [`extract_var_type`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_var_type_from_info(info: &DocblockInfo) -> Option<String> {
+pub fn extract_var_type_from_info(info: &DocblockInfo) -> Option<PhpType> {
     extract_type_via_mago_from_info(
         info,
         &[TagKind::PhpstanVar, TagKind::PsalmVar, TagKind::Var],
@@ -416,14 +411,14 @@ pub fn extract_var_type_from_info(info: &DocblockInfo) -> Option<String> {
 ///
 /// The variable name (if present) is returned **with** the `$` prefix so
 /// callers can compare directly against AST variable names.
-pub fn extract_var_type_with_name(docblock: &str) -> Option<(String, Option<String>)> {
+pub fn extract_var_type_with_name(docblock: &str) -> Option<(PhpType, Option<String>)> {
     extract_var_type_with_name_from_info(&parse_docblock_for_tags(docblock)?)
 }
 
 /// Like [`extract_var_type_with_name`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_var_type_with_name_from_info(
     info: &DocblockInfo,
-) -> Option<(String, Option<String>)> {
+) -> Option<(PhpType, Option<String>)> {
     for tag in info.tags_by_kinds(&[TagKind::PhpstanVar, TagKind::PsalmVar, TagKind::Var]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
@@ -433,7 +428,7 @@ pub fn extract_var_type_with_name_from_info(
         // Extract the type token, respecting `<…>` nesting so that
         // generics like `Collection<int, User>` are treated as one unit.
         let (type_str, remainder) = split_type_token(desc);
-        let cleaned_type = type_str.trim_end_matches(['.', ',']).to_string();
+        let cleaned_type = type_str.trim_end_matches(['.', ',']);
         if cleaned_type.is_empty() {
             return None;
         }
@@ -445,7 +440,8 @@ pub fn extract_var_type_with_name_from_info(
             .filter(|t| t.starts_with('$'))
             .map(|t| t.to_string());
 
-        return Some((cleaned_type, var_name));
+        let parsed = sanitise_and_parse_docblock_type(cleaned_type)?;
+        return Some((parsed, var_name));
     }
     None
 }
@@ -460,7 +456,7 @@ pub fn extract_var_type_with_name_from_info(
 pub fn find_inline_var_docblock(
     content: &str,
     stmt_start: usize,
-) -> Option<(String, Option<String>)> {
+) -> Option<(PhpType, Option<String>)> {
     let before = content.get(..stmt_start)?;
 
     // Walk backward past whitespace / newlines.
@@ -596,12 +592,12 @@ pub fn find_var_raw_type_in_source(
 /// Example:
 ///   docblock containing `@param list<User> $users` with var_name `"$users"`
 ///   → `Some("list<User>")`
-pub fn extract_param_raw_type(docblock: &str, var_name: &str) -> Option<String> {
+pub fn extract_param_raw_type(docblock: &str, var_name: &str) -> Option<PhpType> {
     extract_param_raw_type_from_info(&parse_docblock_for_tags(docblock)?, var_name)
 }
 
 /// Like [`extract_param_raw_type`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> Option<String> {
+pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> Option<PhpType> {
     for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
@@ -616,7 +612,7 @@ pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> 
         if let Some(name) = remainder.split_whitespace().next() {
             let name = name.strip_prefix("...").unwrap_or(name);
             if name == var_name {
-                return Some(type_token.to_string());
+                return sanitise_and_parse_docblock_type(type_token);
             }
         }
     }
@@ -633,7 +629,7 @@ pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> 
 /// This is used to discover extra `@param` tags that document parameters
 /// not present in the native function signature (e.g. parameters accessed
 /// via `func_get_args()`).
-pub fn extract_all_param_tags(docblock: &str) -> Vec<(String, String)> {
+pub fn extract_all_param_tags(docblock: &str) -> Vec<(String, PhpType)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -642,7 +638,7 @@ pub fn extract_all_param_tags(docblock: &str) -> Vec<(String, String)> {
 }
 
 /// Like [`extract_all_param_tags`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, String)> {
+pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, PhpType)> {
     let mut results = Vec::new();
 
     // Only match `@param` and `@phpstan-param`, not compound tags like
@@ -660,8 +656,10 @@ pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, Str
         // Handle `...$name` (variadic) by stripping the leading `...`.
         if let Some(name) = remainder.split_whitespace().next() {
             let name = name.strip_prefix("...").unwrap_or(name);
-            if name.starts_with('$') {
-                results.push((name.to_string(), type_token.to_string()));
+            if name.starts_with('$')
+                && let Some(parsed) = sanitise_and_parse_docblock_type(type_token)
+            {
+                results.push((name.to_string(), parsed));
             }
         }
     }
@@ -683,7 +681,7 @@ pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, Str
 /// type for a parameter.
 pub fn extract_param_types_positional_from_info(
     info: &DocblockInfo,
-) -> Vec<(Option<String>, String)> {
+) -> Vec<(Option<String>, PhpType)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
@@ -703,7 +701,9 @@ pub fn extract_param_types_positional_from_info(
             }
         });
 
-        results.push((param_name, type_token.to_string()));
+        if let Some(parsed) = sanitise_and_parse_docblock_type(type_token) {
+            results.push((param_name, parsed));
+        }
     }
 
     results
@@ -1122,7 +1122,7 @@ pub fn find_iterable_raw_type_in_source(
 ///
 /// Returns `None` when no enclosing function docblock or `@return` tag
 /// can be found.
-pub fn find_enclosing_return_type(content: &str, cursor_offset: usize) -> Option<String> {
+pub fn find_enclosing_return_type(content: &str, cursor_offset: usize) -> Option<PhpType> {
     let search_area = content.get(..cursor_offset)?;
 
     // Walk backward, tracking brace depth.  We start inside a function
@@ -1195,15 +1195,6 @@ pub fn find_enclosing_return_type(content: &str, cursor_offset: usize) -> Option
 /// information than the native hint (e.g. `Collection<int, User>` vs
 /// bare `object`), and `false` when overriding would lose precision
 /// (e.g. both are scalars).
-pub fn should_override_type(docblock_type: &str, native_type: &str) -> bool {
-    let doc_parsed = PhpType::parse(docblock_type);
-    let native_parsed = PhpType::parse(native_type);
-    should_override_type_typed(&doc_parsed, &native_parsed)
-}
-
-/// Typed variant of [`should_override_type`] that accepts pre-parsed
-/// [`PhpType`] values, avoiding redundant parse round-trips when callers
-/// already hold parsed types.
 pub fn should_override_type_typed(docblock_type: &PhpType, native_type: &PhpType) -> bool {
     // If the docblock type is semantically equivalent to the native type
     // (handles `?X` ↔ `X|null`, reordered unions, FQN vs short names),
@@ -1442,42 +1433,6 @@ pub fn get_docblock_info_for_node(
 
 // ─── Effective Type Resolution ──────────────────────────────────────────────
 
-/// Pick the best available type between a native type hint and a docblock
-/// annotation, returning a parsed [`PhpType`].
-///
-/// When both are present, the docblock type is used only if
-/// [`should_override_type`] approves (i.e. the native hint is broad enough
-/// to refine).  Malformed docblock types with unclosed brackets are
-/// partially recovered or discarded.
-///
-/// Callers that need a string representation can use
-/// [`PhpType::to_string()`] on the result.
-pub fn resolve_effective_type(
-    native_type: Option<&str>,
-    docblock_type: Option<&str>,
-) -> Option<PhpType> {
-    // When the docblock type has unclosed brackets (e.g. a multi-line
-    // `@return` that couldn't be fully joined), treat it as broken and
-    // attempt partial recovery.  If recovery yields nothing useful, fall
-    // back to the native type so that resolution is never blocked by a
-    // malformed PHPDoc annotation.
-    let sanitised_doc = docblock_type.and_then(|doc| {
-        if crate::util::has_unclosed_delimiters(doc) {
-            let base = recover_base_type(doc);
-            if base.is_empty() {
-                None
-            } else {
-                Some(PhpType::parse(base))
-            }
-        } else {
-            Some(PhpType::parse(doc))
-        }
-    });
-
-    let native_parsed = native_type.map(PhpType::parse);
-    resolve_effective_type_typed(native_parsed.as_ref(), sanitised_doc.as_ref())
-}
-
 /// Parse a raw docblock type string into a [`PhpType`], applying
 /// unclosed-bracket recovery when necessary.
 ///
@@ -1485,7 +1440,7 @@ pub fn resolve_effective_type(
 /// `extract_param_raw_type`, etc. may contain malformed type expressions
 /// (e.g. `"static<"`, `"Collection<int"`) when multi-line annotations
 /// couldn't be fully joined.  This helper recovers the base type in such
-/// cases, matching the sanitisation logic in [`resolve_effective_type`].
+/// cases, matching the sanitisation logic in [`resolve_effective_type_typed`].
 ///
 /// Returns `None` when the string is completely unrecoverable (e.g.
 /// `"<garbage"` with no base type).
@@ -1502,12 +1457,16 @@ pub fn sanitise_and_parse_docblock_type(raw: &str) -> Option<PhpType> {
     }
 }
 
-/// Typed variant of [`resolve_effective_type`] that accepts pre-parsed
-/// [`PhpType`] values, avoiding redundant parse-stringify round-trips when
-/// callers already hold parsed types.
+/// Pick the best available type between a native type hint and a docblock
+/// annotation, returning a parsed [`PhpType`].
 ///
-/// Unlike the string-based version, this does not perform unclosed-bracket
-/// recovery since pre-parsed types are already well-formed.
+/// When both are present, the docblock type is used only if
+/// [`should_override_type_typed`] approves (i.e. the native hint is broad
+/// enough to refine).
+///
+/// This function does not perform unclosed-bracket recovery; callers with
+/// raw docblock strings should use [`sanitise_and_parse_docblock_type`]
+/// first.
 pub fn resolve_effective_type_typed(
     native_type: Option<&PhpType>,
     docblock_type: Option<&PhpType>,
@@ -1584,12 +1543,12 @@ fn count_braces_on_line(line: &str) -> (i32, i32) {
 /// `split_type_token`, stripping trailing punctuation.
 ///
 /// Skips PHPStan conditional return types (descriptions starting with `(`).
-fn extract_type_via_mago(docblock: &str, kinds: &[TagKind]) -> Option<String> {
+fn extract_type_via_mago(docblock: &str, kinds: &[TagKind]) -> Option<PhpType> {
     extract_type_via_mago_from_info(&parse_docblock_for_tags(docblock)?, kinds)
 }
 
 /// Like [`extract_type_via_mago`], but operates on a pre-parsed [`DocblockInfo`].
-fn extract_type_via_mago_from_info(info: &DocblockInfo, kinds: &[TagKind]) -> Option<String> {
+fn extract_type_via_mago_from_info(info: &DocblockInfo, kinds: &[TagKind]) -> Option<PhpType> {
     // Try each kind in priority order; return on the first match.
     for &kind in kinds {
         for tag in info.tags_by_kind(kind) {
@@ -1615,7 +1574,8 @@ fn extract_type_via_mago_from_info(info: &DocblockInfo, kinds: &[TagKind]) -> Op
                 continue;
             }
 
-            return Some(type_str.trim_end_matches(['.', ',']).to_string());
+            let raw = type_str.trim_end_matches(['.', ',']);
+            return sanitise_and_parse_docblock_type(raw);
         }
     }
 

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use mago_docblock::document::TagKind;
 
 use super::parser::parse_docblock_for_tags;
+use super::tags::sanitise_and_parse_docblock_type;
 use super::types::split_type_token;
 use crate::php_type::PhpType;
 use crate::types::{MethodInfo, ParameterInfo, Visibility};
@@ -31,7 +32,7 @@ use crate::types::{MethodInfo, ParameterInfo, Visibility};
 ///
 /// Returns a list of `(property_name, cleaned_type)` pairs.  The property
 /// name does **not** include the `$` prefix.
-pub fn extract_property_tags(docblock: &str) -> Vec<(String, String)> {
+pub fn extract_property_tags(docblock: &str) -> Vec<(String, Option<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -61,7 +62,7 @@ pub fn extract_property_tags(docblock: &str) -> Vec<(String, String)> {
             if name.is_empty() {
                 continue;
             }
-            results.push((name.to_string(), String::new()));
+            results.push((name.to_string(), None));
             continue;
         }
 
@@ -82,9 +83,14 @@ pub fn extract_property_tags(docblock: &str) -> Vec<(String, String)> {
 
         // Strip trailing punctuation that could leak from descriptions
         // (e.g. trailing `.` or `,`).  The full type string including
-        // nullability is preserved for `PhpType::parse()` downstream.
+        // nullability is preserved.
         let type_str = type_token.trim_end_matches(['.', ',']);
-        results.push((name.to_string(), type_str.to_string()));
+        let parsed = if type_str.is_empty() {
+            None
+        } else {
+            sanitise_and_parse_docblock_type(type_str)
+        };
+        results.push((name.to_string(), parsed));
     }
 
     results

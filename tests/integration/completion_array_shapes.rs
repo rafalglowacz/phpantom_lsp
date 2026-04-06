@@ -1,4 +1,5 @@
 use crate::common::create_test_backend;
+use phpantom_lsp::php_type::PhpType;
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -1112,9 +1113,10 @@ async fn test_array_shape_insert_text_no_quote() {
 
 #[test]
 fn test_parse_array_shape_basic() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{name: string, age: int}").unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse("array{name: string, age: int}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("name"));
     assert_eq!(entries[0].value_type.to_string(), "string");
@@ -1126,9 +1128,12 @@ fn test_parse_array_shape_basic() {
 
 #[test]
 fn test_parse_array_shape_optional_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{name: string, age?: int, email?: string}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        "array{name: string, age?: int, email?: string}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].key.as_deref(), Some("name"));
     assert!(!entries[0].optional);
@@ -1140,9 +1145,9 @@ fn test_parse_array_shape_optional_keys() {
 
 #[test]
 fn test_parse_array_shape_positional() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{string, int, bool}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{string, int, bool}")).unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].key.as_deref(), Some("0"));
     assert_eq!(entries[0].value_type.to_string(), "string");
@@ -1154,9 +1159,9 @@ fn test_parse_array_shape_positional() {
 
 #[test]
 fn test_parse_array_shape_numeric_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{0: User, 1: Address}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{0: User, 1: Address}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("0"));
     assert_eq!(entries[0].value_type.to_string(), "User");
@@ -1166,10 +1171,12 @@ fn test_parse_array_shape_numeric_keys() {
 
 #[test]
 fn test_parse_array_shape_nested_generics() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries =
-        parse_array_shape("array{users: list<User>, meta: array<string, mixed>}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        "array{users: list<User>, meta: array<string, mixed>}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("users"));
     assert_eq!(entries[0].value_type.to_string(), "list<User>");
@@ -1179,62 +1186,74 @@ fn test_parse_array_shape_nested_generics() {
 
 #[test]
 fn test_parse_array_shape_empty() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{}")).unwrap();
     assert!(entries.is_empty());
 }
 
 #[test]
 fn test_parse_array_shape_not_a_shape() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    assert!(parse_array_shape("array<int, User>").is_none());
-    assert!(parse_array_shape("list<User>").is_none());
-    assert!(parse_array_shape("string").is_none());
-    assert!(parse_array_shape("User").is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("array<int, User>")).is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("list<User>")).is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("string")).is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("User")).is_none());
 }
 
 #[test]
 fn test_parse_array_shape_nullable() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("?array{name: string}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("?array{name: string}")).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].key.as_deref(), Some("name"));
 }
 
 #[test]
 fn test_extract_array_shape_value_type() {
-    use phpantom_lsp::docblock::extract_array_shape_value_type;
+    use phpantom_lsp::docblock::extract_array_shape_value_type_typed;
 
     assert_eq!(
-        extract_array_shape_value_type("array{name: string, user: User}", "user")
-            .map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(
+            &PhpType::parse("array{name: string, user: User}"),
+            "user"
+        )
+        .map(|t| t.to_string()),
         Some("User".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type("array{name: string, user: User}", "name")
-            .map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(
+            &PhpType::parse("array{name: string, user: User}"),
+            "name"
+        )
+        .map(|t| t.to_string()),
         Some("string".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type("array{name: string, user: User}", "missing")
-            .map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(
+            &PhpType::parse("array{name: string, user: User}"),
+            "missing"
+        )
+        .map(|t| t.to_string()),
         None
     );
     assert_eq!(
-        extract_array_shape_value_type("list<User>", "anything").map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(&PhpType::parse("list<User>"), "anything")
+            .map(|t| t.to_string()),
         None
     );
 }
 
 #[test]
 fn test_parse_array_shape_nested_shapes() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries =
-        parse_array_shape("array{user: array{name: string, age: int}, active: bool}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        "array{user: array{name: string, age: int}, active: bool}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("user"));
     assert_eq!(
@@ -2983,9 +3002,10 @@ async fn test_array_shape_list_element_member_access() {
 
 #[test]
 fn test_parse_array_shape_single_quoted_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{'foo': int, 'bar': string}").unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse("array{'foo': int, 'bar': string}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert_eq!(entries[0].value_type.to_string(), "int");
@@ -2997,9 +3017,10 @@ fn test_parse_array_shape_single_quoted_keys() {
 
 #[test]
 fn test_parse_array_shape_double_quoted_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape(r#"array{"foo": int, "bar": string}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"foo": int, "bar": string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert_eq!(entries[0].value_type.to_string(), "int");
@@ -3009,9 +3030,12 @@ fn test_parse_array_shape_double_quoted_keys() {
 
 #[test]
 fn test_parse_array_shape_mixed_quoted_and_unquoted_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape(r#"array{'foo': int, "bar"?: string, baz: bool}"#).unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        r#"array{'foo': int, "bar"?: string, baz: bool}"#,
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert_eq!(entries[0].value_type.to_string(), "int");
@@ -3026,9 +3050,10 @@ fn test_parse_array_shape_mixed_quoted_and_unquoted_keys() {
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_spaces() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{'po rt': int, 'my key': string}").unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse("array{'po rt': int, 'my key': string}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("po rt"));
     assert_eq!(entries[0].value_type.to_string(), "int");
@@ -3038,13 +3063,13 @@ fn test_parse_array_shape_quoted_key_with_spaces() {
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_special_chars() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Key contains comma, colon, braces, question mark — all should be
     // treated as literal characters inside quotes.
-    let entries = parse_array_shape(
+    let entries = parse_array_shape_typed(&PhpType::parse(
         r#"array{",host?:}"?: string, 'po rt': int, credentials: User|AdminUser}"#,
-    )
+    ))
     .unwrap();
     assert_eq!(entries.len(), 3, "entries: {:?}", entries);
     assert_eq!(entries[0].key.as_deref(), Some(",host?:}"));
@@ -3060,10 +3085,11 @@ fn test_parse_array_shape_quoted_key_with_special_chars() {
 
 #[test]
 fn test_parse_array_shape_optional_quoted_key() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Optional marker `?` after closing quote: `"bar"?: string`
-    let entries = parse_array_shape(r#"array{"bar"?: string, 'baz'?: int}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"bar"?: string, 'baz'?: int}"#)).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("bar"));
     assert!(entries[0].optional);
@@ -3075,10 +3101,13 @@ fn test_parse_array_shape_optional_quoted_key() {
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_colon() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Colon inside a quoted key must not be treated as the key:value separator.
-    let entries = parse_array_shape(r#"array{"host:port": string, name: string}"#).unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        r#"array{"host:port": string, name: string}"#,
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("host:port"));
     assert_eq!(entries[0].value_type.to_string(), "string");
@@ -3088,10 +3117,12 @@ fn test_parse_array_shape_quoted_key_with_colon() {
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_comma() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Comma inside a quoted key must not split entries.
-    let entries = parse_array_shape(r#"array{"first,last": string, age: int}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"first,last": string, age: int}"#))
+            .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("first,last"));
     assert_eq!(entries[0].value_type.to_string(), "string");
@@ -3101,10 +3132,11 @@ fn test_parse_array_shape_quoted_key_with_comma() {
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_braces() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Braces inside a quoted key must not break brace matching.
-    let entries = parse_array_shape(r#"array{"{key}": string, normal: int}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"{key}": string, normal: int}"#)).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("{key}"));
     assert_eq!(entries[0].value_type.to_string(), "string");
@@ -3114,31 +3146,32 @@ fn test_parse_array_shape_quoted_key_with_braces() {
 
 #[test]
 fn test_extract_array_shape_value_type_quoted_key() {
-    use phpantom_lsp::docblock::extract_array_shape_value_type;
+    use phpantom_lsp::docblock::extract_array_shape_value_type_typed;
 
     // Lookup by unquoted key name should match a quoted key in the shape.
-    let t = r#"array{"host": string, 'port': int, ssl: bool}"#;
+    let t = PhpType::parse(r#"array{"host": string, 'port': int, ssl: bool}"#);
     assert_eq!(
-        extract_array_shape_value_type(t, "host").map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(&t, "host").map(|t| t.to_string()),
         Some("string".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type(t, "port").map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(&t, "port").map(|t| t.to_string()),
         Some("int".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type(t, "ssl").map(|t| t.to_string()),
+        extract_array_shape_value_type_typed(&t, "ssl").map(|t| t.to_string()),
         Some("bool".to_string())
     );
 }
 
 #[test]
 fn test_parse_array_shape_phpstan_spec_examples() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // From the PHPStan documentation:
     // array{'foo': int, "bar": string}
-    let entries = parse_array_shape(r#"array{'foo': int, "bar": string}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{'foo': int, "bar": string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert_eq!(entries[0].value_type.to_string(), "int");
@@ -3146,7 +3179,8 @@ fn test_parse_array_shape_phpstan_spec_examples() {
     assert_eq!(entries[1].value_type.to_string(), "string");
 
     // array{'foo': int, "bar"?: string}
-    let entries = parse_array_shape(r#"array{'foo': int, "bar"?: string}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{'foo': int, "bar"?: string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert!(!entries[0].optional);
@@ -3154,7 +3188,7 @@ fn test_parse_array_shape_phpstan_spec_examples() {
     assert!(entries[1].optional);
 
     // array{int, int} (tuple)
-    let entries = parse_array_shape("array{int, int}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{int, int}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("0"));
     assert_eq!(entries[0].value_type.to_string(), "int");
@@ -3162,7 +3196,7 @@ fn test_parse_array_shape_phpstan_spec_examples() {
     assert_eq!(entries[1].value_type.to_string(), "int");
 
     // array{0: int, 1?: int}
-    let entries = parse_array_shape("array{0: int, 1?: int}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{0: int, 1?: int}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("0"));
     assert!(!entries[0].optional);
@@ -3170,7 +3204,7 @@ fn test_parse_array_shape_phpstan_spec_examples() {
     assert!(entries[1].optional);
 
     // array{foo: int, bar: string}
-    let entries = parse_array_shape("array{foo: int, bar: string}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{foo: int, bar: string}")).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert_eq!(entries[1].key.as_deref(), Some("bar"));

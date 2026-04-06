@@ -1019,7 +1019,7 @@ impl Backend {
         let def = map.find_template_def(name, cursor_offset)?;
 
         let bound_display = if let Some(ref bound) = def.bound {
-            format!(" of `{}`", PhpType::parse(bound).shorten())
+            format!(" of `{}`", bound.shorten())
         } else {
             String::new()
         };
@@ -1378,7 +1378,7 @@ impl Backend {
                 .into_iter()
                 .map(|(name, bound, variance, default)| {
                     let bound_display = bound
-                        .map(|b| format!(" of `{}`", PhpType::parse(&b).shorten()))
+                        .map(|b| format!(" of `{}`", b.shorten()))
                         .unwrap_or_default();
                     let default_display =
                         default.map(|d| format!(" = `{}`", d)).unwrap_or_default();
@@ -1579,7 +1579,7 @@ fn find_template_info_in_class(ty: &PhpType, owner: &ClassInfo) -> Option<String
 
     let (tpl_name, bound, variance, default) = tpl;
     let bound_display = bound
-        .map(|b| format!(" of `{}`", PhpType::parse(&b).shorten()))
+        .map(|b| format!(" of `{}`", b.shorten()))
         .unwrap_or_default();
     let default_display = default.map(|d| format!(" = `{}`", d)).unwrap_or_default();
 
@@ -1592,11 +1592,11 @@ fn find_template_info_in_class(ty: &PhpType, owner: &ClassInfo) -> Option<String
     ))
 }
 
-/// Returns `true` when `s` is a simple, unqualified identifier that could
-/// name a template parameter — i.e. it parses as [`PhpType::Named`] and
-/// contains no namespace separator.
+/// Returns `true` when `s` is a simple, unqualified identifier (no
+/// namespace separator).  The caller guarantees that `s` came from a
+/// [`PhpType::Named`] match, so we only need to check for `\`.
 fn is_bare_identifier(s: &str) -> bool {
-    !s.is_empty() && !s.contains('\\') && matches!(PhpType::parse(s), PhpType::Named(_))
+    !s.is_empty() && !s.contains('\\')
 }
 
 /// Maximum number of enum cases or trait methods to show before

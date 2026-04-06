@@ -76,13 +76,13 @@ fn extract_iterable_return_type(message: &str) -> Option<&str> {
     Some(type_name)
 }
 
-/// Build the `@return` type string from the iterable type name and
-/// an inferred element type.
+/// Build the `@return` type from the iterable type name and a vector
+/// of inferred element type arguments.
 ///
 /// Uses PHPStan's generic syntax: `array<string>`, `iterable<User>`,
-/// `Traversable<mixed>`, etc.
-fn build_return_type(iterable_type: &str, element_type: &str) -> PhpType {
-    PhpType::Generic(iterable_type.to_owned(), vec![PhpType::parse(element_type)])
+/// `Traversable<mixed>`, `array<int, string>`, etc.
+fn build_return_type(iterable_type: &str, args: Vec<PhpType>) -> PhpType {
+    PhpType::Generic(iterable_type.to_owned(), args)
 }
 
 // ── Docblock helpers ────────────────────────────────────────────────────────
@@ -377,11 +377,11 @@ impl Backend {
         let func_line = data.extra.get("func_line")?.as_u64()? as usize;
 
         // Infer the element type from the function body.
-        let element_type = self
+        let element_args = self
             .infer_iterable_element_type(&data.uri, content, func_line, iterable_type)
-            .unwrap_or_else(|| "mixed".to_string());
+            .unwrap_or_else(|| vec![PhpType::mixed()]);
 
-        let return_type = build_return_type(iterable_type, &element_type).to_string();
+        let return_type = build_return_type(iterable_type, element_args).to_string();
 
         let lines: Vec<&str> = content.lines().collect();
         if func_line >= lines.len() {
@@ -527,16 +527,17 @@ impl Backend {
     /// Delegates to [`infer_return_type_for_function`](Self::infer_return_type_for_function)
     /// in `fix_return_type.rs` to get the effective return type.
     /// When the inferred type is a generic iterable (e.g. `list<string>`,
-    /// `array<int, User>`), the inner type parameter(s) are extracted.
+    /// `array<int, User>`), the inner type parameter(s) are extracted
+    /// and returned as a `Vec<PhpType>`.
     /// When it's a bare `array` or `mixed`, returns `None` so the caller
-    /// falls back to `<mixed>`.
+    /// falls back to `vec![PhpType::mixed()]`.
     fn infer_iterable_element_type(
         &self,
         uri: &str,
         content: &str,
         func_line: usize,
         iterable_type: &str,
-    ) -> Option<String> {
+    ) -> Option<Vec<PhpType>> {
         let inferred = self.infer_return_type_for_function(uri, content, func_line)?;
 
         // Prefer the effective type (richer, e.g. `list<string>`),
@@ -546,27 +547,21 @@ impl Backend {
             .as_ref()
             .unwrap_or(&inferred.native)
             .clone();
-        let type_str = parsed.to_string();
 
         // If the inferred type is just `array`, `mixed`, or the bare
         // iterable type, we can't determine element types.
         if matches!(&parsed, PhpType::Named(n) if n.eq_ignore_ascii_case("array"))
             || parsed.is_mixed()
-            || type_str.eq_ignore_ascii_case(iterable_type)
+            || matches!(&parsed, PhpType::Named(n) if n.eq_ignore_ascii_case(iterable_type))
         {
             return None;
         }
 
         // Try to extract the generic parameter(s) from the inferred type.
-        // e.g. `list<string>` → `string`, `array<int, User>` → `int, User`
+        // e.g. `list<string>` → [string], `array<int, User>` → [int, User]
         if let PhpType::Generic(_, args) = &parsed {
-            let inner = args
-                .iter()
-                .map(|a| a.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            if !inner.is_empty() && !PhpType::parse(&inner).is_mixed() {
-                return Some(inner);
+            if !args.is_empty() && args.iter().all(|a| !a.is_mixed()) {
+                return Some(args.clone());
             }
             return None;
         }
@@ -576,7 +571,7 @@ impl Backend {
         // resolver collapsed it).  This shouldn't normally happen for
         // an iterable return, but use it as the element type.
         if !parsed.is_void() && !parsed.is_null() {
-            return Some(type_str.to_string());
+            return Some(vec![parsed]);
         }
 
         None
@@ -738,7 +733,7 @@ mod tests {
     #[test]
     fn builds_array_with_element_type() {
         assert_eq!(
-            build_return_type("array", "string").to_string(),
+            build_return_type("array", vec![PhpType::parse("string")]).to_string(),
             "array<string>"
         );
     }
@@ -746,7 +741,7 @@ mod tests {
     #[test]
     fn builds_iterable_mixed() {
         assert_eq!(
-            build_return_type("iterable", "mixed").to_string(),
+            build_return_type("iterable", vec![PhpType::parse("mixed")]).to_string(),
             "iterable<mixed>"
         );
     }
@@ -754,7 +749,7 @@ mod tests {
     #[test]
     fn builds_traversable_with_element() {
         assert_eq!(
-            build_return_type("Traversable", "User").to_string(),
+            build_return_type("Traversable", vec![PhpType::parse("User")]).to_string(),
             "Traversable<User>"
         );
     }
@@ -762,7 +757,11 @@ mod tests {
     #[test]
     fn builds_array_with_key_value() {
         assert_eq!(
-            build_return_type("array", "int, string").to_string(),
+            build_return_type(
+                "array",
+                vec![PhpType::parse("int"), PhpType::parse("string")]
+            )
+            .to_string(),
             "array<int, string>"
         );
     }

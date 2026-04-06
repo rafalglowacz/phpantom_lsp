@@ -16,7 +16,6 @@ use std::sync::Arc;
 use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
-use crate::completion::types::narrowing::is_subtype_of;
 use crate::docblock;
 use crate::parser::{extract_hint_type, with_parsed_program};
 use crate::php_type::PhpType;
@@ -426,7 +425,6 @@ fn find_type_in_params(
                     // the raw docblock text as well.
                     find_method_docblock(content, method_start_offset)
                         .and_then(|doc| docblock::extract_param_raw_type(&doc, &pname))
-                        .and_then(|s| docblock::sanitise_and_parse_docblock_type(&s))
                 });
 
         let effective =
@@ -1439,7 +1437,11 @@ fn try_infer_more_specific_type_from_call(
     // subtype of at least one explicit class.
     let all_subtypes = inferred_classes.iter().all(|inferred_cls| {
         explicit_classes.iter().any(|explicit_cls| {
-            is_subtype_of(inferred_cls, &explicit_cls.name, closure_ctx.class_loader)
+            crate::util::is_subtype_of_typed(
+                &PhpType::Named(inferred_cls.fqn().to_string()),
+                &PhpType::Named(explicit_cls.fqn().to_string()),
+                closure_ctx.class_loader,
+            )
         })
     });
 

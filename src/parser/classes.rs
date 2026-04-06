@@ -217,7 +217,7 @@ fn extract_class_docblock<'a>(
     let template_params: Vec<String> = params_full.iter().map(|(n, _, _, _)| n.clone()).collect();
     let template_param_bounds: HashMap<String, PhpType> = params_full
         .iter()
-        .filter_map(|(name, bound, _, _)| bound.as_ref().map(|b| (name.clone(), PhpType::parse(b))))
+        .filter_map(|(name, bound, _, _)| bound.as_ref().map(|b| (name.clone(), b.clone())))
         .collect();
     let template_param_defaults: HashMap<String, String> = params_full
         .into_iter()
@@ -229,7 +229,6 @@ fn extract_class_docblock<'a>(
     let mixin_generics: Vec<(String, Vec<PhpType>)> = mixin_data
         .into_iter()
         .filter(|(_, args)| !args.is_empty())
-        .map(|(name, args)| (name, args.into_iter().map(|a| PhpType::parse(&a)).collect()))
         .collect();
 
     ClassDocblockInfo {
@@ -1227,10 +1226,17 @@ impl Backend {
                         trait_aliases: vec![],
                         class_docblock: doc_info.raw_docblock,
                         file_namespace: None,
-                        backed_type: enum_def
-                            .backing_type_hint
-                            .as_ref()
-                            .map(|h| crate::parser::extract_hint_type(&h.hint).to_string()),
+                        backed_type: enum_def.backing_type_hint.as_ref().and_then(|h| {
+                            match crate::parser::extract_hint_type(&h.hint) {
+                                crate::php_type::PhpType::Named(ref s) if s == "string" => {
+                                    Some(crate::types::BackedEnumType::String)
+                                }
+                                crate::php_type::PhpType::Named(ref s) if s == "int" => {
+                                    Some(crate::types::BackedEnumType::Int)
+                                }
+                                _ => None,
+                            }
+                        }),
                         attribute_targets: 0,
                         laravel: None,
                     });
@@ -1831,11 +1837,7 @@ impl Backend {
                         method_template_param_bounds,
                         method_template_bindings,
                     ) = if let Some(ref info) = method_docblock_info {
-                        let doc_type = docblock::extract_return_type_from_info(info);
-
-                        let parsed_doc_type = doc_type
-                            .as_ref()
-                            .and_then(|s| docblock::sanitise_and_parse_docblock_type(s));
+                        let parsed_doc_type = docblock::extract_return_type_from_info(info);
                         let effective = docblock::resolve_effective_type_typed(
                             native_return_type.as_ref(),
                             parsed_doc_type.as_ref(),
@@ -1853,7 +1855,7 @@ impl Backend {
                             .collect();
                         let tpl_param_bounds: HashMap<String, PhpType> = tpl_params_with_bounds
                             .into_iter()
-                            .filter_map(|(n, b)| b.map(|b| (n, PhpType::parse(&b))))
+                            .filter_map(|(n, b)| b.map(|b| (n, b)))
                             .collect();
                         let tpl_bindings = if !tpl_params.is_empty() {
                             docblock::extract_template_param_bindings_from_info(info, &tpl_params)
@@ -1898,12 +1900,11 @@ impl Backend {
                         //   @return T
                         // becomes a conditional that resolves T from the
                         // call-site argument (e.g. find(User::class) → User).
-                        let effective_str = effective.as_ref().map(|t| t.to_string());
                         let conditional = conditional.or_else(|| {
                             docblock::synthesize_template_conditional_from_info(
                                 info,
                                 &tpl_params,
-                                effective_str.as_deref(),
+                                effective.as_ref(),
                                 false,
                             )
                         });
@@ -1973,19 +1974,14 @@ impl Backend {
                                     docblock::extract_var_type(doc)
                                 });
 
-                                let type_hint = if let Some(var_type) = inline_var_type {
-                                    let parsed =
-                                        docblock::sanitise_and_parse_docblock_type(&var_type);
+                                let type_hint = if let Some(ref var_type) = inline_var_type {
                                     docblock::resolve_effective_type_typed(
                                         saved_native_hint.as_ref(),
-                                        parsed.as_ref(),
+                                        Some(var_type),
                                     )
                                 } else if let Some(ref info) = method_docblock_info {
-                                    let param_doc_type =
+                                    let parsed =
                                         docblock::extract_param_raw_type_from_info(info, &raw_name);
-                                    let parsed = param_doc_type.as_ref().and_then(|s| {
-                                        docblock::sanitise_and_parse_docblock_type(s)
-                                    });
                                     docblock::resolve_effective_type_typed(
                                         saved_native_hint.as_ref(),
                                         parsed.as_ref(),
@@ -2033,11 +2029,9 @@ impl Backend {
                             let param_doc_type =
                                 docblock::extract_param_raw_type_from_info(info, &param.name);
                             if let Some(ref doc_type) = param_doc_type {
-                                let parsed_doc =
-                                    docblock::sanitise_and_parse_docblock_type(doc_type);
                                 let effective = docblock::resolve_effective_type_typed(
                                     param.type_hint.as_ref(),
-                                    parsed_doc.as_ref(),
+                                    Some(doc_type),
                                 );
                                 if effective.is_some() {
                                     param.type_hint = effective;
@@ -2068,11 +2062,10 @@ impl Backend {
                             if !parameters.iter().any(|p| p.name == tag_name) {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
-                                let type_hint = Some(tag_type);
                                 parameters.push(ParameterInfo {
                                     name: tag_name,
                                     is_required: false,
-                                    type_hint: type_hint.map(|s| PhpType::parse(&s)),
+                                    type_hint: Some(tag_type),
                                     native_type_hint: None,
                                     description,
                                     default_value: None,
@@ -2221,10 +2214,8 @@ impl Backend {
                                 prop.deprecated_replacement = Some(repl.clone());
                             }
                         }
-                        if let Some(doc_type) =
+                        if let Some(parsed_doc) =
                             info.as_ref().and_then(docblock::extract_var_type_from_info)
-                            && let Some(parsed_doc) =
-                                docblock::sanitise_and_parse_docblock_type(&doc_type)
                         {
                             for prop in &mut prop_infos {
                                 let effective = docblock::resolve_effective_type_typed(

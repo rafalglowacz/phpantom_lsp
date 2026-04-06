@@ -428,6 +428,7 @@ impl Backend {
                     &class_loader,
                     Some(&function_loader as &dyn Fn(&str) -> Option<crate::types::FunctionInfo>),
                 )
+                .map(|t| t.to_string())
             } else {
                 None
             };
@@ -554,7 +555,10 @@ impl Backend {
                         partial_lower.is_empty() || name.to_lowercase().starts_with(&partial_lower)
                     })
                     .map(|(type_hint, name)| {
-                        let detail = type_hint.as_deref().unwrap_or("mixed").to_string();
+                        let detail = type_hint
+                            .as_ref()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "mixed".to_string());
                         CompletionItem {
                             label: name.clone(),
                             kind: Some(CompletionItemKind::VARIABLE),

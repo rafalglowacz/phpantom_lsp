@@ -14,7 +14,7 @@ use super::parser::{DocblockInfo, collapse_newlines, parse_docblock_for_tags};
 use super::types::split_type_token;
 use crate::php_type::PhpType;
 use crate::types::{TemplateVariance, TypeAliasDef};
-use crate::util::{strip_fqn_prefix, strip_nullable};
+use crate::util::strip_fqn_prefix;
 
 // ─── Template Parameters ────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ pub fn extract_template_params_from_info(info: &DocblockInfo) -> Vec<String> {
 ///   - `@template-covariant TValue of Stringable` → `("TValue", Some("Stringable"))`
 ///
 /// Returns a list of `(name, optional_bound)` pairs.
-pub fn extract_template_params_with_bounds(docblock: &str) -> Vec<(String, Option<String>)> {
+pub fn extract_template_params_with_bounds(docblock: &str) -> Vec<(String, Option<PhpType>)> {
     extract_template_params_full(docblock)
         .into_iter()
         .map(|(name, bound, _, _)| (name, bound))
@@ -63,7 +63,7 @@ pub fn extract_template_params_with_bounds(docblock: &str) -> Vec<(String, Optio
 /// Like [`extract_template_params_with_bounds`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_template_params_with_bounds_from_info(
     info: &DocblockInfo,
-) -> Vec<(String, Option<String>)> {
+) -> Vec<(String, Option<PhpType>)> {
     extract_template_params_full_from_info(info)
         .into_iter()
         .map(|(name, bound, _, _)| (name, bound))
@@ -80,7 +80,7 @@ pub fn extract_template_params_with_bounds_from_info(
 ///   - `@template-contravariant TInput of Foo` → `("TInput", Some("Foo"), Contravariant)`
 pub fn extract_template_params_full(
     docblock: &str,
-) -> Vec<(String, Option<String>, TemplateVariance, Option<String>)> {
+) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<String>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -116,7 +116,7 @@ pub(crate) const TEMPLATE_KINDS: &[TagKind] = &[
 /// Like [`extract_template_params_full`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_template_params_full_from_info(
     info: &DocblockInfo,
-) -> Vec<(String, Option<String>, TemplateVariance, Option<String>)> {
+) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<String>)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kinds(TEMPLATE_KINDS) {
@@ -139,7 +139,7 @@ pub fn extract_template_params_full_from_info(
                 // Check for an `of` bound: `@template T of SomeClass`
                 let mut next_token = tokens.next();
                 let bound = if next_token.as_ref().is_some_and(|kw| *kw == "of") {
-                    let b = tokens.next().map(|b| b.to_string());
+                    let b = tokens.next().map(PhpType::parse);
                     next_token = tokens.next();
                     b
                 } else {
@@ -544,7 +544,7 @@ fn parse_import_type_alias(rest: &str) -> Option<(String, TypeAliasDef)> {
 pub fn synthesize_template_conditional(
     docblock: &str,
     template_params: &[String],
-    return_type: Option<&str>,
+    return_type: Option<&PhpType>,
     has_existing_conditional: bool,
 ) -> Option<PhpType> {
     let info = parse_docblock_for_tags(docblock)?;
@@ -560,7 +560,7 @@ pub fn synthesize_template_conditional(
 pub fn synthesize_template_conditional_from_info(
     info: &DocblockInfo,
     template_params: &[String],
-    return_type: Option<&str>,
+    return_type: Option<&PhpType>,
     has_existing_conditional: bool,
 ) -> Option<PhpType> {
     // Don't override an existing conditional return type.
@@ -574,17 +574,27 @@ pub fn synthesize_template_conditional_from_info(
 
     let ret = return_type?;
 
-    // Strip nullable prefix so that `?T` matches template param `T`.
-    let stripped = strip_nullable(ret);
+    // Strip nullable wrapper so that `?T` matches template param `T`.
+    let stripped_name = match ret {
+        PhpType::Nullable(inner) => {
+            if let PhpType::Named(n) = inner.as_ref() {
+                n.as_str()
+            } else {
+                return None;
+            }
+        }
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
 
     // Check if the (stripped) return type is one of the template params.
-    if !template_params.iter().any(|t| t == stripped) {
+    if !template_params.iter().any(|t| t == stripped_name) {
         return None;
     }
 
     // Find a `@param class-string<T> $paramName` annotation for this
     // template param, and extract the parameter name (without `$`).
-    let param_name = find_class_string_param_name_from_info(info, stripped)?;
+    let param_name = find_class_string_param_name_from_info(info, stripped_name)?;
 
     Some(PhpType::Conditional {
         param: format!("${param_name}"),

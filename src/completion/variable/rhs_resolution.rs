@@ -267,7 +267,7 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
                 && let Some(ref value) = maybe_value
                 && let Some(ts) = infer_type_from_constant_value(value)
             {
-                return vec![ResolvedType::from_type_string(PhpType::parse(&ts))];
+                return vec![ResolvedType::from_type_string(ts)];
             }
             vec![]
         }
@@ -290,7 +290,7 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
 /// keywords (`true`, `false`), `null`, and array literals (`[...]`,
 /// `array(...)`).  Returns `None` for expressions that cannot be
 /// trivially classified (e.g. concatenation, function calls).
-fn infer_type_from_constant_value(value: &str) -> Option<String> {
+fn infer_type_from_constant_value(value: &str) -> Option<PhpType> {
     let v = value.trim();
     if v.is_empty() {
         return None;
@@ -298,22 +298,22 @@ fn infer_type_from_constant_value(value: &str) -> Option<String> {
 
     // String literals: single or double quoted.
     if (v.starts_with('\'') && v.ends_with('\'')) || (v.starts_with('"') && v.ends_with('"')) {
-        return Some("string".to_string());
+        return Some(PhpType::Named("string".to_string()));
     }
 
     // Array literals.
     if v.starts_with('[') || v.starts_with("array(") || v.starts_with("array (") {
-        return Some("array".to_string());
+        return Some(PhpType::Named("array".to_string()));
     }
 
     let lower = v.to_lowercase();
 
     // Boolean / null keywords.
     if lower == "true" || lower == "false" {
-        return Some("bool".to_string());
+        return Some(PhpType::Named("bool".to_string()));
     }
     if lower == "null" {
-        return Some("null".to_string());
+        return Some(PhpType::Named("null".to_string()));
     }
 
     // Numeric literals — try integer first, then float.
@@ -328,7 +328,7 @@ fn infer_type_from_constant_value(value: &str) -> Option<String> {
             .chars()
             .all(|c| c.is_ascii_hexdigit() || c == '_')
         {
-            return Some("int".to_string());
+            return Some(PhpType::Named("int".to_string()));
         }
     }
     if numeric.starts_with("0b") || numeric.starts_with("0B") {
@@ -337,7 +337,7 @@ fn infer_type_from_constant_value(value: &str) -> Option<String> {
             .chars()
             .all(|c| c == '0' || c == '1' || c == '_')
         {
-            return Some("int".to_string());
+            return Some(PhpType::Named("int".to_string()));
         }
     }
     if numeric.starts_with("0o") || numeric.starts_with("0O") {
@@ -346,7 +346,7 @@ fn infer_type_from_constant_value(value: &str) -> Option<String> {
             .chars()
             .all(|c| ('0'..='7').contains(&c) || c == '_')
         {
-            return Some("int".to_string());
+            return Some(PhpType::Named("int".to_string()));
         }
     }
     // Decimal integer (may contain underscores: 1_000_000).
@@ -354,7 +354,7 @@ fn infer_type_from_constant_value(value: &str) -> Option<String> {
         && numeric.chars().all(|c| c.is_ascii_digit() || c == '_')
         && numeric.chars().next().is_some_and(|c| c.is_ascii_digit())
     {
-        return Some("int".to_string());
+        return Some(PhpType::Named("int".to_string()));
     }
     // Float: contains `.` or `e`/`E` among digits.
     if !numeric.is_empty() {
@@ -371,7 +371,7 @@ fn infer_type_from_constant_value(value: &str) -> Option<String> {
                     || c == '_'
             })
         {
-            return Some("float".to_string());
+            return Some(PhpType::Named("float".to_string()));
         }
     }
 
@@ -569,8 +569,8 @@ fn build_constructor_template_subs(
         match binding_mode {
             TemplateBindingMode::Direct => {
                 // `@param T $bar` — the argument resolves directly to T.
-                if let Some(type_name) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
-                    subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                if let Some(resolved_type) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
+                    subs.insert(tpl_name.clone(), resolved_type);
                 }
             }
             TemplateBindingMode::CallableReturnType => {
@@ -603,15 +603,17 @@ fn build_constructor_template_subs(
                         let first_elem =
                             crate::completion::conditional_resolution::split_text_args(inner);
                         if let Some(elem) = first_elem.first()
-                            && let Some(type_name) =
+                            && let Some(resolved_type) =
                                 Backend::resolve_arg_text_to_type(elem.trim(), rctx)
                         {
-                            subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                            subs.insert(tpl_name.clone(), resolved_type);
                         }
                     }
-                } else if let Some(type_name) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
+                } else if let Some(resolved_type) =
+                    Backend::resolve_arg_text_to_type(arg_text, rctx)
+                {
                     // Fallback: treat as direct if not an array literal.
-                    subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                    subs.insert(tpl_name.clone(), resolved_type);
                 }
             }
             TemplateBindingMode::GenericWrapper(wrapper_name, tpl_position) => {
@@ -624,7 +626,7 @@ fn build_constructor_template_subs(
                     rctx,
                     ctx,
                 ) {
-                    subs.insert(tpl_name.clone(), PhpType::parse(&concrete));
+                    subs.insert(tpl_name.clone(), concrete);
                 }
             }
         }
@@ -769,7 +771,7 @@ fn resolve_generic_wrapper_template(
     arg_text: &str,
     rctx: &crate::completion::resolver::ResolutionCtx<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Load the wrapper class.
     let wrapper_cls = (ctx.class_loader)(wrapper_name)
         .map(Arc::unwrap_or_clone)
@@ -801,7 +803,7 @@ fn resolve_generic_wrapper_template(
     // Find the wrapper's template param at the given position and
     // look it up in the substitution map.
     let wrapper_tpl = wrapper_cls.template_params.get(tpl_position)?;
-    wrapper_subs.get(wrapper_tpl).map(|t| t.to_string())
+    wrapper_subs.get(wrapper_tpl).cloned()
 }
 
 /// Resolve `$arr[0]` / `$arr[$key]` by extracting the generic element
@@ -1011,8 +1013,8 @@ pub(crate) fn build_function_template_subs(
 
         match binding_mode {
             TemplateBindingMode::Direct => {
-                if let Some(type_name) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
-                    subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                if let Some(resolved_type) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
+                    subs.insert(tpl_name.clone(), resolved_type);
                 }
             }
             TemplateBindingMode::CallableReturnType => {
@@ -1045,15 +1047,17 @@ pub(crate) fn build_function_template_subs(
                         let first_elem =
                             crate::completion::conditional_resolution::split_text_args(inner);
                         if let Some(elem) = first_elem.first()
-                            && let Some(type_name) =
+                            && let Some(resolved_type) =
                                 Backend::resolve_arg_text_to_type(elem.trim(), rctx)
                         {
-                            subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                            subs.insert(tpl_name.clone(), resolved_type);
                         }
                     }
-                } else if let Some(type_name) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
+                } else if let Some(resolved_type) =
+                    Backend::resolve_arg_text_to_type(arg_text, rctx)
+                {
                     // Fallback: treat as direct if not an array literal.
-                    subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                    subs.insert(tpl_name.clone(), resolved_type);
                 }
             }
             TemplateBindingMode::GenericWrapper(ref wrapper_name, tpl_position) => {
@@ -1064,15 +1068,16 @@ pub(crate) fn build_function_template_subs(
                 if is_array_like_wrapper(wrapper_name)
                     && arg_text.starts_with('$')
                     && let Some(resolved) = resolve_arg_variable_raw_type(arg_text, rctx)
-                    && let Some(concrete) = extract_array_type_at_position(&resolved, tpl_position)
+                    && let Some(concrete) =
+                        extract_array_type_at_position(&resolved.to_string(), tpl_position)
                 {
                     subs.insert(tpl_name.clone(), PhpType::parse(&concrete));
                     continue;
                 }
                 // Fall back to direct resolution for non-array wrappers
                 // or when raw type extraction fails.
-                if let Some(type_name) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
-                    subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                if let Some(resolved_type) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
+                    subs.insert(tpl_name.clone(), resolved_type);
                 }
             }
         }
@@ -1092,7 +1097,7 @@ pub(crate) fn build_function_template_subs(
 fn resolve_arg_variable_raw_type(
     arg_text: &str,
     rctx: &crate::completion::resolver::ResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let var_name = arg_text.trim();
     if !var_name.starts_with('$') {
         return None;
@@ -1120,7 +1125,7 @@ fn resolve_arg_variable_raw_type(
                 if let Some(hint) =
                     crate::inheritance::resolve_property_type_hint(cls, prop, rctx.class_loader)
                 {
-                    return Some(hint.to_string());
+                    return Some(hint);
                 }
             }
         }
@@ -1132,7 +1137,7 @@ fn resolve_arg_variable_raw_type(
         rctx.cursor_offset as usize,
         var_name,
     ) {
-        return Some(raw.to_string());
+        return Some(raw);
     }
 
     // 2. Fall back to unified variable resolution pipeline.
@@ -1150,7 +1155,7 @@ fn resolve_arg_variable_raw_type(
     if resolved.is_empty() {
         None
     } else {
-        Some(ResolvedType::types_joined(&resolved).to_string())
+        Some(ResolvedType::types_joined(&resolved))
     }
 }
 
@@ -2045,18 +2050,17 @@ fn resolve_rhs_property_access(
                         if let Some(ref val) = c.value
                             && let Some(ts) = infer_type_from_constant_value(val)
                         {
-                            let parsed_ts = PhpType::parse(&ts);
                             let resolved =
                                 crate::completion::type_resolution::type_hint_to_classes_typed(
-                                    &parsed_ts,
+                                    &ts,
                                     current_class_name,
                                     all_classes,
                                     class_loader,
                                 );
                             if !resolved.is_empty() {
-                                return ResolvedType::from_classes_with_hint(resolved, parsed_ts);
+                                return ResolvedType::from_classes_with_hint(resolved, ts);
                             }
-                            return vec![ResolvedType::from_type_string(parsed_ts)];
+                            return vec![ResolvedType::from_type_string(ts)];
                         }
                     }
                 }

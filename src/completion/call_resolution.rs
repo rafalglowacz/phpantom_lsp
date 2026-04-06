@@ -460,8 +460,7 @@ impl Backend {
                     let arg_raw_type = Self::resolve_inline_arg_raw_type(&first_arg, ctx);
 
                     if let Some(ref raw) = arg_raw_type
-                        && let Some(element_type) =
-                            crate::php_type::PhpType::parse(raw).extract_value_type(true)
+                        && let Some(element_type) = raw.extract_value_type(true)
                     {
                         let owner_name = ctx.current_class.map(|c| c.name.as_str()).unwrap_or("");
                         let classes: Vec<Arc<ClassInfo>> =
@@ -1012,12 +1011,6 @@ fn is_valid_virtual_narrowing(
     }
 }
 
-/// Strip any generic `<…>` suffix and leading `\` from a class name string.
-fn strip_class_name(name: &str) -> String {
-    let parsed = PhpType::parse(name);
-    parsed.base_name().unwrap_or(name).to_string()
-}
-
 /// Check whether `candidate_type` is the same class as `ancestor_name` or
 /// a subclass of it, by walking the parent chain.
 ///
@@ -1031,70 +1024,28 @@ fn is_type_subclass_of(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> bool {
-    // Extract the base class name directly from the type without stringifying.
-    let candidate_base = match candidate_type.base_name() {
-        Some(name) => name,
-        None => return false, // Not a class type
-    };
-    let ancestor_base = strip_class_name(ancestor_name);
-
-    // Same class (case-insensitive, ignoring namespace prefix differences).
-    if candidate_base.eq_ignore_ascii_case(&ancestor_base) {
-        return true;
-    }
-    // Also check short-name match (e.g. "Dog" vs "App\\Models\\Dog").
-    let candidate_short = crate::util::short_name(candidate_base);
-    let ancestor_short = crate::util::short_name(&ancestor_base);
-    if candidate_short.eq_ignore_ascii_case(ancestor_short) {
-        return true;
+    // Cannot extract a base name → not a class type → not a subclass.
+    if candidate_type.base_name().is_none() {
+        return false;
     }
 
-    // Try to load the candidate class and walk its parent chain.
-    let candidate_class = find_class_by_name(all_classes, candidate_base)
-        .cloned()
-        .or_else(|| class_loader(candidate_base));
-
-    let Some(cls) = candidate_class else {
-        // Cannot resolve the candidate class — give benefit of the
-        // doubt and trust the @method tag.
-        return true;
-    };
-
-    // Walk the parent chain up to a reasonable depth.
-    let mut current_parent = cls.parent_class.clone();
-    let mut depth = 0u32;
-    while let Some(ref parent_name) = current_parent {
-        depth += 1;
-        if depth > 20 {
-            break;
-        }
-        let parent_base = strip_class_name(parent_name);
-        if parent_base.eq_ignore_ascii_case(&ancestor_base)
-            || crate::util::short_name(&parent_base).eq_ignore_ascii_case(ancestor_short)
-        {
-            return true;
-        }
-        // Also check implemented interfaces on the parent.
-        let parent_class = find_class_by_name(all_classes, &parent_base)
+    // Build a combined loader that checks local classes first.
+    let combined_loader = |name: &str| -> Option<Arc<ClassInfo>> {
+        find_class_by_name(all_classes, name)
             .cloned()
-            .or_else(|| class_loader(&parent_base));
-        match parent_class {
-            Some(p) => current_parent = p.parent_class.clone(),
-            None => break,
-        }
+            .or_else(|| class_loader(name))
+    };
+
+    // Check if the candidate can be resolved at all.  When it cannot,
+    // give the benefit of the doubt (e.g. trust an @method tag).
+    if let Some(base) = candidate_type.base_name()
+        && combined_loader(base).is_none()
+    {
+        return true;
     }
 
-    // Also check the candidate's own implemented interfaces.
-    for iface in &cls.interfaces {
-        let iface_base = strip_class_name(iface);
-        if iface_base.eq_ignore_ascii_case(&ancestor_base)
-            || crate::util::short_name(&iface_base).eq_ignore_ascii_case(ancestor_short)
-        {
-            return true;
-        }
-    }
-
-    false
+    let ancestor = PhpType::Named(ancestor_name.to_string());
+    crate::util::is_subtype_of_typed(candidate_type, &ancestor, &combined_loader)
 }
 
 impl Backend {
@@ -1179,8 +1130,8 @@ impl Backend {
 
             match binding_mode {
                 TemplateBindingMode::Direct | TemplateBindingMode::GenericWrapper(..) => {
-                    if let Some(type_name) = Self::resolve_arg_text_to_type(arg_text, ctx) {
-                        subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                    if let Some(resolved_type) = Self::resolve_arg_text_to_type(arg_text, ctx) {
+                        subs.insert(tpl_name.clone(), resolved_type);
                     }
                 }
                 TemplateBindingMode::CallableReturnType => {
@@ -1204,8 +1155,8 @@ impl Backend {
                     }
                 }
                 TemplateBindingMode::ArrayElement => {
-                    if let Some(type_name) = Self::resolve_arg_text_to_type(arg_text, ctx) {
-                        subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                    if let Some(resolved_type) = Self::resolve_arg_text_to_type(arg_text, ctx) {
+                        subs.insert(tpl_name.clone(), resolved_type);
                     }
                 }
             }
@@ -1225,7 +1176,7 @@ impl Backend {
     pub(crate) fn resolve_arg_text_to_type(
         arg_text: &str,
         ctx: &ResolutionCtx<'_>,
-    ) -> Option<String> {
+    ) -> Option<PhpType> {
         let trimmed = arg_text.trim();
 
         // ClassName::class → ClassName
@@ -1235,17 +1186,17 @@ impl Backend {
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
         {
-            return Some(name.to_string());
+            return Some(PhpType::Named(name.to_string()));
         }
 
         // new ClassName(…) → ClassName
         if let Some(class_name) = super::source::helpers::extract_new_expression_class(trimmed) {
-            return Some(class_name);
+            return Some(PhpType::Named(class_name));
         }
 
         // $this / self / static → current class
         if trimmed == "$this" || trimmed == "self" || trimmed == "static" {
-            return ctx.current_class.map(|c| c.name.clone());
+            return ctx.current_class.map(|c| PhpType::Named(c.name.clone()));
         }
 
         // $this->prop → property type
@@ -1262,7 +1213,7 @@ impl Backend {
                 ctx.class_loader,
             );
             if let Some(first) = types.first() {
-                return Some(first.name.clone());
+                return Some(PhpType::Named(first.name.clone()));
             }
         }
 
@@ -1274,13 +1225,7 @@ impl Backend {
                 ctx,
             );
             if let Some(first) = classes.first() {
-                return Some(
-                    first
-                        .class_info
-                        .as_ref()
-                        .map(|ci| ci.name.clone())
-                        .unwrap_or_else(|| first.type_string.to_string()),
-                );
+                return Some(first.type_string.clone());
             }
         }
 
@@ -1318,14 +1263,14 @@ impl Backend {
         }
     }
 
-    /// Resolve the raw return type string of an inline argument expression.
+    /// Resolve the raw return type of an inline argument expression.
     ///
     /// Handles plain variables (`$customers`), call chains
     /// (`Customer::get()->all()`), and static calls (`ClassName::method()`).
     ///
-    /// Returns the raw type string (e.g. `"array<int, Customer>"`) so
+    /// Returns the structured type (e.g. `array<int, Customer>`) so
     /// that the caller can extract element types from it.
-    fn resolve_inline_arg_raw_type(arg_text: &str, ctx: &ResolutionCtx<'_>) -> Option<String> {
+    fn resolve_inline_arg_raw_type(arg_text: &str, ctx: &ResolutionCtx<'_>) -> Option<PhpType> {
         let current_class = ctx.current_class;
         let all_classes = ctx.all_classes;
         let class_loader = ctx.class_loader;
@@ -1342,7 +1287,7 @@ impl Backend {
                 ctx.cursor_offset as usize,
                 arg_text,
             ) {
-                return Some(raw.to_string());
+                return Some(raw);
             }
             // Fall back to the unified variable resolution pipeline.
             let default_class = ClassInfo::default();
@@ -1357,7 +1302,7 @@ impl Backend {
                 Loaders::with_function(ctx.function_loader),
             );
             if !resolved.is_empty() {
-                return Some(ResolvedType::types_joined(&resolved).to_string());
+                return Some(ResolvedType::types_joined(&resolved));
             }
             return None;
         }
@@ -1383,7 +1328,7 @@ impl Backend {
                         method_name,
                         class_loader,
                     ) {
-                        return Some(rt.to_string());
+                        return Some(rt);
                     }
                 }
             }
@@ -1407,7 +1352,7 @@ impl Backend {
                         class_loader,
                     )
                 {
-                    return Some(rt.to_string());
+                    return Some(rt);
                 }
             }
         }
@@ -1426,7 +1371,6 @@ impl Backend {
                 for cls in &lhs_classes {
                     if let Some(rt) =
                         crate::inheritance::resolve_property_type_hint(cls, prop_name, class_loader)
-                            .map(|t| t.to_string())
                     {
                         return Some(rt);
                     }

@@ -79,7 +79,7 @@ struct FunctionWithDocblock {
     /// Parameters from the signature.
     sig_params: Vec<SigParam>,
     /// Return type from the signature (if any).
-    sig_return: Option<String>,
+    sig_return: Option<PhpType>,
     /// `@param` tags from the docblock.
     doc_params: Vec<DocParam>,
     /// `@return` tag from the docblock (if any).
@@ -324,14 +324,6 @@ fn cursor_on_docblock(
     false
 }
 
-/// Extract the hint string from a type hint node.
-fn extract_hint_string_local(hint: &Hint<'_>, content: &str) -> String {
-    let span = hint.span();
-    let start = span.start.offset as usize;
-    let end = span.end.offset as usize;
-    content.get(start..end).unwrap_or("").to_string()
-}
-
 /// Build a `FunctionWithDocblock` from a function-like AST node.
 fn build_info_for_function_like<'a>(
     node_start: u32,
@@ -397,7 +389,7 @@ fn build_info_for_function_like<'a>(
         .collect();
 
     // Extract return type.
-    let sig_return = return_type_hint.map(|rth| extract_hint_string_local(&rth.hint, content));
+    let sig_return = return_type_hint.map(|rth| extract_hint_type(&rth.hint));
 
     // Parse existing docblock tags with a single parse pass.
     let docblock_info = parse_docblock_for_tags(&docblock_text);
@@ -626,17 +618,17 @@ fn check_needs_update(
         && let Some(doc_ret) = &info.doc_return
     {
         // Remove `@return void` if the signature also has `: void`.
-        if PhpType::parse(sig_ret).is_void() && PhpType::parse(&doc_ret.type_str).is_void() {
+        if sig_ret.is_void() && PhpType::parse(&doc_ret.type_str).is_void() {
             return true;
         }
-        if is_type_contradiction(&doc_ret.type_str, sig_ret) {
+        if is_type_contradiction(&doc_ret.type_str, &sig_ret.to_string()) {
             return true;
         }
     }
 
     // Check if the @return tag needs body-based enrichment.
     if let Some(sig_ret) = &info.sig_return
-        && !PhpType::parse(sig_ret).is_void()
+        && !sig_ret.is_void()
     {
         let doc_already_rich = info
             .doc_return
@@ -650,16 +642,17 @@ fn check_needs_update(
                 class_loader,
                 function_loader,
             )
+            && !enriched.is_void()
+            && !enriched.is_mixed()
+            && !enriched.equivalent(sig_ret)
         {
-            let enriched_parsed = PhpType::parse(&enriched);
-            if !enriched_parsed.is_void() && !enriched_parsed.is_mixed() && enriched != *sig_ret {
-                let differs_from_doc = info
-                    .doc_return
-                    .as_ref()
-                    .is_none_or(|dr| dr.type_str != enriched);
-                if differs_from_doc {
-                    return true;
-                }
+            let enriched_str = enriched.to_string();
+            let differs_from_doc = info
+                .doc_return
+                .as_ref()
+                .is_none_or(|dr| dr.type_str != enriched_str);
+            if differs_from_doc {
+                return true;
             }
         }
     }
@@ -937,14 +930,15 @@ fn build_updated_docblock(
         && let Some(sig_ret) = &info.sig_return
         && let Some(doc_ret) = &info.doc_return
     {
+        let sig_ret_str = sig_ret.to_string();
         // Find and update the return line.
         for line in &mut lines {
             if let DocLine::Return(text) = line {
                 let description = &doc_ret.description;
                 if description.is_empty() {
-                    *text = format!("@return {}", sig_ret);
+                    *text = format!("@return {}", sig_ret_str);
                 } else {
-                    *text = format!("@return {} {}", sig_ret, description);
+                    *text = format!("@return {} {}", sig_ret_str, description);
                 }
                 break;
             }
@@ -953,7 +947,7 @@ fn build_updated_docblock(
 
     // Body-based @return enrichment.
     if let Some(sig_ret) = &info.sig_return
-        && !PhpType::parse(sig_ret).is_void()
+        && !sig_ret.is_void()
     {
         let has_rich_return = lines.iter().any(|l| {
             if let DocLine::Return(text) = l {
@@ -971,41 +965,42 @@ fn build_updated_docblock(
                 class_loader,
                 function_loader,
             )
+            && !enriched.is_void()
+            && !enriched.is_mixed()
+            && !enriched.equivalent(sig_ret)
         {
-            let enriched_parsed = PhpType::parse(&enriched);
-            if !enriched_parsed.is_void() && !enriched_parsed.is_mixed() && enriched != *sig_ret {
-                let differs_from_doc = info
-                    .doc_return
-                    .as_ref()
-                    .is_none_or(|dr| dr.type_str != enriched);
-                if differs_from_doc {
-                    // Update existing @return line or insert a new one.
-                    let mut updated_existing = false;
-                    for line in &mut lines {
-                        if let DocLine::Return(text) = line {
-                            // Preserve any description text after the type.
-                            let desc = info
-                                .doc_return
-                                .as_ref()
-                                .map(|dr| dr.description.as_str())
-                                .unwrap_or("");
-                            if desc.is_empty() {
-                                *text = format!("@return {}", enriched);
-                            } else {
-                                *text = format!("@return {} {}", enriched, desc);
-                            }
-                            updated_existing = true;
-                            break;
+            let enriched_str = enriched.to_string();
+            let differs_from_doc = info
+                .doc_return
+                .as_ref()
+                .is_none_or(|dr| dr.type_str != enriched_str);
+            if differs_from_doc {
+                // Update existing @return line or insert a new one.
+                let mut updated_existing = false;
+                for line in &mut lines {
+                    if let DocLine::Return(text) = line {
+                        // Preserve any description text after the type.
+                        let desc = info
+                            .doc_return
+                            .as_ref()
+                            .map(|dr| dr.description.as_str())
+                            .unwrap_or("");
+                        if desc.is_empty() {
+                            *text = format!("@return {}", enriched);
+                        } else {
+                            *text = format!("@return {} {}", enriched, desc);
                         }
+                        updated_existing = true;
+                        break;
                     }
-                    if !updated_existing {
-                        // Insert before the closing `*/`.
-                        let close_pos = lines
-                            .iter()
-                            .position(|l| matches!(l, DocLine::Close))
-                            .unwrap_or(lines.len());
-                        lines.insert(close_pos, DocLine::Return(format!("@return {}", enriched)));
-                    }
+                }
+                if !updated_existing {
+                    // Insert before the closing `*/`.
+                    let close_pos = lines
+                        .iter()
+                        .position(|l| matches!(l, DocLine::Close))
+                        .unwrap_or(lines.len());
+                    lines.insert(close_pos, DocLine::Return(format!("@return {}", enriched)));
                 }
             }
         }
@@ -1236,7 +1231,7 @@ fn find_throws_insert_position(lines: &[DocLine]) -> usize {
 fn should_remove_return(info: &FunctionWithDocblock) -> bool {
     if let Some(sig_ret) = &info.sig_return
         && let Some(doc_ret) = &info.doc_return
-        && PhpType::parse(sig_ret).is_void()
+        && sig_ret.is_void()
         && PhpType::parse(&doc_ret.type_str).is_void()
         && doc_ret.description.is_empty()
     {
@@ -1249,7 +1244,7 @@ fn should_remove_return(info: &FunctionWithDocblock) -> bool {
 fn should_update_return(info: &FunctionWithDocblock) -> bool {
     if let Some(sig_ret) = &info.sig_return
         && let Some(doc_ret) = &info.doc_return
-        && is_type_contradiction(&doc_ret.type_str, sig_ret)
+        && is_type_contradiction(&doc_ret.type_str, &sig_ret.to_string())
     {
         return true;
     }

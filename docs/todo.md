@@ -21,10 +21,10 @@ within the same impact tier.
 
 ## Sprint 4 — Refactoring toolkit & type inference
 
-| #    | Item                                                                                                                                                   | Impact | Effort      |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ----------- |
-|      | Clear [refactoring gate](todo/refactor.md)                                                                                                             | —      | —           |
-|     | **Release 0.7.0**                                                                                                                                      |        |             |
+| #   | Item                                                                                                                                                              | Impact | Effort |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------ |
+|     | Clear [refactoring gate](todo/refactor.md)                                                                                                                        | —      | —      |
+|     | **Release 0.7.0**                                                                                                                                                 |        |        |
 
 ## Sprint 5 — Polish for office adoption
 

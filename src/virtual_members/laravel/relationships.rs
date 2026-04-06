@@ -122,7 +122,7 @@ pub(super) enum RelationshipKind {
     MorphTo,
 }
 
-/// Try to classify a return type string as a known Eloquent relationship.
+/// Classify a relationship return type into its [`RelationshipKind`].
 ///
 /// Accepts both short names (`HasMany`) and fully-qualified names
 /// (`\Illuminate\Database\Eloquent\Relations\HasMany`).  Generic
@@ -138,14 +138,6 @@ pub(super) enum RelationshipKind {
 /// Unqualified names (no `\`) are matched by short name only, which
 /// is the common case for body-inferred types and docblock annotations
 /// that use `use` imports.
-#[cfg(test)]
-pub(super) fn classify_relationship(return_type: &str) -> Option<RelationshipKind> {
-    classify_relationship_typed(&PhpType::parse(return_type))
-}
-
-/// Typed variant of [`classify_relationship`] that accepts a pre-parsed
-/// [`PhpType`], avoiding a redundant parse round-trip when the caller
-/// already has a structured type.
 pub(super) fn classify_relationship_typed(return_type: &PhpType) -> Option<RelationshipKind> {
     let base = return_type.base_name()?;
     let sname = short_name(base);
@@ -175,13 +167,6 @@ pub(super) fn classify_relationship_typed(return_type: &PhpType) -> Option<Relat
 /// `Some("\\App\\Models\\Post")`.
 ///
 /// Returns `None` if no generic parameters are present.
-#[cfg(test)]
-pub(super) fn extract_related_type(return_type: &str) -> Option<String> {
-    extract_related_type_typed(&PhpType::parse(return_type))
-}
-
-/// Typed variant of [`extract_related_type`] that accepts a pre-parsed
-/// [`PhpType`], avoiding a redundant parse round-trip.
 pub(super) fn extract_related_type_typed(return_type: &PhpType) -> Option<String> {
     if let PhpType::Generic(_, args) = return_type {
         let first = args.first()?;

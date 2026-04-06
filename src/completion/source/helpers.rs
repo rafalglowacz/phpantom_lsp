@@ -54,7 +54,7 @@ pub(in crate::completion) fn extract_function_return_from_source(
     let open_pos = trimmed.rfind("/**")?;
     let docblock = &trimmed[open_pos..];
 
-    docblock::extract_return_type(docblock).map(|s| PhpType::parse(&s))
+    docblock::extract_return_type(docblock)
 }
 
 /// Scan backward through `content` for a closure or arrow-function

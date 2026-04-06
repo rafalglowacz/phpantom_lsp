@@ -1335,6 +1335,7 @@ fn test_extract_generics_tag_multiple_implements() {
 #[test]
 fn test_synthesize_template_conditional_basic() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1344,7 +1345,8 @@ fn test_synthesize_template_conditional_basic() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize a conditional for @template T with class-string<T>"
@@ -1355,6 +1357,7 @@ fn test_synthesize_template_conditional_basic() {
 #[test]
 fn test_synthesize_template_conditional_non_template_return() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1364,7 +1367,8 @@ fn test_synthesize_template_conditional_non_template_return() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("string"), false);
+    let parsed = PhpType::parse("string");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_none(),
         "Should NOT synthesize when return type is not a template param"
@@ -1375,6 +1379,7 @@ fn test_synthesize_template_conditional_non_template_return() {
 #[test]
 fn test_synthesize_template_conditional_no_templates() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1383,7 +1388,8 @@ fn test_synthesize_template_conditional_no_templates() {
         " */",
     );
     let template_params: Vec<String> = vec![];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("string"), false);
+    let parsed = PhpType::parse("string");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_none(),
         "Should NOT synthesize when there are no template params"
@@ -1394,6 +1400,7 @@ fn test_synthesize_template_conditional_no_templates() {
 #[test]
 fn test_synthesize_template_conditional_existing_conditional() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1403,7 +1410,8 @@ fn test_synthesize_template_conditional_existing_conditional() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), true);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), true);
     assert!(
         result.is_none(),
         "Should NOT synthesize when has_existing_conditional is true"
@@ -1414,6 +1422,7 @@ fn test_synthesize_template_conditional_existing_conditional() {
 #[test]
 fn test_synthesize_template_conditional_nullable_return() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1423,7 +1432,8 @@ fn test_synthesize_template_conditional_nullable_return() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("?T"), false);
+    let parsed = PhpType::parse("?T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize for nullable return type ?T"
@@ -1434,6 +1444,7 @@ fn test_synthesize_template_conditional_nullable_return() {
 #[test]
 fn test_synthesize_template_conditional_no_class_string_param() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1443,7 +1454,8 @@ fn test_synthesize_template_conditional_no_class_string_param() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_none(),
         "Should NOT synthesize when no @param has class-string<T>"
@@ -1454,6 +1466,7 @@ fn test_synthesize_template_conditional_no_class_string_param() {
 #[test]
 fn test_synthesize_template_conditional_nullable_class_string() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1463,7 +1476,8 @@ fn test_synthesize_template_conditional_nullable_class_string() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize for nullable class-string param ?class-string<T>"
@@ -1474,6 +1488,7 @@ fn test_synthesize_template_conditional_nullable_class_string() {
 #[test]
 fn test_synthesize_template_conditional_class_string_null_union() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1483,7 +1498,8 @@ fn test_synthesize_template_conditional_class_string_null_union() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize for class-string<T>|null union param"

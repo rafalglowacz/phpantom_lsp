@@ -1,5 +1,3 @@
-use mago_span::HasSpan;
-use mago_syntax::ast::*;
 /// Type narrowing for variable resolution.
 ///
 /// This module contains the logic for narrowing a variable's type based on
@@ -26,10 +24,10 @@ use mago_syntax::ast::*;
 ///     union type, preserving generic element types from PHPDoc.
 ///   - `is_string($var)`, `is_int($var)`, `is_bool($var)`, etc. —
 ///     narrows to the corresponding scalar type.
-use std::sync::Arc;
-
 use crate::php_type::PhpType;
 use crate::types::{AssertionKind, ClassInfo, ParameterInfo, ResolvedType, TypeAssertion};
+use mago_span::HasSpan;
+use mago_syntax::ast::*;
 
 use super::conditional::extract_class_string_from_expr;
 use crate::completion::resolver::VarResolutionCtx;
@@ -254,9 +252,13 @@ pub(in crate::completion) fn apply_instanceof_inclusion_typed(
         let already_subtypes: Vec<ClassInfo> = results
             .iter()
             .filter(|r| {
-                narrowed
-                    .iter()
-                    .any(|n| is_subtype_of(r, &n.fqn(), ctx.class_loader))
+                narrowed.iter().any(|n| {
+                    crate::util::is_subtype_of_typed(
+                        &PhpType::Named(r.fqn().to_string()),
+                        &PhpType::Named(n.fqn().to_string()),
+                        ctx.class_loader,
+                    )
+                })
             })
             .cloned()
             .collect();
@@ -275,9 +277,13 @@ pub(in crate::completion) fn apply_instanceof_inclusion_typed(
     // results = [Animal] narrowed to Dog (Dog extends Animal) → [Dog].
     if !exact {
         let narrowed_is_more_specific = narrowed.iter().any(|n| {
-            results
-                .iter()
-                .any(|r| is_subtype_of(n, &r.fqn(), ctx.class_loader))
+            results.iter().any(|r| {
+                crate::util::is_subtype_of_typed(
+                    &PhpType::Named(n.fqn().to_string()),
+                    &PhpType::Named(r.fqn().to_string()),
+                    ctx.class_loader,
+                )
+            })
         });
 
         if !narrowed_is_more_specific && results.len() == 1 {
@@ -318,94 +324,6 @@ pub(in crate::completion) fn apply_instanceof_inclusion_typed(
             results.push(cls);
         }
     }
-}
-
-/// Check whether `class` is a subtype of the class identified by
-/// `ancestor_name`.  Returns `true` when:
-///
-/// - `class.name` equals `ancestor_name` (same class), or
-/// - walking the `parent_class` chain reaches `ancestor_name`, or
-/// - `ancestor_name` appears in the `interfaces` list of `class` or any
-///   of its ancestors.
-///
-/// Both short names and fully-qualified names are compared so that
-/// cross-file relationships (where `parent_class` stores FQNs) work.
-pub(crate) fn is_subtype_of(
-    class: &ClassInfo,
-    ancestor_name: &str,
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> bool {
-    let ancestor_short = ancestor_name.rsplit('\\').next().unwrap_or(ancestor_name);
-
-    // Same class?  When the ancestor is a FQN, compare against the
-    // class's own FQN to avoid false positives when two classes share
-    // the same short name (e.g. `Contracts\Provider` vs
-    // `Concrete\Provider`).
-    if ancestor_name.contains('\\') {
-        if class.fqn() == ancestor_name {
-            return true;
-        }
-    } else if class.name == ancestor_name {
-        return true;
-    }
-
-    // When the ancestor is qualified, only match against normalised
-    // FQNs — never fall back to short-name comparison, which would
-    // produce false positives when two different classes share the
-    // same short name (e.g. `Contracts\Provider` vs
-    // `Concrete\Provider`).
-    let fqn_mode = ancestor_name.contains('\\');
-
-    // Check interfaces on the class itself.
-    for iface in &class.interfaces {
-        if iface == ancestor_name {
-            return true;
-        }
-        if !fqn_mode {
-            let iface_short = iface.rsplit('\\').next().unwrap_or(iface);
-            if iface_short == ancestor_short {
-                return true;
-            }
-        }
-    }
-
-    // Walk the parent chain.
-    let mut current_parent = class.parent_class.clone();
-    let mut depth = 0u32;
-    while let Some(ref name) = current_parent {
-        depth += 1;
-        if depth > 20 {
-            break;
-        }
-        if name == ancestor_name {
-            return true;
-        }
-        if !fqn_mode {
-            let short = name.rsplit('\\').next().unwrap_or(name);
-            if short == ancestor_short {
-                return true;
-            }
-        }
-        // Load the parent to check its interfaces and continue the chain.
-        if let Some(parent_info) = class_loader(name) {
-            for iface in &parent_info.interfaces {
-                if iface == ancestor_name {
-                    return true;
-                }
-                if !fqn_mode {
-                    let iface_short = iface.rsplit('\\').next().unwrap_or(iface);
-                    if iface_short == ancestor_short {
-                        return true;
-                    }
-                }
-            }
-            current_parent = parent_info.parent_class.clone();
-        } else {
-            break;
-        }
-    }
-
-    false
 }
 
 /// Remove the resolved classes for `cls_name` from `results`.
@@ -2632,90 +2550,13 @@ fn try_extract_type_guard(expr: &Expression<'_>, var_name: &str) -> Option<(Type
 fn type_matches_guard(ty: &PhpType, kind: TypeGuardKind) -> bool {
     match kind {
         TypeGuardKind::Array => ty.is_array_like(),
-        TypeGuardKind::String => match ty {
-            PhpType::Named(s) => matches!(
-                s.to_ascii_lowercase().as_str(),
-                "string"
-                    | "non-empty-string"
-                    | "numeric-string"
-                    | "class-string"
-                    | "literal-string"
-                    | "lowercase-string"
-                    | "non-empty-lowercase-string"
-                    | "truthy-string"
-                    | "non-falsy-string"
-            ),
-            PhpType::ClassString(_) | PhpType::InterfaceString(_) => true,
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
-        TypeGuardKind::Int => match ty {
-            PhpType::Named(s) => matches!(
-                s.to_ascii_lowercase().as_str(),
-                "int"
-                    | "integer"
-                    | "positive-int"
-                    | "negative-int"
-                    | "non-positive-int"
-                    | "non-negative-int"
-                    | "non-zero-int"
-            ),
-            PhpType::IntRange(_, _) => true,
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
-        TypeGuardKind::Float => match ty {
-            PhpType::Named(s) => matches!(s.to_ascii_lowercase().as_str(), "float" | "double"),
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
-        TypeGuardKind::Bool => match ty {
-            PhpType::Named(s) => matches!(
-                s.to_ascii_lowercase().as_str(),
-                "bool" | "boolean" | "true" | "false"
-            ),
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
-        TypeGuardKind::Object => match ty {
-            PhpType::Named(s) => {
-                let lower = s.to_ascii_lowercase();
-                // `object` keyword or any non-scalar class name
-                lower == "object" || !crate::php_type::is_scalar_name_pub(s)
-            }
-            PhpType::Generic(name, _) => !crate::php_type::is_scalar_name_pub(name),
-            PhpType::ObjectShape(_) => true,
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
-        TypeGuardKind::Numeric => match ty {
-            PhpType::Named(s) => matches!(
-                s.to_ascii_lowercase().as_str(),
-                "int"
-                    | "integer"
-                    | "float"
-                    | "double"
-                    | "numeric"
-                    | "numeric-string"
-                    | "positive-int"
-                    | "negative-int"
-                    | "non-positive-int"
-                    | "non-negative-int"
-                    | "non-zero-int"
-            ),
-            PhpType::IntRange(_, _) => true,
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
-        TypeGuardKind::Callable => match ty {
-            PhpType::Named(s) => matches!(
-                s.to_ascii_lowercase().as_str(),
-                "callable" | "closure" | "\\closure"
-            ),
-            PhpType::Callable { .. } => true,
-            PhpType::Nullable(inner) => type_matches_guard(inner, kind),
-            _ => false,
-        },
+        TypeGuardKind::String => ty.is_subtype_of(&PhpType::string()),
+        TypeGuardKind::Int => ty.is_subtype_of(&PhpType::int()),
+        TypeGuardKind::Float => ty.is_subtype_of(&PhpType::float()),
+        TypeGuardKind::Bool => ty.is_subtype_of(&PhpType::bool()),
+        TypeGuardKind::Numeric => ty.is_subtype_of(&PhpType::numeric()),
+        TypeGuardKind::Callable => ty.is_callable(),
+        TypeGuardKind::Object => ty.is_object_like(),
     }
 }
 
