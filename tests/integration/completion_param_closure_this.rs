@@ -500,16 +500,21 @@ async fn test_param_closure_this_method_chain() {
 #[test]
 fn test_extract_param_closure_this_basic() {
     use phpantom_lsp::docblock::extract_param_closure_this;
+    use phpantom_lsp::php_type::PhpType;
 
     let doc = "/**\n * @param-closure-this Route $callback\n */";
     let results = extract_param_closure_this(doc);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0], ("Route".to_string(), "$callback".to_string()));
+    assert_eq!(
+        results[0],
+        (PhpType::parse("Route"), "$callback".to_string())
+    );
 }
 
 #[test]
 fn test_extract_param_closure_this_fqn() {
     use phpantom_lsp::docblock::extract_param_closure_this;
+    use phpantom_lsp::php_type::PhpType;
 
     let doc = "/**\n * @param-closure-this \\Illuminate\\Routing\\Route $callback\n */";
     let results = extract_param_closure_this(doc);
@@ -517,7 +522,7 @@ fn test_extract_param_closure_this_fqn() {
     assert_eq!(
         results[0],
         (
-            "\\Illuminate\\Routing\\Route".to_string(),
+            PhpType::parse("\\Illuminate\\Routing\\Route"),
             "$callback".to_string()
         )
     );
@@ -526,26 +531,32 @@ fn test_extract_param_closure_this_fqn() {
 #[test]
 fn test_extract_param_closure_this_dollar_this() {
     use phpantom_lsp::docblock::extract_param_closure_this;
+    use phpantom_lsp::php_type::PhpType;
 
     let doc = "/**\n * @param-closure-this  $this  $callback\n */";
     let results = extract_param_closure_this(doc);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0], ("$this".to_string(), "$callback".to_string()));
+    assert_eq!(
+        results[0],
+        (PhpType::parse("$this"), "$callback".to_string())
+    );
 }
 
 #[test]
 fn test_extract_param_closure_this_static() {
     use phpantom_lsp::docblock::extract_param_closure_this;
+    use phpantom_lsp::php_type::PhpType;
 
     let doc = "/**\n * @param-closure-this static  $macro\n */";
     let results = extract_param_closure_this(doc);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0], ("static".to_string(), "$macro".to_string()));
+    assert_eq!(results[0], (PhpType::parse("static"), "$macro".to_string()));
 }
 
 #[test]
 fn test_extract_param_closure_this_multiple() {
     use phpantom_lsp::docblock::extract_param_closure_this;
+    use phpantom_lsp::php_type::PhpType;
 
     let doc = concat!(
         "/**\n",
@@ -555,8 +566,14 @@ fn test_extract_param_closure_this_multiple() {
     );
     let results = extract_param_closure_this(doc);
     assert_eq!(results.len(), 2);
-    assert_eq!(results[0], ("Route".to_string(), "$callback".to_string()));
-    assert_eq!(results[1], ("TestCase".to_string(), "$setup".to_string()));
+    assert_eq!(
+        results[0],
+        (PhpType::parse("Route"), "$callback".to_string())
+    );
+    assert_eq!(
+        results[1],
+        (PhpType::parse("TestCase"), "$setup".to_string())
+    );
 }
 
 #[test]
@@ -581,6 +598,7 @@ fn test_extract_param_closure_this_missing_param_name() {
 #[test]
 fn test_extract_param_closure_this_coexists_with_param() {
     use phpantom_lsp::docblock::extract_param_closure_this;
+    use phpantom_lsp::php_type::PhpType;
 
     let doc = concat!(
         "/**\n",
@@ -594,5 +612,8 @@ fn test_extract_param_closure_this_coexists_with_param() {
     );
     let results = extract_param_closure_this(doc);
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0], ("$this".to_string(), "$callback".to_string()));
+    assert_eq!(
+        results[0],
+        (PhpType::parse("$this"), "$callback".to_string())
+    );
 }

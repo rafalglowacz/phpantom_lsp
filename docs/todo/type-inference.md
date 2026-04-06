@@ -447,18 +447,59 @@ pipeline to produce cleaner hover/completion output.
 
 ---
 
-## T32. Migrate `closure_this_type` to `Option<PhpType>`
+## T28. Migrate enrichment functions to accept `PhpType`
 **Impact: Low · Effort: Low**
 
-`ParameterInfo::closure_this_type` is `Option<String>` while every
-other type field on `ParameterInfo` is `Option<PhpType>`. The value
-gets parsed downstream in resolution paths.
+`enrichment_snippet()` and `enrichment_plain()` in
+`completion/phpdoc/generation.rs` accept `&Option<String>`, then
+immediately parse via `PhpType::parse()` and match on the result.
+All callers could provide a `PhpType` directly.
 
-**Task:** Change to `Option<PhpType>`, update extraction in
-`docblock/tags.rs` (`extract_param_closure_this_from_info`), and
-update consumers.
+**Task:** Change the signatures to accept `Option<&PhpType>` (or
+`&Option<PhpType>`), remove the internal `PhpType::parse()` calls,
+and update all call sites.
 
-**Files:** `src/types.rs`, `src/docblock/tags.rs`, consumers
+**Files:** `src/completion/phpdoc/generation.rs` and its callers
+
+---
+
+## T30. Migrate `inline_use_generics` to `PhpType`
+**Impact: Low · Effort: Low**
+
+`ExtractedMembers::inline_use_generics` is typed
+`Vec<(String, Vec<String>)>`, storing generic type arguments as raw
+strings. The analogous fields on `ClassInfo` (`extends_generics`,
+`implements_generics`, `use_generics`) all use
+`Vec<(String, Vec<PhpType>)>`. This inconsistency forces a parse step
+when the inline generics are merged into `ClassInfo`.
+
+**Task:** Change the type to `Vec<(String, Vec<PhpType>)>` and update
+the extraction code in `parser/classes.rs` to parse at extraction time.
+
+**Files:** `src/types.rs`, `src/parser/classes.rs`
+
+---
+
+## T31. Migrate `throws` fields to `Vec<PhpType>`
+**Impact: Low · Effort: Low**
+
+`MethodInfo::throws` and `FunctionInfo::throws` store exception type
+names as `Vec<String>`. Comparisons and deduplication use
+case-insensitive string matching. Using `Vec<PhpType>` would allow
+`PhpType::resolve_names()` and `PhpType::equivalent()` for more
+robust handling.
+
+**Task:** Change both fields to `Vec<PhpType>`, update extraction in
+`docblock/tags.rs`, and update consumers in `code_actions/phpstan/`,
+`code_actions/update_docblock.rs`, `completion/source/throws_analysis.rs`,
+and `parser/ast_update.rs`.
+
+**Files:** `src/types.rs`, `src/docblock/tags.rs`,
+`src/code_actions/phpstan/add_throws.rs`,
+`src/code_actions/phpstan/remove_throws.rs`,
+`src/code_actions/update_docblock.rs`,
+`src/completion/source/throws_analysis.rs`,
+`src/parser/ast_update.rs`
 
 ---
 

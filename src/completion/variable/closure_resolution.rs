@@ -506,8 +506,8 @@ fn closure_this_from_function_params(
     ctx: &ResolutionCtx<'_>,
 ) -> Option<ClassInfo> {
     let param = fi.parameters.get(arg_idx)?;
-    let raw_type = param.closure_this_type.as_deref()?;
-    resolve_closure_this_type(raw_type, None, ctx)
+    let php_type = param.closure_this_type.as_ref()?;
+    resolve_closure_this_type(php_type, None, ctx)
 }
 
 /// Look up `closure_this_type` on an instance method's parameter at
@@ -584,8 +584,8 @@ fn closure_this_from_method_params(
     ctx: &ResolutionCtx<'_>,
 ) -> Option<ClassInfo> {
     let param = method.parameters.get(arg_idx)?;
-    let raw_type = param.closure_this_type.as_deref()?;
-    resolve_closure_this_type(raw_type, owner, ctx)
+    let php_type = param.closure_this_type.as_ref()?;
+    resolve_closure_this_type(php_type, owner, ctx)
 }
 
 /// Resolve a raw `@param-closure-this` type string to a `ClassInfo`.
@@ -594,10 +594,11 @@ fn closure_this_from_method_params(
 /// declaring class (owner), and resolves fully-qualified class names
 /// through the class loader.
 fn resolve_closure_this_type(
-    raw_type: &str,
+    php_type: &PhpType,
     owner: Option<&ClassInfo>,
     ctx: &ResolutionCtx<'_>,
 ) -> Option<ClassInfo> {
+    let raw_type = php_type.to_string();
     let type_str = raw_type.trim_start_matches('\\');
 
     // `$this`, `static`, and `self` all refer to the declaring class.

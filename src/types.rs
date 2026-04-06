@@ -384,7 +384,7 @@ pub struct ParameterInfo {
     /// means that inside the closure passed as `$callback`, `$this` refers to
     /// `\Illuminate\Routing\Route` rather than the lexically enclosing class.
     /// Common in Laravel where closures are rebound via `Closure::bindTo()`.
-    pub closure_this_type: Option<String>,
+    pub closure_this_type: Option<PhpType>,
 }
 
 impl ParameterInfo {

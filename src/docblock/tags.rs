@@ -697,10 +697,9 @@ pub fn extract_param_types_positional_from_info(
 /// `Closure::bindTo()` and is used heavily in Laravel (routing, macros,
 /// testing).
 ///
-/// Returns a list of `(type_name, param_name)` pairs.  The `param_name`
-/// includes the `$` prefix.  The `type_name` is the raw type string
-/// (e.g. `\Illuminate\Routing\Route`, `$this`, `static`).
-pub fn extract_param_closure_this(docblock: &str) -> Vec<(String, String)> {
+/// Returns a list of `(type, param_name)` pairs.  The `param_name`
+/// includes the `$` prefix.  The type is parsed into a [`PhpType`].
+pub fn extract_param_closure_this(docblock: &str) -> Vec<(PhpType, String)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -709,7 +708,7 @@ pub fn extract_param_closure_this(docblock: &str) -> Vec<(String, String)> {
 }
 
 /// Like [`extract_param_closure_this`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_param_closure_this_from_info(info: &DocblockInfo) -> Vec<(String, String)> {
+pub fn extract_param_closure_this_from_info(info: &DocblockInfo) -> Vec<(PhpType, String)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kind(TagKind::ParamClosureThis) {
@@ -728,7 +727,7 @@ pub fn extract_param_closure_this_from_info(info: &DocblockInfo) -> Vec<(String,
         if let Some(name) = remainder.split_whitespace().next()
             && name.starts_with('$')
         {
-            results.push((type_token.to_string(), name.to_string()));
+            results.push((PhpType::parse(type_token), name.to_string()));
         }
     }
 

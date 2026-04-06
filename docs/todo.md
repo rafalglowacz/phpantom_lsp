@@ -23,7 +23,6 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                                      | Impact | Effort     |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- |
-| T32 | [Migrate `closure_this_type` to `Option<PhpType>`](todo/type-inference.md#t32-migrate-closure_this_type-to-optionphptype)                                 | Low    | Low        |
 |     | **Release 0.7.0**                                                                                                                                         |        |            |
 
 ## Sprint 5 — Polish for office adoption
