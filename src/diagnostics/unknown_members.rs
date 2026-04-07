@@ -5647,4 +5647,45 @@ class Test {
             "expected no diagnostics for variable assigned from method chain, got: {diags:?}"
         );
     }
+
+    #[test]
+    fn no_diagnostic_for_interleaved_array_access_property_chain() {
+        // `$results[$i]->activities[$id]->extras` where `$results` is
+        // `array<int, WeeklyResultDto>` and the property chain walks
+        // through typed properties with array access in between.
+        // Previously the parser dropped the `->activities[]` suffix
+        // when parsing the subject text, causing a false positive.
+        let php = r#"<?php
+class ExtraPointsDto {
+    public string $label;
+}
+
+class ActivityResultDto {
+    /** @var list<ExtraPointsDto> */
+    public array $extras = [];
+    public int $activityId;
+}
+
+class WeeklyResultDto {
+    /** @var array<int, ActivityResultDto> */
+    public array $activities;
+    public int $week;
+}
+
+function test(): void {
+    /** @var array<int, WeeklyResultDto> */
+    $results = [];
+
+    $results[0]->activities[1]->extras[] = new ExtraPointsDto();
+    $results[0]->activities[1]->activityId;
+    $results[0]->week;
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for interleaved array-access property chain, got: {diags:?}",
+        );
+    }
 }

@@ -566,6 +566,22 @@ fn round_trip_array_access() {
     );
 }
 
+#[test]
+fn round_trip_interleaved_bracket_arrow_bracket() {
+    assert_eq!(
+        SubjectExpr::parse("$results[]->activities[]").to_subject_text(),
+        "$results[]->activities[]"
+    );
+}
+
+#[test]
+fn round_trip_triple_interleaved() {
+    assert_eq!(
+        SubjectExpr::parse("$a[]->b[]->c[]").to_subject_text(),
+        "$a[]->b[]->c[]"
+    );
+}
+
 // ── Whitespace trimming ─────────────────────────────────────────────
 
 #[test]
@@ -813,5 +829,184 @@ fn parse_call_array_access_with_string_key() {
             assert_eq!(segments[0], BracketSegment::StringKey("name".to_string()));
         }
         other => panic!("Expected ArrayAccess, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_interleaved_bracket_arrow_bracket() {
+    // `$results[]->activities[]` — array element, then property, then array element.
+    // Should parse as ArrayAccess { PropertyChain { ArrayAccess { Variable, [EA] }, "activities" }, [EA] }.
+    let parsed = SubjectExpr::parse("$results[]->activities[]");
+    match &parsed {
+        SubjectExpr::ArrayAccess { base, segments } => {
+            assert_eq!(segments.len(), 1);
+            assert_eq!(segments[0], BracketSegment::ElementAccess);
+            match base.as_ref() {
+                SubjectExpr::PropertyChain {
+                    base: inner_base,
+                    property,
+                } => {
+                    assert_eq!(property, "activities");
+                    match inner_base.as_ref() {
+                        SubjectExpr::ArrayAccess {
+                            base: var_base,
+                            segments: inner_segs,
+                        } => {
+                            assert_eq!(
+                                *var_base.as_ref(),
+                                SubjectExpr::Variable("$results".to_string())
+                            );
+                            assert_eq!(inner_segs.len(), 1);
+                            assert_eq!(inner_segs[0], BracketSegment::ElementAccess);
+                        }
+                        other => panic!("Expected inner ArrayAccess, got: {other:?}"),
+                    }
+                }
+                other => panic!("Expected PropertyChain, got: {other:?}"),
+            }
+        }
+        other => panic!("Expected ArrayAccess, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_interleaved_bracket_arrow_no_trailing_bracket() {
+    // `$results[]->activities` — array element, then property (no trailing bracket).
+    // Should parse as PropertyChain { ArrayAccess { Variable, [EA] }, "activities" }.
+    let parsed = SubjectExpr::parse("$results[]->activities");
+    match &parsed {
+        SubjectExpr::PropertyChain { base, property } => {
+            assert_eq!(property, "activities");
+            match base.as_ref() {
+                SubjectExpr::ArrayAccess {
+                    base: var_base,
+                    segments,
+                } => {
+                    assert_eq!(
+                        *var_base.as_ref(),
+                        SubjectExpr::Variable("$results".to_string())
+                    );
+                    assert_eq!(segments.len(), 1);
+                    assert_eq!(segments[0], BracketSegment::ElementAccess);
+                }
+                other => panic!("Expected ArrayAccess base, got: {other:?}"),
+            }
+        }
+        other => panic!("Expected PropertyChain, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_interleaved_string_key_arrow_bracket() {
+    // `$data['items']->name` — string-key access, then property.
+    let parsed = SubjectExpr::parse("$data['items']->name");
+    match &parsed {
+        SubjectExpr::PropertyChain { base, property } => {
+            assert_eq!(property, "name");
+            match base.as_ref() {
+                SubjectExpr::ArrayAccess {
+                    base: var_base,
+                    segments,
+                } => {
+                    assert_eq!(
+                        *var_base.as_ref(),
+                        SubjectExpr::Variable("$data".to_string())
+                    );
+                    assert_eq!(segments.len(), 1);
+                    assert_eq!(segments[0], BracketSegment::StringKey("items".to_string()));
+                }
+                other => panic!("Expected ArrayAccess base, got: {other:?}"),
+            }
+        }
+        other => panic!("Expected PropertyChain, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_triple_interleaved_bracket_arrow() {
+    // `$a[]->b[]->c[]` — three levels of interleaved access.
+    let parsed = SubjectExpr::parse("$a[]->b[]->c[]");
+    match &parsed {
+        SubjectExpr::ArrayAccess { base, segments } => {
+            assert_eq!(segments.len(), 1);
+            assert_eq!(segments[0], BracketSegment::ElementAccess);
+            match base.as_ref() {
+                SubjectExpr::PropertyChain {
+                    base: mid_base,
+                    property,
+                } => {
+                    assert_eq!(property, "c");
+                    match mid_base.as_ref() {
+                        SubjectExpr::ArrayAccess {
+                            base: inner_base,
+                            segments: mid_segs,
+                        } => {
+                            assert_eq!(mid_segs.len(), 1);
+                            assert_eq!(mid_segs[0], BracketSegment::ElementAccess);
+                            match inner_base.as_ref() {
+                                SubjectExpr::PropertyChain {
+                                    base: deepest,
+                                    property: prop_b,
+                                } => {
+                                    assert_eq!(prop_b, "b");
+                                    match deepest.as_ref() {
+                                        SubjectExpr::ArrayAccess {
+                                            base: var_base,
+                                            segments: deep_segs,
+                                        } => {
+                                            assert_eq!(
+                                                *var_base.as_ref(),
+                                                SubjectExpr::Variable("$a".to_string())
+                                            );
+                                            assert_eq!(deep_segs.len(), 1);
+                                            assert_eq!(deep_segs[0], BracketSegment::ElementAccess);
+                                        }
+                                        other => {
+                                            panic!("Expected deepest ArrayAccess, got: {other:?}")
+                                        }
+                                    }
+                                }
+                                other => panic!("Expected inner PropertyChain, got: {other:?}"),
+                            }
+                        }
+                        other => panic!("Expected mid ArrayAccess, got: {other:?}"),
+                    }
+                }
+                other => panic!("Expected outer PropertyChain, got: {other:?}"),
+            }
+        }
+        other => panic!("Expected outer ArrayAccess, got: {other:?}"),
+    }
+}
+
+#[test]
+fn parse_this_prop_bracket_arrow_bracket() {
+    // `$this->items[]->name` — property chain, bracket, arrow, property.
+    let parsed = SubjectExpr::parse("$this->items[]->name");
+    match &parsed {
+        SubjectExpr::PropertyChain { base, property } => {
+            assert_eq!(property, "name");
+            match base.as_ref() {
+                SubjectExpr::ArrayAccess {
+                    base: prop_base,
+                    segments,
+                } => {
+                    assert_eq!(segments.len(), 1);
+                    assert_eq!(segments[0], BracketSegment::ElementAccess);
+                    match prop_base.as_ref() {
+                        SubjectExpr::PropertyChain {
+                            base: this_base,
+                            property: items_prop,
+                        } => {
+                            assert_eq!(items_prop, "items");
+                            assert_eq!(*this_base.as_ref(), SubjectExpr::This);
+                        }
+                        other => panic!("Expected PropertyChain for $this->items, got: {other:?}"),
+                    }
+                }
+                other => panic!("Expected ArrayAccess base, got: {other:?}"),
+            }
+        }
+        other => panic!("Expected PropertyChain, got: {other:?}"),
     }
 }

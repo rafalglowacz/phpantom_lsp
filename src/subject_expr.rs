@@ -572,10 +572,76 @@ fn parse_variable_array_access(subject: &str) -> Option<SubjectExpr> {
         return None;
     }
 
-    Some(SubjectExpr::ArrayAccess {
+    let mut result = SubjectExpr::ArrayAccess {
         base: Box::new(SubjectExpr::parse(base_var)),
         segments,
-    })
+    };
+
+    // Handle interleaved property-arrow and bracket access patterns.
+    // After consuming the first set of bracket segments, there may be
+    // a continuation like `->activities[]` (or `?->prop['key']`).
+    // Build up the result by alternating PropertyChain and ArrayAccess
+    // nodes until the remaining text is consumed.
+    while !rest.is_empty() {
+        let (arrow_len, is_nullsafe) = if rest.starts_with("?->") {
+            (3, true)
+        } else if rest.starts_with("->") {
+            (2, false)
+        } else {
+            // Unexpected continuation — bail out with what we have.
+            break;
+        };
+
+        let after_arrow = &rest[arrow_len..];
+        if after_arrow.is_empty() {
+            break;
+        }
+
+        // Find where the property name ends (at the next `[` or end).
+        let prop_end = after_arrow.find('[').unwrap_or(after_arrow.len());
+        let prop_name = &after_arrow[..prop_end];
+        if prop_name.is_empty() {
+            break;
+        }
+
+        // Build PropertyChain (or NullSafe — but SubjectExpr doesn't
+        // distinguish at the PropertyChain level; the `?->` is already
+        // encoded in `to_subject_text` via the base's text, and the
+        // resolver handles both equally).
+        let _ = is_nullsafe; // reserved for future use
+        result = SubjectExpr::PropertyChain {
+            base: Box::new(result),
+            property: prop_name.to_string(),
+        };
+
+        rest = &after_arrow[prop_end..];
+
+        // If the property is followed by bracket segments, consume them.
+        if rest.starts_with('[') {
+            let mut new_segments = Vec::new();
+            while rest.starts_with('[') {
+                let close = match rest.find(']') {
+                    Some(c) => c,
+                    None => break,
+                };
+                let inner = rest[1..close].trim();
+                if let Some(key) = crate::util::unquote_php_string(inner) {
+                    new_segments.push(BracketSegment::StringKey(key.to_string()));
+                } else {
+                    new_segments.push(BracketSegment::ElementAccess);
+                }
+                rest = &rest[close + 1..];
+            }
+            if !new_segments.is_empty() {
+                result = SubjectExpr::ArrayAccess {
+                    base: Box::new(result),
+                    segments: new_segments,
+                };
+            }
+        }
+    }
+
+    Some(result)
 }
 
 /// Parse a call expression followed by bracket access: `$c->items()[]`,
