@@ -102,6 +102,8 @@ pub(crate) struct ResolutionCtx<'a> {
     pub resolved_class_cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
     /// Cross-file function resolution callback (optional).
     pub function_loader: FunctionLoaderFn<'a>,
+    /// PhpStorm `.phpstorm.meta.php` overrides (optional).
+    pub phpstorm_meta: Option<&'a crate::phpstorm_meta::PhpStormMetaIndex>,
 }
 
 /// Bundles the common parameters threaded through variable-type resolution.
@@ -133,6 +135,8 @@ pub(super) struct VarResolutionCtx<'a> {
     /// not `Lamp|Faucet`).  Completion leaves this `false` so that all
     /// possible types are offered.
     pub branch_aware: bool,
+    /// PhpStorm `.phpstorm.meta.php` overrides (optional).
+    pub phpstorm_meta: Option<&'a crate::phpstorm_meta::PhpStormMetaIndex>,
 }
 
 impl<'a> VarResolutionCtx<'a> {
@@ -148,6 +152,7 @@ impl<'a> VarResolutionCtx<'a> {
             class_loader: self.class_loader,
             function_loader: self.loaders.function_loader,
             resolved_class_cache: self.resolved_class_cache,
+            phpstorm_meta: self.phpstorm_meta,
         }
     }
 
@@ -181,6 +186,7 @@ impl<'a> VarResolutionCtx<'a> {
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type,
             branch_aware: self.branch_aware,
+            phpstorm_meta: self.phpstorm_meta,
         }
     }
 
@@ -202,6 +208,7 @@ impl<'a> VarResolutionCtx<'a> {
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type: self.enclosing_return_type.clone(),
             branch_aware: self.branch_aware,
+            phpstorm_meta: self.phpstorm_meta,
         }
     }
 }
@@ -1441,6 +1448,7 @@ fn apply_property_narrowing(
                 resolved_class_cache: None,
                 enclosing_return_type: None,
                 branch_aware: false,
+                phpstorm_meta: rctx.phpstorm_meta,
             };
             walk_property_narrowing_in_statements(program.statements.iter(), &ctx, &mut plain);
         },

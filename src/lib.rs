@@ -118,6 +118,7 @@ pub(crate) mod names;
 mod parser;
 pub(crate) mod phar;
 pub mod php_type;
+pub(crate) mod phpstorm_meta;
 mod phpstan;
 mod references;
 mod rename;
@@ -520,6 +521,8 @@ pub struct Backend {
     /// (which receives `&self`) can set it after loading the file.
     /// The diagnostic worker snapshots the value at spawn time.
     pub(crate) config: Mutex<config::Config>,
+    /// Merged JetBrains PhpStorm `.phpstorm.meta.php` override index.
+    pub(crate) phpstorm_meta: RwLock<phpstorm_meta::PhpStormMetaIndex>,
 }
 
 impl Backend {
@@ -579,6 +582,7 @@ impl Backend {
             supports_work_done_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config: Mutex::new(config::Config::default()),
+            phpstorm_meta: RwLock::new(phpstorm_meta::PhpStormMetaIndex::default()),
         }
     }
 
@@ -635,6 +639,7 @@ impl Backend {
             supports_work_done_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             shutdown_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             config: Mutex::new(config::Config::default()),
+            phpstorm_meta: RwLock::new(phpstorm_meta::PhpStormMetaIndex::default()),
         }
     }
 

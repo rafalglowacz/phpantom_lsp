@@ -189,6 +189,7 @@ pub(crate) fn resolve_variable_types(
             resolved_class_cache: None,
             enclosing_return_type: None,
             branch_aware: false,
+            phpstorm_meta: None,
         };
 
         resolve_variable_in_statements(program.statements.iter(), &ctx)
@@ -240,6 +241,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
                 resolved_class_cache: None,
                 enclosing_return_type: None,
                 branch_aware: true,
+                phpstorm_meta: None,
             };
 
             resolve_variable_in_statements(program.statements.iter(), &ctx)

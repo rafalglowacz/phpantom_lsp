@@ -1630,6 +1630,7 @@ fn resolve_rhs_method_call_inner<'b>(
             cache: ctx.resolved_class_cache,
             calling_class_name: Some(&ctx.current_class.name),
             is_static: false,
+            resolution_ctx: Some(&rctx),
         };
         // Recover the effective return type string from the method.
         // Look up the method on the (possibly merged) owner and apply
@@ -1795,6 +1796,7 @@ fn resolve_rhs_static_call(
                 cache: ctx.resolved_class_cache,
                 calling_class_name: Some(&ctx.current_class.name),
                 is_static: true,
+                resolution_ctx: Some(&rctx),
             };
             // Recover the effective return type string from the method.
             // Look up the method on the (possibly merged) owner and apply
