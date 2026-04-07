@@ -882,6 +882,7 @@ impl Backend {
             supports_work_done_progress: Arc::clone(&self.supports_work_done_progress),
             shutdown_flag: Arc::clone(&self.shutdown_flag),
             config: Mutex::new(self.config.lock().clone()),
+            phpstorm_meta: RwLock::new(self.phpstorm_meta.read().clone()),
         }
     }
 

@@ -377,6 +377,7 @@ impl Backend {
             let outcome = subject_cache
                 .entry(cache_key)
                 .or_insert_with(|| {
+                    let meta_guard = self.phpstorm_meta.read();
                     let rctx = ResolutionCtx {
                         current_class,
                         all_classes: &local_classes,
@@ -385,6 +386,7 @@ impl Backend {
                         class_loader: &class_loader,
                         resolved_class_cache: Some(resolved_cache),
                         function_loader: Some(&function_loader),
+                        phpstorm_meta: Some(&meta_guard),
                     };
                     resolve_subject_outcome(subject_text, access_kind, &rctx)
                 })

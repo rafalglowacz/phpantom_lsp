@@ -466,6 +466,7 @@ impl Backend {
         let function_loader = self.function_loader(ctx);
 
         // Resolve the subject to candidate classes.
+        let meta_guard = self.phpstorm_meta.read();
         let rctx = ResolutionCtx {
             current_class,
             all_classes: &ctx.classes,
@@ -474,6 +475,7 @@ impl Backend {
             class_loader: &class_loader,
             resolved_class_cache: Some(&self.resolved_class_cache),
             function_loader: Some(&function_loader),
+            phpstorm_meta: Some(&meta_guard),
         };
         let candidates =
             crate::completion::resolver::resolve_target_classes(&subject, access_kind, &rctx);

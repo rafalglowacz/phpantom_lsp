@@ -1493,6 +1493,7 @@ fn infer_callable_param_types_for_call(
                     class_loader: closure_ctx.class_loader,
                     function_loader: None,
                     resolved_class_cache: None,
+                    phpstorm_meta: None,
                 };
                 let receiver_classes = crate::completion::resolver::resolve_target_classes(
                     obj_text,
@@ -1528,6 +1529,7 @@ fn infer_callable_param_types_for_call(
                     class_loader: closure_ctx.class_loader,
                     function_loader: None,
                     resolved_class_cache: None,
+                    phpstorm_meta: None,
                 };
                 let receiver_classes = crate::completion::resolver::resolve_target_classes(
                     obj_text,

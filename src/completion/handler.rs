@@ -860,6 +860,7 @@ impl Backend {
             uri,
             Some(position),
             || {
+                let meta_guard = self.phpstorm_meta.read();
                 let candidates = if suppress {
                     vec![]
                 } else {
@@ -871,6 +872,7 @@ impl Backend {
                         class_loader: &class_loader,
                         resolved_class_cache: Some(&self.resolved_class_cache),
                         function_loader: Some(&function_loader),
+                        phpstorm_meta: Some(&meta_guard),
                     };
                     let mut resolved = super::resolver::resolve_target_classes(
                         &target.subject,
@@ -902,6 +904,7 @@ impl Backend {
                                 class_loader: &class_loader,
                                 resolved_class_cache: Some(&self.resolved_class_cache),
                                 function_loader: Some(&function_loader),
+                                phpstorm_meta: Some(&meta_guard),
                             };
                             resolved = super::resolver::resolve_target_classes(
                                 &target.subject,

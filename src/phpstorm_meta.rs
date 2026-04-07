@@ -14,6 +14,7 @@ use mago_syntax::ast::*;
 use mago_syntax::parser::parse_file_content;
 
 use crate::names::OwnedResolvedNames;
+use crate::Backend;
 
 /// Parsed `override()` directive (second argument to `override(...)`).
 #[derive(Debug, Clone)]
@@ -86,7 +87,7 @@ pub fn discover_phpstorm_meta_files(root: &Path, vendor_dir_paths: &[PathBuf]) -
     result
 }
 
-fn is_phpstorm_meta_related(path: &Path) -> bool {
+pub(crate) fn is_phpstorm_meta_related(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -296,11 +297,13 @@ fn parse_map_array(
     resolved: &OwnedResolvedNames,
 ) -> Option<Vec<(MapLookupKey, String)>> {
     let expr = unwrap_parens(expr);
-    let Expression::Array(arr) | Expression::LegacyArray(arr) = expr else {
-        return None;
+    let elements = match expr {
+        Expression::Array(a) => &a.elements,
+        Expression::LegacyArray(a) => &a.elements,
+        _ => return None,
     };
     let mut out = Vec::new();
-    for el in arr.elements.iter() {
+    for el in elements.iter() {
         if let ArrayElement::KeyValue(kv) = el {
             let key = map_key_from_expr(&kv.key, content, resolved)?;
             let val = map_value_to_type_string(&kv.value, content, resolved)?;
@@ -320,7 +323,10 @@ fn map_key_from_expr(
         Expression::Literal(Literal::String(s)) => {
             let v = s
                 .value
-                .or_else(|| crate::util::unquote_php_string(s.raw))?;
+                .map(|x| x.to_string())
+                .or_else(|| {
+                    crate::util::unquote_php_string(s.raw).map(|x| x.to_string())
+                })?;
             if v.is_empty() {
                 return Some(MapLookupKey::Default);
             }
@@ -362,9 +368,12 @@ fn map_value_to_type_string(
 ) -> Option<String> {
     let expr = unwrap_parens(expr);
     match expr {
-        Expression::Literal(Literal::String(s)) => {
-            s.value.or_else(|| crate::util::unquote_php_string(s.raw))
-        }
+        Expression::Literal(Literal::String(s)) => s
+            .value
+            .map(|x| x.to_string())
+            .or_else(|| {
+                crate::util::unquote_php_string(s.raw).map(|x| x.to_string())
+            }),
         Expression::Access(Access::ClassConstant(cca)) => {
             if let ClassLikeConstantSelector::Identifier(id) = &cca.constant {
                 if id.value == "class" {
@@ -393,7 +402,7 @@ fn literal_usize(expr: &Expression<'_>) -> Option<usize> {
 fn callee_simple_name(expr: &Expression<'_>, resolved: &OwnedResolvedNames) -> Option<String> {
     let expr = unwrap_parens(expr);
     match expr {
-        Expression::Identifier(id) => Some(id.value.to_string()),
+        Expression::Identifier(id) => Some(id.value().to_string()),
         _ => {
             let off = expr.span().start.offset;
             let fqn = resolved.get(off)?;
@@ -418,6 +427,14 @@ fn unwrap_parens<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
         Expression::Parenthesized(p) => unwrap_parens(p.expression),
         _ => expr,
     }
+}
+
+/// Whether opening or editing this document URI should reload `.phpstorm.meta.php` data.
+pub(crate) fn should_refresh_index_for_uri(uri: &str) -> bool {
+    tower_lsp::lsp_types::Url::parse(uri)
+        .ok()
+        .and_then(|u| u.to_file_path().ok())
+        .is_some_and(|p| is_phpstorm_meta_related(&p))
 }
 
 /// Refresh the workspace PhpStorm meta index from disk and clear the resolved-class cache.

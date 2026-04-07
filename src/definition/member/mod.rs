@@ -123,6 +123,7 @@ impl Backend {
         // 3. Resolve the subject to all candidate classes.
         //    When a variable is assigned different types in conditional
         //    branches (e.g. if/else), multiple candidates are returned.
+        let meta_guard = self.phpstorm_meta.read();
         let rctx = ResolutionCtx {
             current_class: current_class.as_ref(),
             all_classes: &ctx.classes,
@@ -131,6 +132,7 @@ impl Backend {
             class_loader: &class_loader,
             resolved_class_cache: Some(&self.resolved_class_cache),
             function_loader: Some(&function_loader),
+            phpstorm_meta: Some(&meta_guard),
         };
         let candidates =
             crate::completion::resolver::resolve_target_classes(subject, access_kind, &rctx);

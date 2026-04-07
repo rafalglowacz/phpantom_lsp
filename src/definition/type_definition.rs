@@ -71,6 +71,7 @@ impl Backend {
                     AccessKind::Arrow
                 };
 
+                let meta_guard = self.phpstorm_meta.read();
                 let rctx = ResolutionCtx {
                     current_class,
                     all_classes: &ctx.classes,
@@ -81,6 +82,7 @@ impl Backend {
                     function_loader: Some(
                         &function_loader as &dyn Fn(&str) -> Option<FunctionInfo>,
                     ),
+                    phpstorm_meta: Some(&meta_guard),
                 };
 
                 let candidates = crate::completion::resolver::resolve_target_classes(
