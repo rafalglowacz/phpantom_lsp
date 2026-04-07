@@ -1269,9 +1269,13 @@ impl Backend {
         let partial = match Self::extract_partial_class_name(content, position) {
             Some(p) => p,
             None => {
-                // Allow attribute completion on empty prefix (e.g. `#[`
-                // with nothing typed yet).
-                if matches!(class_ctx, ClassNameContext::Attribute(_)) {
+                // Allow attribute and namespace-declaration completion on
+                // empty prefix (e.g. `#[` or `namespace ` with nothing
+                // typed yet).
+                if matches!(
+                    class_ctx,
+                    ClassNameContext::Attribute(_) | ClassNameContext::NamespaceDeclaration
+                ) {
                     String::new()
                 }
                 // Allow keyword completion on empty prefix inside class-like
@@ -1325,7 +1329,8 @@ impl Backend {
 
         // ── `namespace` declaration → only namespace names ──────────
         if matches!(class_ctx, ClassNameContext::NamespaceDeclaration) {
-            let (ns_items, ns_incomplete) = self.build_namespace_completions(&partial, position);
+            let (ns_items, ns_incomplete) =
+                self.build_namespace_completions(&partial, position, current_uri);
             return Some(CompletionResponse::List(CompletionList {
                 is_incomplete: ns_incomplete,
                 items: ns_items,

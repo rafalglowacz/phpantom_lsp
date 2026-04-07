@@ -360,50 +360,7 @@ This is a small quality-of-life improvement: deprecated classes would
 show with a strikethrough in the completion menu across all sources,
 not just same-namespace ones.
 
-## C11. PSR-4 namespace completion
-
-**Impact: Medium · Effort: Low**
-
-When the user types `namespace ` at the top of a file, suggest the
-fully qualified namespace derived from the file's path and the
-project's PSR-4 autoload mapping. For example, typing `namespace T`
-in `tests/Unit/Reorder/SuspendScheduleTest.php` should offer
-`Tests\Unit\Reorder` as a completion item that inserts the full
-namespace followed by a semicolon.
-
-The classmap scanner already knows every PSR-4 prefix-to-directory
-mapping, and the class-declaration-name completion already infers a
-class name from the filename. The namespace case is the directory
-counterpart: strip the filename, walk the remaining path segments
-back to the PSR-4 root, and prepend the configured namespace prefix.
-
-**Implementation:**
-
-1. **Detect `namespace` context** — the keyword context already
-   identifies `ClassNameContext::NamespaceDeclaration`. The handler
-   currently delegates to `build_namespace_completions` which returns
-   existing namespace names from the index. Add a new code path (or
-   augment the existing one) that also computes the PSR-4-derived
-   namespace for the current file.
-
-2. **Compute the expected namespace** — given the current file's URI
-   and the project's PSR-4 map (`autoload_map`), find the matching
-   prefix, strip it from the file path, convert directory separators
-   to `\`, and drop the filename. This is essentially
-   `filename_class_name` but for directories.
-
-3. **Build the completion item** — offer the computed namespace with
-   high sort priority (above existing namespace names from the
-   index). Insert text should include the trailing `;`. If the
-   computed namespace matches what the user has already partially
-   typed, filter normally.
-
-Intelephense already does this, so users migrating from it will
-expect the behavior.
-
----
-
-## C12. Smarter member ordering after `->` / `::`
+## C11. Smarter member ordering after `->` / `::`
 
 **Impact: Medium · Effort: needs planning**
 

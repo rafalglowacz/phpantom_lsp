@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **PhpType migration.** Nearly all internal type manipulation now uses structured type operations end-to-end, from docblock extraction through completion, hover, code actions, and diagnostics. Types are parsed once at extraction time and flow through the entire pipeline without redundant re-parsing. Type-guard narrowing and subtype checking use shared predicates instead of ad-hoc string matching, improving consistency and reducing the surface area for type-comparison bugs.
-
 ### Added
 
 - **`@psalm-return`, `@psalm-param`, and `@psalm-var` tag support.** Psalm-prefixed docblock tags are now recognized alongside their PHPStan equivalents for return types, parameter types, variable types, conditional return types, template parameter bindings, and semantic token highlighting.
@@ -29,18 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hover on parameter variables at their definition site.** Hovering on a function or method parameter now shows its resolved type, using the `@param` docblock type when it is richer than the native hint. Contributed by @RemcoSmitsDev in https://github.com/AJenbo/phpantom_lsp/pull/68.
 - **Array element type extraction from property generics.** Bracket access on properties annotated with generic array or collection types (e.g. `$this->cache[$key]->`) now resolves the element type correctly through nested chains, string-literal keys, and method chains after the bracket.
 - **`@phpstan-assert-if-true $this` narrowing.** Instance methods annotated with `@phpstan-assert-if-true` or `@phpstan-assert-if-false` targeting `$this` now narrow the receiver variable in the corresponding branch. Contributed by @syntlyx in https://github.com/AJenbo/phpantom_lsp/pull/52.
+- **Namespace completion from file path.** When creating a new PHP file, typing `namespace ` suggests the correct namespace inferred from the file's location and the project's PSR-4 autoload mappings. The most specific mapping is preselected so you can accept it with a single keypress. When multiple PSR-4 roots match the same directory, all candidates appear ranked by specificity (longest match first).
 - **Standalone `@var` docblock for untyped closure parameters.** When a closure parameter lacks a type hint and no assignment follows, a `@var` block above the usage is now picked up as the variable's type.
 - **`--stdio` CLI flag.** Accepted (and ignored) for compatibility with LSP client wrappers that pass `--stdio` by default.
 - **Method-level template parameters resolve inside method bodies.** `@template T of Builder` with `@param T $query` now resolves `$query` to the template bound inside the method body, providing completions from the bound class.
 - **Undefined variable diagnostic.** Variable reads that have no prior definition (assignment, parameter, foreach binding, catch variable, `global`, `static`, `use()` clause, or destructuring) in the same scope are flagged as errors. Writes must appear before the read in source order, catching use-before-assign bugs, while assignments inside branches (if/else, switch, try/catch) still count to avoid false positives. Suppressed for superglobals, `isset()`/`empty()` guards, `compact()` references, `extract()` calls, variable variables (`$$`), `@` error suppression, and `@var` annotations. Top-level code outside functions is skipped.
-- **Structural subtype checking.** `PhpType::is_subtype_of` answers whether one type is a structural subtype of another without consulting a class hierarchy. Covers the full PHP scalar lattice (including refinements like `positive-int`, `non-empty-string`, `class-string`), `never` as bottom, `mixed` as top, nullable/union/intersection decomposition, generic covariance for array-like containers, callable variance, literal types, and int ranges.
-- **Union simplification.** `PhpType::simplified` deduplicates union members, merges `true|false` into `bool`, absorbs scalar refinements into their parent types (`positive-int|int` becomes `int`), collapses unions containing `mixed`, flattens nested unions and intersections, and unwraps single-member composites.
-- **Intersection distribution over unions.** `PhpType::distribute_intersection` transforms `(A|B) & C` into `(A&C) | (B&C)`, producing disjunctive normal form for type narrowing.
 
 ### Changed
 
-- **Tighter `PhpType` integration.** Type information now flows through the entire pipeline as structured values instead of being serialized to strings and re-parsed at intermediate steps. This eliminates unnecessary work during indexing, completion, hover, and diagnostics, and removes a class of potential bugs from string-level type manipulation. Eloquent relationship classification, related-type extraction, collection replacement, variable hover, and instanceof narrowing all operate directly on structured types, removing redundant parse-stringify cycles from hot paths.
-- **Faster file parsing.** Type override resolution (`resolve_effective_type`, `should_override_type`) now accepts pre-parsed types directly, eliminating redundant stringify-parse round-trips on every method and property during indexing.
 - **Fewer false-positive diagnostics.** Variable resolution now produces the same result across completions, hover, and diagnostics, eliminating cases where diagnostics disagreed about a variable's type.
 - **`@phpstan-ignore` is never the preferred quickfix.** The "Ignore PHPStan error" code action is explicitly non-preferred, so editor keyboard shortcuts no longer accidentally apply it when another fix is available.
 - **Generate PHPDoc infers `@return` from the function body.** Typing `/**` above a function that returns `array` now produces a specific element type (e.g. `@return list<string>`) instead of `@return array<mixed>`.
@@ -49,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Docblock generation no longer panics on lines with multibyte characters.** Files containing non-ASCII characters (e.g. accented letters) could cause the `/**` docblock trigger to crash or produce misaligned edits due to a mismatch between UTF-16 column offsets and byte offsets.
 - **Conditional return types showing `mixed` in hover.** When a method with a conditional return type (e.g. `@phpstan-return ($type is class-string<T> ? T : mixed)`) resolved to a concrete class, hover still displayed the method's declared return type (`mixed`) instead of the resolved class. Affects methods like Symfony's `SerializerInterface::deserialize()`.
 - **Method-level `@throws` types now resolve short names to FQN.** Exception types in `@throws` tags on class methods are now fully qualified using the file's `use` imports, matching the behaviour already in place for standalone functions. Cross-file throws propagation and the "Update docblock" code action produce correct results when the exception class is imported via a `use` statement.
 - **Missing diagnostics and import actions in files without a namespace.** When a namespaced class (e.g. `Carbon\Carbon`) had already been parsed, using its short name (`Carbon`) in a file without a `namespace` declaration incorrectly resolved against the namespaced class. This suppressed both the "class not found" diagnostic and the "Import" code action. Bare-name lookups now only match classes that are themselves in the global namespace.

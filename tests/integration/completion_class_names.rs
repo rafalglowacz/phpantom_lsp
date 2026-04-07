@@ -4905,3 +4905,286 @@ async fn test_namespace_alias_prefix_bare_backslash_lists_all() {
         labels
     );
 }
+
+// ─── Namespace completion inferred from file path ───────────────────────────
+
+/// When the file's path matches a PSR-4 mapping, the inferred namespace
+/// should appear at the top of the completion list and be preselected.
+#[tokio::test]
+async fn test_namespace_inferred_from_file_path_basic() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    // Create the directory so the file URI is valid.
+    std::fs::create_dir_all(dir.path().join("src/Models")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("src/Models/User.php")).unwrap();
+    let text = concat!("<?php\n", "namespace \n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+
+    let inferred = items
+        .iter()
+        .find(|i| i.label == "App\\Models")
+        .expect("Should suggest App\\Models inferred from file path");
+
+    assert_eq!(
+        inferred.detail.as_deref(),
+        Some("(from file path)"),
+        "Inferred namespace should have '(from file path)' detail"
+    );
+
+    assert_eq!(
+        inferred.preselect,
+        Some(true),
+        "Inferred namespace should be preselected"
+    );
+
+    // It should sort before other namespaces.
+    let app_only = items.iter().find(|i| i.label == "App").unwrap();
+    assert!(
+        inferred.sort_text < app_only.sort_text,
+        "Inferred namespace should sort before parent namespace: {:?} vs {:?}",
+        inferred.sort_text,
+        app_only.sort_text
+    );
+}
+
+/// When multiple PSR-4 roots match the same directory, all inferred
+/// namespaces should appear and the most specific one should be first.
+#[tokio::test]
+async fn test_namespace_inferred_multiple_matches_longest_first() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "Tests\\": "tests/",
+                    "Tests\\Support\\": "tests/Support/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    std::fs::create_dir_all(dir.path().join("tests/Support/Helpers")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("tests/Support/Helpers/TestHelper.php")).unwrap();
+    let text = concat!("<?php\n", "namespace \n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+
+    // Both mappings match, producing the same namespace string but with
+    // different specificities.  We should see the namespace present.
+    let inferred_items: Vec<&CompletionItem> = items
+        .iter()
+        .filter(|i| {
+            i.label == "Tests\\Support\\Helpers" && i.detail.as_deref() == Some("(from file path)")
+        })
+        .collect();
+
+    assert!(
+        !inferred_items.is_empty(),
+        "Should have at least one inferred namespace for Tests\\Support\\Helpers, got labels: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+
+    // The inferred namespace should be preselected.
+    assert_eq!(
+        inferred_items[0].preselect,
+        Some(true),
+        "Most specific inferred namespace should be preselected"
+    );
+}
+
+/// The real-world Luxplus composer.json scenario: a file in
+/// `src/core/Brands/Services/` should infer `Luxplus\Core\Brands\Services`.
+#[tokio::test]
+async fn test_namespace_inferred_luxplus_real_world() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "Luxplus\\Core\\": "src/core/",
+                    "Luxplus\\Core\\Database\\": "src/database/",
+                    "Luxplus\\Core\\Tasks\\": "src/tasks/",
+                    "Luxplus\\Web\\": "src/web/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    std::fs::create_dir_all(dir.path().join("src/core/Brands/Services")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("src/core/Brands/Services/Fred.php")).unwrap();
+    let text = concat!("<?php\n", "namespace \n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+
+    let inferred = items
+        .iter()
+        .find(|i| i.label == "Luxplus\\Core\\Brands\\Services")
+        .expect("Should suggest Luxplus\\Core\\Brands\\Services from file path");
+
+    assert_eq!(inferred.detail.as_deref(), Some("(from file path)"),);
+
+    assert_eq!(inferred.preselect, Some(true),);
+
+    // Should NOT infer Luxplus\Core\Database even though that prefix
+    // exists — the file is not under src/database/.
+    let db_inferred = items.iter().find(|i| {
+        i.label == "Luxplus\\Core\\Database\\Brands\\Services"
+            && i.detail.as_deref() == Some("(from file path)")
+    });
+    assert!(
+        db_inferred.is_none(),
+        "Should not infer namespace from non-matching PSR-4 base path"
+    );
+}
+
+/// When the file is at the root of a PSR-4 source directory (e.g.
+/// `src/Kernel.php`), the inferred namespace should be just the prefix.
+#[tokio::test]
+async fn test_namespace_inferred_at_source_root() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("src/Kernel.php")).unwrap();
+    let text = concat!("<?php\n", "namespace \n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+
+    let inferred = items
+        .iter()
+        .find(|i| i.label == "App" && i.detail.as_deref() == Some("(from file path)"))
+        .expect("Should suggest App inferred from src/Kernel.php");
+
+    assert_eq!(inferred.preselect, Some(true));
+}
+
+/// When the file is not under any PSR-4 source directory, no inferred
+/// namespace should appear (no items with the "(from file path)" detail).
+#[tokio::test]
+async fn test_namespace_no_inference_outside_psr4() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    std::fs::create_dir_all(dir.path().join("config")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("config/app.php")).unwrap();
+    let text = concat!("<?php\n", "namespace \n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+
+    let inferred: Vec<&CompletionItem> = items
+        .iter()
+        .filter(|i| i.detail.as_deref() == Some("(from file path)"))
+        .collect();
+
+    assert!(
+        inferred.is_empty(),
+        "Should not have any inferred namespaces for files outside PSR-4 dirs, got: {:?}",
+        inferred.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Inferred namespace should still work when the user has started typing
+/// a partial namespace prefix that matches the inferred one.
+#[tokio::test]
+async fn test_namespace_inferred_with_partial_prefix() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    std::fs::create_dir_all(dir.path().join("src/Models")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("src/Models/User.php")).unwrap();
+    let text = concat!("<?php\n", "namespace App\n",);
+
+    // Cursor at end of "App" (col 13).
+    let items = complete_at(&backend, &uri, text, 1, 13).await;
+
+    let inferred = items
+        .iter()
+        .find(|i| i.label == "App\\Models" && i.detail.as_deref() == Some("(from file path)"));
+
+    assert!(
+        inferred.is_some(),
+        "Typing partial 'App' should still show inferred App\\Models, got: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Non-inferred namespace items should NOT be preselected and should not
+/// have the "(from file path)" detail.
+#[tokio::test]
+async fn test_namespace_non_inferred_items_not_preselected() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/",
+                    "Tests\\": "tests/"
+                }
+            }
+        }"#,
+        &[],
+    );
+
+    std::fs::create_dir_all(dir.path().join("src/Models")).unwrap();
+
+    let uri = Url::from_file_path(dir.path().join("src/Models/User.php")).unwrap();
+    let text = concat!("<?php\n", "namespace \n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+
+    // "Tests" should appear but not be preselected or marked as inferred.
+    let tests_item = items
+        .iter()
+        .find(|i| i.label == "Tests")
+        .expect("Should have Tests in namespace completions");
+
+    assert_ne!(
+        tests_item.preselect,
+        Some(true),
+        "Tests namespace should NOT be preselected when file is under src/"
+    );
+    assert_ne!(
+        tests_item.detail.as_deref(),
+        Some("(from file path)"),
+        "Tests namespace should NOT have '(from file path)' detail"
+    );
+}
