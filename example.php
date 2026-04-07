@@ -2863,6 +2863,23 @@ class PassByReferenceDemo
         // acquires that type after the call.
         initPen($pen);
         $pen->write();                    // $pen is now Pen
+
+        // Static method calls with by-ref parameters:
+        PenFactory::create($staticPen);
+        $staticPen->write();              // $staticPen is now Pen
+
+        // Constructor calls with by-ref parameters:
+        new PenBuilder($ctorPen);
+        $ctorPen->write();                // $ctorPen is now Pen
+
+        // Instance method calls ($this->method) with by-ref parameters:
+        $this->init($thisPen);
+        $thisPen->write();                // $thisPen is now Pen
+    }
+
+    private function init(?Pen &$pen): void
+    {
+        $pen = new Pen();
     }
 }
 
@@ -4780,6 +4797,22 @@ function initPen(?Pen &$pen): void
     $pen = new Pen();
 }
 
+class PenFactory
+{
+    public static function create(?Pen &$pen): void
+    {
+        $pen = new Pen();
+    }
+}
+
+class PenBuilder
+{
+    public function __construct(?Pen &$pen)
+    {
+        $pen = new Pen();
+    }
+}
+
 interface ScaffoldingEntityFinder
 {
     /**
@@ -5845,6 +5878,14 @@ function runDemoAssertions(): void
     $refPen = null;
     initPen($refPen);
     assert($refPen instanceof Pen, 'initPen(&$pen) must give $pen type Pen');
+
+    $staticPen = null;
+    PenFactory::create($staticPen);
+    assert($staticPen instanceof Pen, 'PenFactory::create(&$pen) must give $pen type Pen');
+
+    $ctorPen = null;
+    new PenBuilder($ctorPen);
+    assert($ctorPen instanceof Pen, 'new PenBuilder(&$pen) must give $pen type Pen');
 
     // ── Interface template inheritance (class-string<T>) ────────────────
     $locator = new ScaffoldingEntityLocator();

@@ -25,8 +25,6 @@ within the same impact tier.
 
 | #    | Item                                                                                                    | Impact | Effort |
 | ---- | ------------------------------------------------------------------------------------------------------- | ------ | ------ |
-|      | Clear [refactoring gate](todo/refactor.md)                                                              | —      | —      |
-
 |      | **Release 0.7.0**                                                                                       |        |        |
 
 ## Sprint 5 — Polish for office adoption

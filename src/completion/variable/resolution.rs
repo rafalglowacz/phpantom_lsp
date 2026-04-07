@@ -39,7 +39,7 @@ use crate::completion::types::narrowing;
 use crate::docblock;
 use crate::parser::{extract_hint_type, with_parsed_program};
 use crate::php_type::{PhpType, ShapeEntry, is_keyword_type};
-use crate::types::{ClassInfo, ResolvedType};
+use crate::types::{ClassInfo, ParameterInfo, ResolvedType};
 
 use crate::completion::resolver::{Loaders, VarResolutionCtx};
 
@@ -3575,8 +3575,8 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
 /// parameter typed as `Baz` and resolves `$bar` to `Baz`.
 ///
 /// Currently handles standalone function calls (via `function_loader`).
-/// Method and static method calls with by-ref parameters are not yet
-/// supported.
+/// Handles standalone function calls, instance method calls, static
+/// method calls, and constructor calls.
 fn try_apply_pass_by_reference_type(
     expr: &Expression<'_>,
     ctx: &VarResolutionCtx<'_>,
@@ -3601,6 +3601,28 @@ fn try_apply_pass_by_reference_type(
             // can iterate them together.
             (&func_call.argument_list, func_info.parameters)
         }
+        Expression::Call(Call::Method(method_call)) => {
+            match try_resolve_method_params(method_call.object, &method_call.method, ctx) {
+                Some((params,)) => (&method_call.argument_list, params),
+                None => return,
+            }
+        }
+        Expression::Call(Call::NullSafeMethod(method_call)) => {
+            match try_resolve_method_params(method_call.object, &method_call.method, ctx) {
+                Some((params,)) => (&method_call.argument_list, params),
+                None => return,
+            }
+        }
+        Expression::Call(Call::StaticMethod(static_call)) => {
+            match try_resolve_static_method_params(static_call, ctx) {
+                Some((params, arg_list)) => (arg_list, params),
+                None => return,
+            }
+        }
+        Expression::Instantiation(inst) => match try_resolve_constructor_params(inst, ctx) {
+            Some((params, arg_list)) => (arg_list, params),
+            None => return,
+        },
         _ => return,
     };
 
@@ -3623,7 +3645,7 @@ fn try_apply_pass_by_reference_type(
         // with a type hint.
         if let Some(param) = parameters.get(i)
             && param.is_reference
-            && let Some(ref type_hint) = param.type_hint
+            && let Some(type_hint) = &param.type_hint
         {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 type_hint,
@@ -3639,6 +3661,76 @@ fn try_apply_pass_by_reference_type(
             }
         }
     }
+}
+
+/// Resolve parameters for an instance method call.
+///
+/// Currently only handles `$this->method()` where the current class
+/// is known.  General variable receiver resolution is deferred to the
+/// forward-walking scope model (T25) to avoid re-entrant variable
+/// resolution.
+fn try_resolve_method_params(
+    object: &Expression<'_>,
+    method: &ClassLikeMemberSelector<'_>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<(Vec<ParameterInfo>,)> {
+    let method_name = match method {
+        ClassLikeMemberSelector::Identifier(ident) => ident.value,
+        _ => return None,
+    };
+
+    // Only handle `$this->method()` — we know the current class.
+    match object {
+        Expression::Variable(Variable::Direct(dv)) if dv.name == "$this" => {}
+        _ => return None,
+    }
+
+    let method_info = ctx
+        .current_class
+        .methods
+        .iter()
+        .find(|m| m.name == method_name)?;
+    Some((method_info.parameters.clone(),))
+}
+
+/// Resolve parameters for a static method call.
+fn try_resolve_static_method_params<'a>(
+    static_call: &'a StaticMethodCall<'a>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<(Vec<ParameterInfo>, &'a ArgumentList<'a>)> {
+    let method_name = match &static_call.method {
+        ClassLikeMemberSelector::Identifier(ident) => ident.value,
+        _ => return None,
+    };
+
+    let class_name = match static_call.class {
+        Expression::Self_(_) | Expression::Static(_) => ctx.current_class.name.clone(),
+        Expression::Parent(_) => ctx.current_class.parent_class.clone()?,
+        Expression::Identifier(ident) => ident.value().to_string(),
+        _ => return None,
+    };
+
+    let cls = (ctx.class_loader)(&class_name)?;
+    let method_info = cls.methods.iter().find(|m| m.name == method_name)?;
+    Some((method_info.parameters.clone(), &static_call.argument_list))
+}
+
+/// Resolve parameters for a constructor call (`new Cls(...)`).
+fn try_resolve_constructor_params<'a>(
+    inst: &'a Instantiation<'a>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<(Vec<ParameterInfo>, &'a ArgumentList<'a>)> {
+    let class_name = match inst.class {
+        Expression::Identifier(ident) => ident.value().to_string(),
+        Expression::Self_(_) | Expression::Static(_) => ctx.current_class.name.clone(),
+        Expression::Parent(_) => ctx.current_class.parent_class.clone()?,
+        _ => return None,
+    };
+
+    let args = inst.argument_list.as_ref()?;
+    let cls = (ctx.class_loader)(&class_name)?;
+    let ctor = cls.methods.iter().find(|m| m.name == "__construct")?;
+    Some((ctor.parameters.clone(), args))
 }
 
 #[cfg(test)]

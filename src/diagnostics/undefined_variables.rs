@@ -56,7 +56,8 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::parser::with_parsed_program;
 use crate::scope_collector::{
-    AccessKind, FrameKind, ScopeMap, collect_function_scope, collect_function_scope_with_kind,
+    AccessKind, ByRefCallKind, ByRefResolver, FrameKind, ScopeMap,
+    collect_function_scope_with_kind_and_resolver, collect_function_scope_with_resolver,
 };
 
 use super::helpers::make_diagnostic;
@@ -94,6 +95,13 @@ impl Backend {
         content: &str,
         out: &mut Vec<Diagnostic>,
     ) {
+        // Build a by-ref resolver that uses Backend to look up function
+        // and method signatures.  This lets the scope collector mark
+        // by-ref arguments as writes for user-defined functions, static
+        // methods, and constructors — not just the hardcoded table.
+        let resolver: ByRefResolver<'_> =
+            &|call_kind: &ByRefCallKind<'_>| self.resolve_by_ref_positions(call_kind);
+
         with_parsed_program(content, "undefined_variable", |program, content| {
             let mut ctx = DiagnosticCtx {
                 content,
@@ -101,11 +109,56 @@ impl Backend {
             };
 
             for stmt in program.statements.iter() {
-                collect_from_statement(stmt, &mut ctx);
+                collect_from_statement(stmt, &mut ctx, Some(&resolver));
             }
 
             out.extend(ctx.diagnostics);
         });
+    }
+
+    /// Look up which parameter positions are by-reference for a given call.
+    ///
+    /// Returns `Some(vec![...])` with 0-based argument positions that are
+    /// by-reference, or `None` if the callee cannot be resolved.
+    fn resolve_by_ref_positions(&self, call_kind: &ByRefCallKind<'_>) -> Option<Vec<usize>> {
+        match call_kind {
+            ByRefCallKind::Function(name) => {
+                let candidates: Vec<&str> = vec![*name];
+                let func_info = self.find_or_load_function(&candidates)?;
+                let positions: Vec<usize> = func_info
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.is_reference)
+                    .map(|(i, _)| i)
+                    .collect();
+                Some(positions)
+            }
+            ByRefCallKind::StaticMethod(class_name, method_name) => {
+                let cls = self.find_or_load_class(class_name)?;
+                let method = cls.methods.iter().find(|m| m.name == *method_name)?;
+                let positions: Vec<usize> = method
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.is_reference)
+                    .map(|(i, _)| i)
+                    .collect();
+                Some(positions)
+            }
+            ByRefCallKind::Constructor(class_name) => {
+                let cls = self.find_or_load_class(class_name)?;
+                let ctor = cls.methods.iter().find(|m| m.name == "__construct")?;
+                let positions: Vec<usize> = ctor
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.is_reference)
+                    .map(|(i, _)| i)
+                    .collect();
+                Some(positions)
+            }
+        }
     }
 }
 
@@ -121,16 +174,21 @@ struct DiagnosticCtx<'a> {
 
 /// Walk a top-level statement, recursing into namespace blocks,
 /// class declarations, and function bodies.
-fn collect_from_statement(stmt: &Statement<'_>, ctx: &mut DiagnosticCtx<'_>) {
+fn collect_from_statement(
+    stmt: &Statement<'_>,
+    ctx: &mut DiagnosticCtx<'_>,
+    resolver: Option<ByRefResolver<'_>>,
+) {
     match stmt {
         Statement::Function(func) => {
             let body_start = func.body.left_brace.start.offset;
             let body_end = func.body.right_brace.end.offset;
-            let scope = collect_function_scope(
+            let scope = collect_function_scope_with_resolver(
                 &func.parameter_list,
                 func.body.statements.as_slice(),
                 body_start,
                 body_end,
+                resolver,
             );
             check_scope(
                 &scope,
@@ -140,20 +198,20 @@ fn collect_from_statement(stmt: &Statement<'_>, ctx: &mut DiagnosticCtx<'_>) {
             );
         }
         Statement::Class(class) => {
-            collect_from_class_members(class.members.as_slice(), ctx);
+            collect_from_class_members(class.members.as_slice(), ctx, resolver);
         }
         Statement::Trait(tr) => {
-            collect_from_class_members(tr.members.as_slice(), ctx);
+            collect_from_class_members(tr.members.as_slice(), ctx, resolver);
         }
         Statement::Enum(en) => {
-            collect_from_class_members(en.members.as_slice(), ctx);
+            collect_from_class_members(en.members.as_slice(), ctx, resolver);
         }
         Statement::Interface(_) => {
             // Interfaces don't have method bodies.
         }
         Statement::Namespace(ns) => {
             for inner in ns.statements().iter() {
-                collect_from_statement(inner, ctx);
+                collect_from_statement(inner, ctx, resolver);
             }
         }
         // Top-level code (outside any function/class).
@@ -166,7 +224,11 @@ fn collect_from_statement(stmt: &Statement<'_>, ctx: &mut DiagnosticCtx<'_>) {
 }
 
 /// Walk class-like members to find method bodies.
-fn collect_from_class_members(members: &[ClassLikeMember<'_>], ctx: &mut DiagnosticCtx<'_>) {
+fn collect_from_class_members(
+    members: &[ClassLikeMember<'_>],
+    ctx: &mut DiagnosticCtx<'_>,
+    resolver: Option<ByRefResolver<'_>>,
+) {
     for member in members.iter() {
         if let ClassLikeMember::Method(method) = member
             && let MethodBody::Concrete(block) = &method.body
@@ -179,12 +241,13 @@ fn collect_from_class_members(members: &[ClassLikeMember<'_>], ctx: &mut Diagnos
                 .iter()
                 .any(|m| matches!(m, Modifier::Static(_)));
 
-            let scope = collect_function_scope_with_kind(
+            let scope = collect_function_scope_with_kind_and_resolver(
                 &method.parameter_list,
                 block.statements.as_slice(),
                 body_start,
                 body_end,
                 FrameKind::Method,
+                resolver,
             );
 
             check_scope(&scope, block.statements.as_slice(), ctx, !is_static);
@@ -231,11 +294,10 @@ fn check_scope(
     // Collect byte offsets of variables inside `isset()` and `empty()`.
     let guarded_offsets = collect_guarded_offsets(statements);
 
-    // The outermost frame is always the first in the sorted list.
-    let outermost = match scope.frames.first() {
-        Some(f) => f,
-        None => return,
-    };
+    // Bail out if there are no frames at all.
+    if scope.frames.is_empty() {
+        return;
+    }
 
     // Build a set of "always-defined" names that do not require a
     // prior write: superglobals, compact-referenced vars, @var
@@ -254,61 +316,18 @@ fn check_scope(
         always_defined.insert(av.as_str());
     }
 
-    // Collect all writes in the outermost frame (excluding nested
-    // closure/arrow frames) with their offsets, so we can do
-    // offset-aware lookups per read.
-    let outermost_writes: Vec<(&str, u32)> = scope
-        .accesses
+    // Pre-compute the "own writes" for each frame: writes that are
+    // directly inside the frame (not inside a nested sub-frame).
+    let frame_own_writes: Vec<Vec<(&str, u32)>> = scope
+        .frames
         .iter()
-        .filter(|a| {
-            matches!(a.kind, AccessKind::Write | AccessKind::ReadWrite)
-                && !is_in_nested_frame(a.offset, outermost, &scope.frames)
-        })
-        .map(|a| (a.name.as_str(), a.offset))
-        .collect();
-
-    // Process each frame independently.
-    for frame in &scope.frames {
-        let is_outermost = frame.start == outermost.start && frame.end == outermost.end;
-
-        // Build the list of writes visible to this frame.
-        let frame_writes: &Vec<(&str, u32)>;
-        let nested_writes: Vec<(&str, u32)>;
-
-        if is_outermost {
-            frame_writes = &outermost_writes;
-        } else if frame.kind == FrameKind::ArrowFunction {
-            // Arrow functions implicitly capture all outer variables.
-            // Combine outermost writes with this frame's own writes.
-            let mut combined = outermost_writes.clone();
-            for access in &scope.accesses {
-                if !matches!(access.kind, AccessKind::Write | AccessKind::ReadWrite) {
-                    continue;
-                }
-                if access.offset >= frame.start
-                    && access.offset <= frame.end
-                    && !is_in_nested_frame(access.offset, frame, &scope.frames)
-                {
-                    combined.push((access.name.as_str(), access.offset));
-                }
-            }
-            // Parameters are recorded before frame.start.
-            for param in &frame.parameters {
-                combined.push((param.as_str(), 0));
-            }
-            nested_writes = combined;
-            frame_writes = &nested_writes;
-        } else {
-            // Closures and catch frames: only see their own writes
-            // plus parameters and captures.
+        .map(|frame| {
             let mut writes: Vec<(&str, u32)> = Vec::new();
-
             // Parameters (offset 0 = always before any read).
             for param in &frame.parameters {
                 writes.push((param.as_str(), 0));
             }
-
-            // Writes inside the frame body.
+            // Writes inside the frame body (excluding nested frames).
             for access in &scope.accesses {
                 if !matches!(access.kind, AccessKind::Write | AccessKind::ReadWrite) {
                     continue;
@@ -320,12 +339,27 @@ fn check_scope(
                     writes.push((access.name.as_str(), access.offset));
                 }
             }
-            nested_writes = writes;
-            frame_writes = &nested_writes;
-        }
+            writes
+        })
+        .collect();
+
+    // Process each frame independently.
+    for (frame_idx, frame) in scope.frames.iter().enumerate() {
+        // Build the list of writes visible to this frame by walking
+        // up the parent-frame chain.  This correctly handles
+        // arbitrary nesting depths (e.g. arrow fn inside closure
+        // inside method, catch block inside closure, etc.).
+        //
+        // Visibility rules per frame kind:
+        // - **Outermost / TopLevel / Function / Method**: own writes only
+        // - **ArrowFunction / Catch**: parent's visible writes + own writes
+        // - **Closure**: own writes only (captures are already recorded
+        //   as Write accesses at body_start by the scope collector)
+        let visible_writes = build_visible_writes(frame_idx, &scope.frames, &frame_own_writes);
 
         // Check reads: for each read, verify that a write of the same
         // name exists at a lower offset (or the name is always-defined).
+        let frame_writes = &visible_writes;
         for access in &scope.accesses {
             if access.offset < frame.start || access.offset > frame.end {
                 continue;
@@ -416,6 +450,75 @@ fn is_in_nested_frame(
             && offset <= f.end
             && f.kind != FrameKind::Catch
     })
+}
+
+/// Find the index of the parent frame for `frame_idx`.
+///
+/// The parent is the smallest frame that strictly contains the given
+/// frame.  Returns `None` for the outermost frame.
+fn find_parent_frame_idx(
+    frame_idx: usize,
+    frames: &[crate::scope_collector::Frame],
+) -> Option<usize> {
+    let frame = &frames[frame_idx];
+    let mut best: Option<usize> = None;
+    for (i, candidate) in frames.iter().enumerate() {
+        if i == frame_idx {
+            continue;
+        }
+        // candidate must strictly contain frame
+        if candidate.start <= frame.start
+            && candidate.end >= frame.end
+            && !(candidate.start == frame.start && candidate.end == frame.end)
+        {
+            match best {
+                None => best = Some(i),
+                Some(prev) => {
+                    let prev_frame = &frames[prev];
+                    // Pick the tighter (smaller) enclosing frame.
+                    if (candidate.end - candidate.start) < (prev_frame.end - prev_frame.start) {
+                        best = Some(i);
+                    }
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Build the set of writes visible to the frame at `frame_idx` by
+/// walking up the parent chain.
+///
+/// - **Arrow functions and catch blocks** inherit all writes visible
+///   to their parent, plus their own direct writes.
+/// - **Closures** see only their own direct writes (captures are
+///   already recorded as Write accesses by the scope collector).
+/// - **Outermost / function / method** frames see only their own
+///   direct writes.
+fn build_visible_writes<'a>(
+    frame_idx: usize,
+    frames: &[crate::scope_collector::Frame],
+    frame_own_writes: &[Vec<(&'a str, u32)>],
+) -> Vec<(&'a str, u32)> {
+    let frame = &frames[frame_idx];
+    let own = &frame_own_writes[frame_idx];
+
+    match frame.kind {
+        FrameKind::ArrowFunction | FrameKind::Catch => {
+            // Inherit parent's visible writes, then add our own.
+            let parent_writes = match find_parent_frame_idx(frame_idx, frames) {
+                Some(parent_idx) => build_visible_writes(parent_idx, frames, frame_own_writes),
+                None => Vec::new(),
+            };
+            let mut combined = parent_writes;
+            combined.extend_from_slice(own);
+            combined
+        }
+        _ => {
+            // Closures, outermost, functions, methods: own writes only.
+            own.clone()
+        }
+    }
 }
 
 // ─── Dynamic variable / extract detection ───────────────────────────────────
@@ -1702,6 +1805,72 @@ function test(array $items): void {
     }
 
     #[test]
+    fn no_diagnostic_for_function_param_used_in_catch() {
+        let diags = collect(
+            r#"<?php
+function capture(string $payment, float $amount): void {
+    try {
+        doSomething($amount);
+    } catch (\Exception $e) {
+        echo $payment;
+        echo $amount;
+        echo $e->getMessage();
+    }
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Function parameters should be visible inside catch blocks. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_outer_variable_used_in_catch() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $client = getClient();
+    $token = 'abc';
+    try {
+        $client->send($token);
+    } catch (\RuntimeException $e) {
+        log($client, $token, $e->getMessage());
+    }
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Variables assigned before try should be visible inside catch blocks. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_try_assigned_variable_used_in_catch() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    try {
+        $response = fetchData();
+    } catch (\Exception $e) {
+        if (isset($response)) {
+            echo $response;
+        }
+    }
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Variables assigned in try block should be visible in catch (guarded by isset). Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
     fn no_diagnostic_for_catch_variable() {
         let diags = collect(
             r#"<?php
@@ -2339,5 +2508,553 @@ function test(): \Generator {
 "#,
         );
         assert!(diags.is_empty(), "Got: {:?}", diags);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Static property access (self::$prop, static::$prop, etc.)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn no_diagnostic_for_self_static_property_access() {
+        let diags = collect(
+            r#"<?php
+class Config {
+    private static ?string $instance = null;
+
+    public static function get(): ?string {
+        if (self::$instance === null) {
+            self::$instance = 'default';
+        }
+        return self::$instance;
+    }
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "self::$prop should not be flagged as undefined variable. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_static_keyword_property_access() {
+        let diags = collect(
+            r#"<?php
+class Base {
+    protected static int $count = 0;
+
+    public function increment(): void {
+        static::$count++;
+    }
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "static::$prop should not be flagged as undefined variable. Got: {:?}",
+            diags,
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // By-reference out-parameters (preg_match, parse_str, etc.)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn no_diagnostic_for_preg_match_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(string $input): ?string {
+    if (preg_match('/(\d+)/', $input, $match) === 1) {
+        return $match[1];
+    }
+    return null;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "preg_match out-param $match should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_parse_str_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(string $query): string {
+    parse_str($query, $data);
+    return $data['key'] ?? '';
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "parse_str out-param $data should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_preg_match_all_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(string $text): array {
+    preg_match_all('/\w+/', $text, $matches);
+    return $matches[0];
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "preg_match_all out-param $matches should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_fqn_preg_match() {
+        let diags = collect(
+            r#"<?php
+function test(string $input): ?string {
+    if (\preg_match('/(\d+)/', $input, $match) === 1) {
+        return $match[1];
+    }
+    return null;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "FQN \\preg_match out-param should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Expanded by-ref out-parameter table — no-diagnostic tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn no_diagnostic_for_curl_multi_exec_out_param() {
+        let diags = collect(
+            r#"<?php
+function test($mh): int {
+    curl_multi_exec($mh, $running);
+    return $running;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "curl_multi_exec out-param $running should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_fsockopen_out_params() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $fp = fsockopen('example.com', 80, $errno, $errstr);
+    echo $errno . $errstr;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "fsockopen out-params $errno/$errstr should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_openssl_sign_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(string $data, $key): string {
+    openssl_sign($data, $signature, $key);
+    return $signature;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "openssl_sign out-param $signature should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_getimagesize_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(string $file): array {
+    $info = getimagesize($file, $imageinfo);
+    return $imageinfo;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "getimagesize out-param $imageinfo should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_headers_sent_out_params() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    headers_sent($file, $line);
+    echo $file . ':' . $line;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "headers_sent out-params $file/$line should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_pcntl_wait_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    pcntl_wait($status);
+    echo $status;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "pcntl_wait out-param $status should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_dns_get_mx_out_params() {
+        let diags = collect(
+            r#"<?php
+function test(string $host): void {
+    dns_get_mx($host, $mxhosts, $weights);
+    var_dump($mxhosts, $weights);
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "dns_get_mx out-params should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_flock_out_param() {
+        let diags = collect(
+            r#"<?php
+function test($fp): void {
+    flock($fp, LOCK_EX, $wouldblock);
+    echo $wouldblock;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "flock out-param $wouldblock should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_mb_parse_str_out_param() {
+        let diags = collect(
+            r#"<?php
+function test(string $input): array {
+    mb_parse_str($input, $result);
+    return $result;
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "mb_parse_str out-param $result should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Generic by-ref detection via resolver (user-defined functions,
+    // static methods, constructors)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn no_diagnostic_for_user_defined_function_byref_param() {
+        let php = r#"<?php
+function myFunc(string $input, array &$output): void {
+    $output = [$input];
+}
+function test(string $val): void {
+    myFunc($val, $result);
+    echo $result[0];
+}
+"#;
+        let diags = collect(php);
+        assert!(
+            diags.is_empty(),
+            "User-defined function by-ref $result should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_static_method_byref_param() {
+        let php = r#"<?php
+class Validator {
+    public static function validate(string $input, array &$errors): bool {
+        $errors = [];
+        return true;
+    }
+}
+function test(string $data): void {
+    Validator::validate($data, $errors);
+    var_dump($errors);
+}
+"#;
+        let diags = collect(php);
+        assert!(
+            diags.is_empty(),
+            "Static method by-ref $errors should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_constructor_byref_param() {
+        let php = r#"<?php
+class Parser {
+    public function __construct(string $input, array &$warnings) {
+        $warnings = [];
+    }
+}
+function test(string $src): void {
+    $p = new Parser($src, $warnings);
+    var_dump($warnings);
+}
+"#;
+        let diags = collect(php);
+        assert!(
+            diags.is_empty(),
+            "Constructor by-ref $warnings should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_fqn_user_defined_function_byref_param() {
+        let php = r#"<?php
+namespace App;
+function transform(string $in, array &$out): void {
+    $out = [$in];
+}
+function test(): void {
+    \App\transform('hello', $result);
+    echo $result[0];
+}
+"#;
+        let diags = collect(php);
+        assert!(
+            diags.is_empty(),
+            "FQN user-defined function by-ref $result should be treated as defined. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn diagnostic_still_fires_for_truly_undefined_after_non_byref_call() {
+        let php = r#"<?php
+function noRefs(string $a): void {}
+function test(): void {
+    noRefs('hello');
+    echo $undefined;
+}
+"#;
+        let diags = collect(php);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag $undefined even when resolver is active. Got: {:?}",
+            diags,
+        );
+        assert!(
+            diags[0].message.contains("$undefined"),
+            "Diagnostic should be for $undefined",
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Multi-level nesting (arrow fn in closure, catch in closure)
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn no_diagnostic_for_arrow_fn_capturing_closure_variable() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $callback = function (array $ids) {
+        $sortMap = array_flip($ids);
+        return array_map(fn($item) => $sortMap[$item], $ids);
+    };
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Arrow fn should see variables from enclosing closure. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_nested_closure_use_captures() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $outer = function () {
+        $brandIds = [1, 2, 3];
+        $typeIds = [4, 5, 6];
+
+        $inner = function () use ($brandIds, $typeIds) {
+            return [$brandIds[0], $typeIds[0]];
+        };
+
+        return $inner();
+    };
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Nested closure use() captures should be visible. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_catch_inside_closure() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $handler = function (string $payment) {
+        $client = getClient();
+        try {
+            $response = $client->send($payment);
+        } catch (\Exception $e) {
+            log($payment, $client, $e->getMessage());
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Catch inside closure should see closure variables. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_variable_assigned_in_try_used_in_catch_inside_closure() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $handler = function () {
+        $fullFilePath = '/tmp/test.jpg';
+        try {
+            process($fullFilePath);
+        } catch (\Throwable $e) {
+            fallback($fullFilePath);
+        }
+    };
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Variable assigned before try should be visible in catch inside closure. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_arrow_fn_in_closure_in_method() {
+        let diags = collect(
+            r#"<?php
+class Foo {
+    public function run(): void {
+        $this->process(function (array $products, array $ids) {
+            $sortMap = array_flip($ids);
+            return $products->sortBy(fn($product) => $sortMap[$product->id]);
+        });
+    }
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Arrow fn in closure in method should see closure variables. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_deeply_nested_arrow_functions() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $a = 1;
+    $f = function () use ($a) {
+        $b = 2;
+        $g = fn() => fn() => $a + $b;
+        return $g;
+    };
+}
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "Deeply nested arrow fns should see all ancestor variables. Got: {:?}",
+            diags,
+        );
+    }
+
+    #[test]
+    fn flags_undefined_in_closure_without_capture_nested() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $outer = function () {
+        $local = 42;
+        $inner = function () {
+            echo $local;
+        };
+    };
+}
+"#,
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Closure without use() should not see parent closure variables. Got: {:?}",
+            diags,
+        );
+        assert!(diags[0].message.contains("$local"));
     }
 }
