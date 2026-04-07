@@ -52,6 +52,7 @@ mod completion_param_closure_this;
 mod completion_parent;
 mod completion_phpdoc;
 mod completion_phpdoc_generation;
+mod completion_phpstorm_meta;
 mod completion_properties;
 mod completion_property_chains;
 mod completion_spread_operator;

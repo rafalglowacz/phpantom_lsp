@@ -1362,7 +1362,7 @@ impl Backend {
         rctx: &ResolutionCtx<'_>,
     ) -> Option<Vec<Arc<ClassInfo>>> {
         let key = (
-            crate::phpstorm_meta::normalize_fqn(class_info.name.as_str()),
+            crate::phpstorm_meta::normalize_fqn(&class_info.fqn()),
             lookup_method.to_string(),
         );
         let dir = meta.method_overrides.get(&key)?;
@@ -1443,6 +1443,31 @@ impl Backend {
                 let Some(arg) = args.get(*arg_index).map(|s| s.trim()) else {
                     return vec![];
                 };
+                // Single-element array literal: `[new Foo]` / `[new \Ns\Foo]`
+                let single_new_in_array = {
+                    let a = arg.trim();
+                    if a.starts_with('[')
+                        && a.ends_with(']')
+                        && !a[1..a.len() - 1].contains(',')
+                    {
+                        let inner = a[1..a.len() - 1].trim();
+                        crate::subject_expr::parse_new_expression_class(inner)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(ref ty) = single_new_in_array {
+                    let parsed = PhpType::parse(ty);
+                    return super::type_resolution::type_hint_to_classes_typed(
+                        &parsed,
+                        owner_class,
+                        mr_ctx.all_classes,
+                        mr_ctx.class_loader,
+                    )
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect();
+                }
                 let Some(ty) = Self::resolve_arg_text_to_type(arg, rctx) else {
                     return vec![];
                 };

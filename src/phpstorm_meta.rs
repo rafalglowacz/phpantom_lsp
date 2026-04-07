@@ -61,7 +61,8 @@ pub fn discover_phpstorm_meta_files(root: &Path, vendor_dir_paths: &[PathBuf]) -
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
-        .hidden(true)
+        // JetBrains meta lives in dotfiles (`.phpstorm.meta.php` and `.phpstorm.meta.php/`).
+        .hidden(false)
         .parents(true)
         .ignore(true)
         .filter_entry(move |entry| {
@@ -448,4 +449,33 @@ pub(crate) fn refresh_index(backend: &Backend) {
     let index = build_index_from_paths(&paths);
     *backend.phpstorm_meta.write() = index;
     backend.resolved_class_cache.lock().clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_override_type_on_static_method_with_dummy_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".phpstorm.meta.php");
+        std::fs::write(
+            &path,
+            concat!(
+                "<?php\n",
+                "namespace PHPSTORM_META {\n",
+                "    override(\\Demo\\Factory::get(0), type(0));\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        let idx = build_index_from_paths(&[path]);
+        let key = (normalize_fqn("Demo\\Factory"), "get".to_string());
+        assert!(
+            idx.method_overrides.contains_key(&key),
+            "expected override key {:?}, have {:?}",
+            key,
+            idx.method_overrides.keys().collect::<Vec<_>>()
+        );
+    }
 }
