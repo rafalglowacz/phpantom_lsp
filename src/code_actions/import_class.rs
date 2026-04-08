@@ -14,7 +14,7 @@ use crate::completion::use_edit::{analyze_use_block, build_use_edit, use_import_
 use crate::diagnostics::unknown_classes::UNKNOWN_CLASS_CODE;
 
 use crate::symbol_map::SymbolKind;
-use crate::util::short_name;
+use crate::util::{is_class_keyword, short_name};
 
 impl Backend {
     /// Collect "Import class" code actions for the cursor position.
@@ -231,12 +231,7 @@ impl Backend {
             };
 
             // Only handle simple unqualified names (not $this, self, parent, etc.)
-            if subject.starts_with('$')
-                || subject.contains('\\')
-                || subject.eq_ignore_ascii_case("self")
-                || subject.eq_ignore_ascii_case("static")
-                || subject.eq_ignore_ascii_case("parent")
-            {
+            if subject.starts_with('$') || subject.contains('\\') || is_class_keyword(subject) {
                 continue;
             }
 

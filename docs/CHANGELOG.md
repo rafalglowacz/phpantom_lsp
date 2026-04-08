@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Completion no longer triggers on the `<?php` open tag.** Typing `<?php` and pressing enter no longer applies a spurious function suggestion like `php_ini_loaded_file()`.
+- **Case-insensitive `parent` handling in chained static calls.** `resolve_lhs_to_class` now handles `parent::method(...)` in chained callable expressions and uses case-insensitive matching for `self`/`static` in the same context.
 - **Intersection types preserved through resolution.** Variables and parameters with intersection types (e.g. `Countable&Serializable`) now display correctly in hover, extract-function parameter hints, and generated docblocks. Previously intersection types were flattened to unions (`Countable|Serializable`).
 - **Return types now carry class info through the resolution pipeline.** Method and function return types that name a class (e.g. `Collection<User>`) now populate the resolved class info eagerly, so downstream consumers (hover, narrowing, completion) no longer need a second resolution pass.
 - **Generic parameters preserved on resolved types.** Catch clause variables, pass-by-reference parameters, closure parameters, and constructor calls now thread the original type hint (including generic parameters) through the resolution pipeline instead of discarding it.

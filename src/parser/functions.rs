@@ -8,7 +8,6 @@ use mago_syntax::ast::*;
 
 use crate::Backend;
 use crate::docblock;
-use crate::php_type::PhpType;
 use crate::types::*;
 
 use super::{
@@ -123,10 +122,9 @@ impl Backend {
                     // native type hint with the version-appropriate string.
                     let native_return_type = if let Some(ctx) = doc_ctx
                         && let Some(ver) = ctx.php_version
-                        && let Some(override_type) =
-                            super::extract_language_level_type(&func.attribute_lists, ctx, ver)
                     {
-                        Some(PhpType::parse(&override_type))
+                        super::extract_language_level_type(&func.attribute_lists, ctx, ver)
+                            .or(raw_native_return_type)
                     } else {
                         raw_native_return_type
                     };

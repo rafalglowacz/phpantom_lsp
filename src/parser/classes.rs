@@ -1783,10 +1783,9 @@ impl Backend {
                     // native type hint with the version-appropriate string.
                     let native_return_type = if let Some(ctx) = doc_ctx
                         && let Some(ver) = ctx.php_version
-                        && let Some(override_type) =
-                            super::extract_language_level_type(&method.attribute_lists, ctx, ver)
                     {
-                        Some(PhpType::parse(&override_type))
+                        super::extract_language_level_type(&method.attribute_lists, ctx, ver)
+                            .or(raw_native_return_type)
                     } else {
                         raw_native_return_type
                     };
@@ -2150,8 +2149,8 @@ impl Backend {
                             super::extract_language_level_type(attr_lists, ctx, ver)
                     {
                         for prop in &mut prop_infos {
-                            prop.type_hint = Some(PhpType::parse(&override_type));
-                            prop.native_type_hint = Some(PhpType::parse(&override_type));
+                            prop.type_hint = Some(override_type.clone());
+                            prop.native_type_hint = Some(override_type.clone());
                         }
                     }
 

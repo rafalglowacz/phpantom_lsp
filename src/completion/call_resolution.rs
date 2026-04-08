@@ -29,7 +29,9 @@ use crate::docblock;
 use crate::php_type::PhpType;
 use crate::subject_expr::SubjectExpr;
 use crate::types::*;
-use crate::util::{find_class_at_offset, is_self_or_static, position_to_offset};
+use crate::util::{
+    find_class_at_offset, is_self_or_static, position_to_offset, resolve_class_keyword,
+};
 
 use super::conditional_resolution::{
     VarClassStringResolver, resolve_conditional_with_text_args,
@@ -200,17 +202,7 @@ impl Backend {
     /// Resolve class name keywords (`self`, `static`, `parent`) to actual
     /// class names in the context of the current class.
     fn resolve_class_name_keyword(class_name: &str, current_class: Option<&ClassInfo>) -> String {
-        if class_name.eq_ignore_ascii_case("self") || class_name.eq_ignore_ascii_case("static") {
-            current_class
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| class_name.to_string())
-        } else if class_name.eq_ignore_ascii_case("parent") {
-            current_class
-                .and_then(|c| c.parent_class.clone())
-                .unwrap_or_else(|| class_name.to_string())
-        } else {
-            class_name.to_string()
-        }
+        resolve_class_keyword(class_name, current_class).unwrap_or_else(|| class_name.to_string())
     }
 
     /// Build a [`ResolvedCallableTarget`] for a constructor call.
@@ -1324,12 +1316,9 @@ impl Backend {
                     }
                 }
                 SubjectExpr::StaticMethodCall { class, method } => {
-                    let owner = if is_self_or_static(&class) {
-                        current_class.cloned()
-                    } else if class.eq_ignore_ascii_case("parent") {
-                        current_class
-                            .and_then(|c| c.parent_class.as_ref())
-                            .and_then(|p| class_loader(p).map(Arc::unwrap_or_clone))
+                    let owner = if let Some(resolved) = resolve_class_keyword(&class, current_class)
+                    {
+                        class_loader(&resolved).map(Arc::unwrap_or_clone)
                     } else {
                         find_class_by_name(all_classes, &class)
                             .map(|arc| ClassInfo::clone(arc))

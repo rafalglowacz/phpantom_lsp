@@ -1119,3 +1119,41 @@ fn test_is_class_declaration_with_namespace() {
     };
     assert!(is_class_declaration_name(content, pos));
 }
+
+// ── extract_partial_class_name: open tag suppression ────────────
+
+#[test]
+fn test_extract_partial_rejects_open_tag() {
+    // Cursor at the end of `<?php` — should NOT offer "php" as a partial.
+    let content = "<?php";
+    let pos = Position {
+        line: 0,
+        character: 5,
+    };
+    assert_eq!(Backend::extract_partial_class_name(content, pos), None);
+}
+
+#[test]
+fn test_extract_partial_rejects_open_tag_with_trailing_newline() {
+    // Cursor at end of the open tag line (before the newline).
+    let content = "<?php\n";
+    let pos = Position {
+        line: 0,
+        character: 5,
+    };
+    assert_eq!(Backend::extract_partial_class_name(content, pos), None);
+}
+
+#[test]
+fn test_extract_partial_allows_php_prefixed_identifier() {
+    // `php_ini_loaded_file` on a normal code line is a valid partial.
+    let content = "<?php\nphp_ini";
+    let pos = Position {
+        line: 1,
+        character: 7,
+    };
+    assert_eq!(
+        Backend::extract_partial_class_name(content, pos),
+        Some("php_ini".to_string())
+    );
+}

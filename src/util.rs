@@ -1568,6 +1568,39 @@ pub(crate) fn is_self_or_static(s: &str) -> bool {
     s.eq_ignore_ascii_case("self") || s.eq_ignore_ascii_case("static") || s == "$this"
 }
 
+/// Returns `true` if `s` is one of the PHP class-keyword references:
+/// `self`, `static`, `$this`, or `parent`.
+///
+/// Use this when you need a single guard that covers *all* class
+/// keywords, including `parent`.  For the subset that resolves to the
+/// *current* class only, use [`is_self_or_static`].
+pub(crate) fn is_class_keyword(s: &str) -> bool {
+    is_self_or_static(s) || s.eq_ignore_ascii_case("parent")
+}
+
+/// Resolve `self`, `static`, `$this`, or `parent` to a class name.
+///
+/// Returns `Some(class_name)` when the keyword can be resolved, or
+/// `None` when:
+/// - `keyword` is not a recognised class keyword, or
+/// - there is no `current_class`, or
+/// - `parent` is used but the class has no parent.
+///
+/// This centralises the keyword → class-name mapping that was
+/// previously duplicated across 10+ call sites.
+pub(crate) fn resolve_class_keyword(
+    keyword: &str,
+    current_class: Option<&ClassInfo>,
+) -> Option<String> {
+    if is_self_or_static(keyword) {
+        current_class.map(|cc| cc.name.clone())
+    } else if keyword.eq_ignore_ascii_case("parent") {
+        current_class.and_then(|cc| cc.parent_class.clone())
+    } else {
+        None
+    }
+}
+
 // ─── Shared helpers for code actions and diagnostics ────────────────────────
 
 /// Check if a line contains the `function` keyword as a standalone word

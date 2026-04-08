@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::docblock;
 use crate::php_type::PhpType;
 use crate::types::{BracketSegment, ClassInfo};
-use crate::util::{find_semicolon_balanced, is_self_or_static, short_name};
+use crate::util::{find_semicolon_balanced, is_self_or_static, resolve_class_keyword, short_name};
 
 use crate::completion::resolver::{Loaders, ResolutionCtx};
 
@@ -449,10 +449,9 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
 
         let owner = if is_self_or_static(class_part) {
             current_class.cloned()
-        } else if class_part == "parent" {
-            current_class
-                .and_then(|cc| cc.parent_class.as_ref())
-                .and_then(|p| class_loader(p).map(Arc::unwrap_or_clone))
+        } else if let Some(resolved_name) = resolve_class_keyword(class_part, current_class) {
+            // Handles `parent` (case-insensitive) → load the resolved parent class.
+            class_loader(&resolved_name).map(Arc::unwrap_or_clone)
         } else {
             let lookup = short_name(class_part);
             all_classes
@@ -717,8 +716,11 @@ fn resolve_lhs_to_class(
             }
             // `ClassName::method`
             if let Some((cls_part, m_part)) = inner_callee.rsplit_once("::") {
-                let resolved = if cls_part == "self" || cls_part == "static" {
+                let resolved = if is_self_or_static(cls_part) {
                     current_class.cloned()
+                } else if let Some(resolved_name) = resolve_class_keyword(cls_part, current_class) {
+                    // Handles `parent` (case-insensitive) → load the parent class.
+                    class_loader(&resolved_name).map(Arc::unwrap_or_clone)
                 } else {
                     let lookup = short_name(cls_part);
                     all_classes

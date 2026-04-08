@@ -35,7 +35,7 @@ use crate::inheritance::resolve_property_type_hint;
 use crate::php_type::PhpType;
 use crate::subject_expr::SubjectExpr;
 use crate::types::*;
-use crate::util::find_class_by_name;
+use crate::util::{find_class_by_name, is_self_or_static, resolve_class_keyword};
 use crate::virtual_members::resolve_class_fully_maybe_cached;
 
 /// Type alias for the optional function-loader closure passed through
@@ -650,32 +650,25 @@ pub(crate) fn resolve_target_classes_expr(
             // etc., but "self"/"static"/"parent" are keywords, not
             // class names, so find_class_by_name / class_loader won't
             // find them.
-            let lower_class = class.to_ascii_lowercase();
-            let owner_classes: Vec<Arc<ClassInfo>> =
-                if lower_class == "self" || lower_class == "static" {
-                    current_class
-                        .map(|cc| Arc::new(cc.clone()))
-                        .into_iter()
-                        .collect()
-                } else if lower_class == "parent" {
-                    if let Some(cc) = current_class
-                        && let Some(ref parent_name) = cc.parent_class
-                    {
-                        if let Some(cls) = find_class_by_name(all_classes, parent_name) {
-                            vec![Arc::clone(cls)]
-                        } else {
-                            class_loader(parent_name).into_iter().collect()
-                        }
-                    } else {
-                        vec![]
-                    }
+            let owner_classes: Vec<Arc<ClassInfo>> = if is_self_or_static(class) {
+                current_class
+                    .map(|cc| Arc::new(cc.clone()))
+                    .into_iter()
+                    .collect()
+            } else if let Some(parent_name) = resolve_class_keyword(class, current_class) {
+                // parent — resolve via all_classes first, then class_loader
+                if let Some(cls) = find_class_by_name(all_classes, &parent_name) {
+                    vec![Arc::clone(cls)]
                 } else {
-                    if let Some(cls) = find_class_by_name(all_classes, class) {
-                        vec![Arc::clone(cls)]
-                    } else {
-                        class_loader(class).into_iter().collect()
-                    }
-                };
+                    class_loader(&parent_name).into_iter().collect()
+                }
+            } else {
+                if let Some(cls) = find_class_by_name(all_classes, class) {
+                    vec![Arc::clone(cls)]
+                } else {
+                    class_loader(class).into_iter().collect()
+                }
+            };
 
             // When the member is a static property (starts with `$`),
             // resolve to the property's declared type instead of the
@@ -1428,12 +1421,11 @@ pub(in crate::completion) fn resolve_static_owner_class(
     class: &str,
     rctx: &ResolutionCtx<'_>,
 ) -> Option<Arc<ClassInfo>> {
-    if class.eq_ignore_ascii_case("self") || class.eq_ignore_ascii_case("static") {
+    if is_self_or_static(class) {
         rctx.current_class.map(|cc| Arc::new(cc.clone()))
-    } else if class.eq_ignore_ascii_case("parent") {
-        rctx.current_class
-            .and_then(|cc| cc.parent_class.as_ref())
-            .and_then(|p| (rctx.class_loader)(p))
+    } else if let Some(resolved_name) = resolve_class_keyword(class, rctx.current_class) {
+        // parent — load via class_loader so we get the full parent ClassInfo
+        (rctx.class_loader)(&resolved_name)
     } else {
         find_class_by_name(rctx.all_classes, class)
             .map(Arc::clone)
