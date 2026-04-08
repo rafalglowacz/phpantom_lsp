@@ -147,7 +147,7 @@ class VarDocblockDemo
     {
         /** @var Pencil $inlineHinted */
         $inlineHinted = getUnknownValue();
-        $inlineHinted->sketch();                  // with explicit variable name
+        $inlineHinted->sketch();
 
         /** @var Pen */
         $hinted = getUnknownValue();
