@@ -51,7 +51,7 @@ use crate::completion::resolver::FunctionLoaderFn;
 use crate::completion::source::comment_position::position_to_byte_offset;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
-use crate::php_type::{PhpType, is_keyword_type};
+use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::{byte_offset_to_utf16_col, utf16_col_to_byte_offset};
 
@@ -1739,18 +1739,14 @@ fn property_var_type_snippet(
         }
         Some(th) => {
             let shortened = th.shorten();
-            let clean = shortened.to_string();
             // Callable types get a signature placeholder.
             if th.is_callable() {
-                let s = format!("(${{{}:{}()}})", *tab_stop, &clean);
+                let s = format!("(${{{}:{}()}})", *tab_stop, shortened);
                 *tab_stop += 1;
                 return s;
             }
-            if !matches!(
-                th,
-                PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
-            ) && !is_keyword_type(&clean)
-                && let Some(cls) = class_loader(&clean)
+            if let Some(name) = shortened.base_name()
+                && let Some(cls) = class_loader(name)
                 && !cls.template_params.is_empty()
             {
                 let mut parts = Vec::new();
@@ -1758,9 +1754,9 @@ fn property_var_type_snippet(
                     parts.push(format!("${{{}:{}}}", *tab_stop, tp));
                     *tab_stop += 1;
                 }
-                return format!("{}<{}>", &clean, parts.join(", "));
+                return format!("{}<{}>", name, parts.join(", "));
             }
-            clean
+            shortened.to_string()
         }
     }
 }
@@ -1775,21 +1771,17 @@ fn property_var_type_plain(
         Some(th) if th.is_bare_array() => "array".to_string(),
         Some(th) => {
             let shortened = th.shorten();
-            let clean = shortened.to_string();
             if th.is_callable() {
-                return format!("({}())", &clean);
+                return format!("({}())", shortened);
             }
-            if !matches!(
-                th,
-                PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
-            ) && !is_keyword_type(&clean)
-                && let Some(cls) = class_loader(&clean)
+            if let Some(name) = shortened.base_name()
+                && let Some(cls) = class_loader(name)
                 && !cls.template_params.is_empty()
             {
                 let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
-                return format!("{}<{}>", &clean, parts.join(", "));
+                return format!("{}<{}>", name, parts.join(", "));
             }
-            clean
+            shortened.to_string()
         }
     }
 }

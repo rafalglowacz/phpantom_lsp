@@ -106,6 +106,7 @@ pub use scopes::build_scope_methods_for_builder;
 use scopes::{build_scope_methods, is_scope_method};
 use where_property::{build_where_property_methods_for_class, lowercase_method_names};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use builder::build_builder_forwarded_methods;
@@ -123,6 +124,21 @@ pub(crate) const ELOQUENT_MODEL_FQN: &str = "Illuminate\\Database\\Eloquent\\Mod
 
 /// The fully-qualified name of the Eloquent Builder class.
 pub const ELOQUENT_BUILDER_FQN: &str = "Illuminate\\Database\\Eloquent\\Builder";
+
+/// Build a substitution map that replaces `static`, `$this`, and `self`
+/// with the given type.
+///
+/// This is used across multiple Laravel virtual member providers
+/// (builder forwarding, model virtual methods, scope methods) to
+/// resolve self-referencing return types to concrete model or builder
+/// types.
+pub(super) fn self_ref_subs(ty: PhpType) -> HashMap<String, PhpType> {
+    HashMap::from([
+        ("static".to_owned(), ty.clone()),
+        ("$this".to_owned(), ty.clone()),
+        ("self".to_owned(), ty),
+    ])
+}
 
 // ─── Type-resolution helpers ────────────────────────────────────────────────
 //
@@ -440,8 +456,6 @@ fn inject_model_virtual_methods(
     model_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) {
-    use std::collections::HashMap;
-
     use crate::php_type::PhpType;
 
     let model_class = match class_loader(model_name) {
@@ -468,12 +482,8 @@ fn inject_model_virtual_methods(
     // `Builder<static>`), so substituting `static` → model name
     // produces `Builder<Customer>`.  Using `Builder<Model>` here
     // would double-wrap to `Builder<Builder<Customer>>`.
-    let model_fqn = model_name.to_string();
-    let model_type = PhpType::Named(model_fqn.clone());
-    let mut subs = HashMap::new();
-    subs.insert("static".to_string(), model_type.clone());
-    subs.insert("$this".to_string(), model_type.clone());
-    subs.insert("self".to_string(), model_type);
+    let model_type = PhpType::Named(model_name.to_owned());
+    let subs = self_ref_subs(model_type);
 
     for method in &resolved_model.methods {
         // Only inject virtual methods (from @method tags).  Real
@@ -551,6 +561,11 @@ fn find_class_in<'a>(all_classes: &'a [Arc<ClassInfo>], name: &str) -> Option<&'
 /// `\Illuminate\Database\Eloquent\Collection<Post>`.
 pub struct LaravelModelProvider;
 
+/// Pre-built `Carbon\Carbon` type used for date-related virtual properties.
+fn carbon_type() -> PhpType {
+    PhpType::Named("Carbon\\Carbon".to_owned())
+}
+
 impl VirtualMemberProvider for LaravelModelProvider {
     /// Returns `true` if the class extends `Illuminate\Database\Eloquent\Model`.
     fn applies_to(
@@ -595,7 +610,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 }
                 properties.push(PropertyInfo::virtual_property_typed(
                     column,
-                    Some(&PhpType::Named("Carbon\\Carbon".to_string())),
+                    Some(&carbon_type()),
                 ));
             }
 
@@ -644,7 +659,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                     if seen_props.insert(col.to_string()) {
                         properties.push(PropertyInfo::virtual_property_typed(
                             col,
-                            Some(&PhpType::Named("Carbon\\Carbon".to_string())),
+                            Some(&carbon_type()),
                         ));
                     }
                 }

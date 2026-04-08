@@ -369,7 +369,7 @@ fn resolve_named_type(
             };
 
             if let Some(owner) = owning
-                && owner.template_params.contains(&short.to_string())
+                && owner.template_params.iter().any(|p| p == short)
                 && let Some(bound) = owner.template_param_bounds.get(short)
             {
                 return type_hint_to_classes_typed_depth(

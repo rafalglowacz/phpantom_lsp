@@ -218,6 +218,11 @@ impl PhpType {
         PhpType::Named("static".to_owned())
     }
 
+    /// `$this` type.
+    pub fn this() -> PhpType {
+        PhpType::Named("$this".to_owned())
+    }
+
     /// `parent` type.
     pub fn parent_() -> PhpType {
         PhpType::Named("parent".to_owned())
@@ -2689,6 +2694,26 @@ impl PhpType {
     /// indicate "no meaningful return" in conditional resolution.
     pub fn is_uninformative_return(&self) -> bool {
         self.is_mixed() || self.is_void() || self.is_never()
+    }
+
+    /// Whether this type is a PHP keyword type (scalar, special, or pseudo-type).
+    ///
+    /// Returns `true` for types like `int`, `string`, `bool`, `array`, `void`,
+    /// `mixed`, `never`, `null`, `object`, `callable`, `iterable`, `self`,
+    /// `static`, `parent`, `$this`, `resource`, `class-string`, `array-key`,
+    /// `scalar`, `numeric`, etc.
+    ///
+    /// Returns `false` for user-defined class names like `Collection`, `User`,
+    /// and for compound types (unions, intersections, generics, shapes, etc.).
+    ///
+    /// This is the structured equivalent of `is_keyword_type(&str)` — use
+    /// this method when you already have a `PhpType` to avoid stringifying
+    /// just to check whether it's a keyword.
+    pub fn is_keyword(&self) -> bool {
+        match self {
+            PhpType::Named(name) => is_keyword_type(name),
+            _ => false,
+        }
     }
 }
 

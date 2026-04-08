@@ -178,6 +178,11 @@ pub(super) fn extract_related_type_typed(return_type: &PhpType) -> Option<&PhpTy
     None
 }
 
+/// Pre-built `Illuminate\Database\Eloquent\Model` type for fallback related types.
+fn eloquent_model_type() -> PhpType {
+    PhpType::Named("Illuminate\\Database\\Eloquent\\Model".to_owned())
+}
+
 /// Build the property type string for a relationship.
 ///
 /// - Singular relationships → the related type as-is (nullable).
@@ -192,15 +197,11 @@ pub(super) fn build_property_type(
     match kind {
         RelationshipKind::Singular => related_type.cloned(),
         RelationshipKind::Collection => {
-            let inner = related_type.cloned().unwrap_or_else(|| {
-                PhpType::Named("Illuminate\\Database\\Eloquent\\Model".to_string())
-            });
+            let inner = related_type.cloned().unwrap_or_else(eloquent_model_type);
             let collection_class = custom_collection.unwrap_or(ELOQUENT_COLLECTION_FQN);
             Some(PhpType::Generic(collection_class.to_string(), vec![inner]))
         }
-        RelationshipKind::MorphTo => Some(PhpType::Named(
-            "Illuminate\\Database\\Eloquent\\Model".to_string(),
-        )),
+        RelationshipKind::MorphTo => Some(eloquent_model_type()),
     }
 }
 

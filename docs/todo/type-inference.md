@@ -411,8 +411,9 @@ NonEmptyCountable.
 `Psalm/Storage/Assertion/`. PHPStan's `TypeSpecifier` returns
 `SpecifiedTypes` with dual sure/sureNot maps.
 
-**Depends on:** T19 (structured types make reconciliation much
-simpler, but basic reconciliation can work with strings too).
+**Depends on:** The structured type representation (`PhpType`) has
+landed, which makes reconciliation much simpler than working with
+raw strings.
 
 ---
 
@@ -519,8 +520,8 @@ This eliminates the depth limit entirely and makes the resolution
 cost proportional to the number of statements before the cursor,
 not the depth of the assignment chain.
 
-**Depends on:** T19 (structured type representation) should land
-first so the scope map stores `PhpType` values instead of strings.
+**Note:** The structured type representation (`PhpType`) has landed,
+so the scope map can store `PhpType` values directly.
 
 **Migration path:** Start with a parallel implementation behind a
 feature flag. The existing backward-scanning resolver stays as a

@@ -72,11 +72,10 @@ fn extract_unused_type(message: &str) -> Option<&str> {
 /// Also handles `?Type` (nullable shorthand): `?string` with unused
 /// `null` becomes `string`, and `?string` with unused `string` becomes
 /// `null`.
-fn remove_type_from_union(full_type: &str, unused_type: &str) -> Option<PhpType> {
-    let parsed = PhpType::parse(full_type);
+fn remove_type_from_union(full_type: &PhpType, unused_type: &str) -> Option<PhpType> {
     let unused_parsed = PhpType::parse(unused_type);
 
-    match &parsed {
+    match full_type {
         PhpType::Union(members) => {
             let remaining: Vec<&PhpType> = members
                 .iter()
@@ -411,7 +410,7 @@ impl Backend {
             let native_type = extract_native_return_type(&lines, paren_line, paren_col, brace_line);
             let has_native_match = native_type
                 .as_ref()
-                .is_some_and(|t| remove_type_from_union(&t.to_string(), unused_type).is_some());
+                .is_some_and(|t| remove_type_from_union(t, unused_type).is_some());
 
             // Check the docblock @return tag.
             let func_line = find_func_keyword_line(&lines, paren_line).unwrap_or(diag_line);
@@ -427,7 +426,7 @@ impl Backend {
             };
             let has_doc_match = doc_return_type
                 .as_ref()
-                .is_some_and(|t| remove_type_from_union(&t.to_string(), unused_type).is_some());
+                .is_some_and(|t| remove_type_from_union(t, unused_type).is_some());
 
             // Only offer the action if we can actually remove the type
             // from at least one location.
@@ -484,7 +483,7 @@ impl Backend {
         // ── Update native return type ───────────────────────────────
         if let Some(native_type) =
             extract_native_return_type(&lines, paren_line, paren_col, brace_line)
-            && let Some(new_type) = remove_type_from_union(&native_type.to_string(), unused_type)
+            && let Some(new_type) = remove_type_from_union(&native_type, unused_type)
         {
             // Convert the new type to a valid native hint.
             let native_hint = new_type
@@ -513,7 +512,7 @@ impl Backend {
                 docblock_info.doc_start_line,
                 docblock_info.doc_end_line,
             )
-            && let Some(new_type) = remove_type_from_union(&doc_type.to_string(), unused_type)
+            && let Some(new_type) = remove_type_from_union(&doc_type, unused_type)
             && let Some(edit) = find_and_replace_return_tag_type(
                 &lines,
                 docblock_info.doc_start_line,
@@ -578,7 +577,7 @@ pub(crate) fn is_remove_unused_return_type_stale(
 
     // Check native return type.
     if let Some(native_type) = extract_native_return_type(&lines, paren_line, paren_col, brace_line)
-        && remove_type_from_union(&native_type.to_string(), unused_type).is_some()
+        && remove_type_from_union(&native_type, unused_type).is_some()
     {
         // The unused type is still present → not stale.
         return false;
@@ -594,7 +593,7 @@ pub(crate) fn is_remove_unused_return_type_stale(
             docblock_info.doc_start_line,
             docblock_info.doc_end_line,
         )
-        && remove_type_from_union(&doc_type.to_string(), unused_type).is_some()
+        && remove_type_from_union(&doc_type, unused_type).is_some()
     {
         return false;
     }
@@ -640,7 +639,7 @@ mod tests {
     #[test]
     fn removes_null_from_string_null() {
         assert_eq!(
-            remove_type_from_union("string|null", "null"),
+            remove_type_from_union(&PhpType::parse("string|null"), "null"),
             Some(PhpType::parse("string"))
         );
     }
@@ -648,7 +647,7 @@ mod tests {
     #[test]
     fn removes_string_from_string_null() {
         assert_eq!(
-            remove_type_from_union("string|null", "string"),
+            remove_type_from_union(&PhpType::parse("string|null"), "string"),
             Some(PhpType::parse("null"))
         );
     }
@@ -656,7 +655,7 @@ mod tests {
     #[test]
     fn removes_from_three_member_union() {
         assert_eq!(
-            remove_type_from_union("string|int|null", "null"),
+            remove_type_from_union(&PhpType::parse("string|int|null"), "null"),
             Some(PhpType::parse("string|int"))
         );
     }
@@ -664,7 +663,7 @@ mod tests {
     #[test]
     fn removes_middle_member() {
         assert_eq!(
-            remove_type_from_union("string|int|bool", "int"),
+            remove_type_from_union(&PhpType::parse("string|int|bool"), "int"),
             Some(PhpType::parse("string|bool"))
         );
     }
@@ -672,7 +671,7 @@ mod tests {
     #[test]
     fn removes_from_intersection() {
         assert_eq!(
-            remove_type_from_union("Foo&Bar", "Bar"),
+            remove_type_from_union(&PhpType::parse("Foo&Bar"), "Bar"),
             Some(PhpType::parse("Foo"))
         );
     }
@@ -680,7 +679,7 @@ mod tests {
     #[test]
     fn removes_null_from_nullable() {
         assert_eq!(
-            remove_type_from_union("?string", "null"),
+            remove_type_from_union(&PhpType::parse("?string"), "null"),
             Some(PhpType::parse("string"))
         );
     }
@@ -688,19 +687,25 @@ mod tests {
     #[test]
     fn removes_inner_from_nullable() {
         assert_eq!(
-            remove_type_from_union("?string", "string"),
+            remove_type_from_union(&PhpType::parse("?string"), "string"),
             Some(PhpType::parse("null"))
         );
     }
 
     #[test]
     fn returns_none_when_not_found() {
-        assert_eq!(remove_type_from_union("string|int", "bool"), None);
+        assert_eq!(
+            remove_type_from_union(&PhpType::parse("string|int"), "bool"),
+            None
+        );
     }
 
     #[test]
     fn returns_none_for_single_type() {
-        assert_eq!(remove_type_from_union("string", "string"), None);
+        assert_eq!(
+            remove_type_from_union(&PhpType::parse("string"), "string"),
+            None
+        );
     }
 
     // ── stale detection ────────────────────────────────────────────

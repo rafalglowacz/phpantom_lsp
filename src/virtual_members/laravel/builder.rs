@@ -13,7 +13,6 @@
 //!
 //! Methods whose name starts with `__` (magic methods) are skipped.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::inheritance::apply_substitution_to_conditional;
@@ -125,13 +124,10 @@ pub(super) fn build_builder_forwarded_methods(
         ELOQUENT_BUILDER_FQN.to_string(),
         vec![PhpType::Named(class.name.clone())],
     );
-    let mut subs = HashMap::new();
+    let mut subs = super::self_ref_subs(builder_self_type);
     for param in &builder_class.template_params {
         subs.insert(param.clone(), PhpType::Named(class.name.clone()));
     }
-    subs.insert("static".to_string(), builder_self_type.clone());
-    subs.insert("$this".to_string(), builder_self_type.clone());
-    subs.insert("self".to_string(), builder_self_type);
 
     let mut methods = Vec::new();
 
@@ -175,10 +171,10 @@ pub(super) fn build_builder_forwarded_methods(
 
         // Replace Eloquent Collection with custom collection class.
         if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.as_ref())
+            && let Some(coll_name) = coll.base_name()
             && let Some(ref mut ret) = forwarded.return_type
         {
-            let coll_name = coll.to_string();
-            *ret = replace_eloquent_collection_typed(ret, &coll_name);
+            *ret = replace_eloquent_collection_typed(ret, coll_name);
         }
 
         methods.push(forwarded);
