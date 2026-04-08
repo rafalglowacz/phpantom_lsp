@@ -577,8 +577,9 @@ pub fn build_phpdoc_completions(
                 let existing_throws = find_existing_throws_tags(content, position);
 
                 // Filter out already-documented throws
-                let missing: Vec<&String> = uncaught
+                let missing: Vec<String> = uncaught
                     .iter()
+                    .map(|t| t.to_string())
                     .filter(|t| {
                         !existing_throws
                             .iter()
@@ -596,7 +597,7 @@ pub fn build_phpdoc_completions(
                         // Build an auto-import edit if the exception type
                         // isn't already imported.
                         let additional_edits = throws_analysis::resolve_exception_fqn(
-                            exc_type,
+                            exc_type.as_str(),
                             use_map,
                             file_namespace,
                         )

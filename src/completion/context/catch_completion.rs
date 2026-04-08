@@ -98,12 +98,12 @@ pub(crate) fn detect_catch_context(content: &str, position: Position) -> Option<
     // 1. Direct `throw new ExceptionType(…)` statements
     let throws = throws_analysis::find_throw_statements(&try_body);
     for throw in &throws {
-        let short_name = throw
-            .type_name
+        let raw = throw.type_name.to_string();
+        let short_name = raw
             .trim_start_matches('\\')
             .rsplit('\\')
             .next()
-            .unwrap_or(&throw.type_name);
+            .unwrap_or(&raw);
         if !short_name.is_empty() && seen.insert(short_name.to_lowercase()) {
             suggested_types.push(short_name.to_string());
         }
@@ -112,12 +112,12 @@ pub(crate) fn detect_catch_context(content: &str, position: Position) -> Option<
     // 2. Inline `/** @throws ExceptionType */` annotations
     let inline_throws = throws_analysis::find_inline_throws_annotations(&try_body);
     for info in &inline_throws {
-        let short_name = info
-            .type_name
+        let raw = info.type_name.to_string();
+        let short_name = raw
             .trim_start_matches('\\')
             .rsplit('\\')
             .next()
-            .unwrap_or(&info.type_name);
+            .unwrap_or(&raw);
         if !short_name.is_empty() && seen.insert(short_name.to_lowercase()) {
             suggested_types.push(short_name.to_string());
         }
@@ -125,7 +125,7 @@ pub(crate) fn detect_catch_context(content: &str, position: Position) -> Option<
 
     // 3. Propagated @throws from called methods
     let propagated = throws_analysis::find_propagated_throws(&try_body, content);
-    let propagated: Vec<String> = propagated.iter().map(|t| t.type_name.clone()).collect();
+    let propagated: Vec<String> = propagated.iter().map(|t| t.type_name.to_string()).collect();
     for exc_type in &propagated {
         let short_name = exc_type
             .trim_start_matches('\\')
@@ -141,7 +141,7 @@ pub(crate) fn detect_catch_context(content: &str, position: Position) -> Option<
     let throw_expr_types = throws_analysis::find_throw_expression_types(&try_body, content);
     let throw_expr_types: Vec<String> = throw_expr_types
         .iter()
-        .map(|t| t.type_name.clone())
+        .map(|t| t.type_name.to_string())
         .collect();
     for exc_type in &throw_expr_types {
         let short_name = exc_type

@@ -327,8 +327,7 @@ impl Backend {
             // Named arg items are always valid alongside normal
             // completions, so collect them here and merge them into
             // whatever strategy wins below.
-            let named_arg_items =
-                self.collect_named_arg_items(&uri, &content, position, &ctx);
+            let named_arg_items = self.collect_named_arg_items(&uri, &content, position, &ctx);
 
             // ── String context detection ────────────────────────────
             // Classify once and use throughout the remaining pipeline.
@@ -397,7 +396,10 @@ impl Backend {
 
             // ── Smart catch clause completion ───────────────────────
             if let Some(response) = self.try_catch_completion(&content, position, &ctx, &uri) {
-                return Ok(Some(merge_named_args_into_response(response, named_arg_items)));
+                return Ok(Some(merge_named_args_into_response(
+                    response,
+                    named_arg_items,
+                )));
             }
 
             // ── `throw new` completion ──────────────────────────────
@@ -417,7 +419,10 @@ impl Backend {
             if let Some(response) =
                 self.try_class_constant_function_completion(&content, position, &ctx, &uri)
             {
-                return Ok(Some(merge_named_args_into_response(response, named_arg_items)));
+                return Ok(Some(merge_named_args_into_response(
+                    response,
+                    named_arg_items,
+                )));
             }
 
             // No strategy matched, but we may still have named arg items.
@@ -726,9 +731,8 @@ impl Backend {
         // from incomplete code).
         let na_ctx = match self
             .detect_named_arg_from_symbol_map(uri, content, position)
-            .or_else(|| {
-                crate::completion::named_args::detect_named_arg_context(content, position)
-            }) {
+            .or_else(|| crate::completion::named_args::detect_named_arg_context(content, position))
+        {
             Some(ctx) => ctx,
             None => return Vec::new(),
         };
@@ -784,8 +788,11 @@ impl Backend {
         // expression that is itself an argument, named-arg completion
         // for the outer call must not fire — the user wants normal
         // value completion, not parameter names.
-        if cursor_inside_nested_bracket(content, cs.args_start as usize, cursor_byte_offset as usize)
-        {
+        if cursor_inside_nested_bracket(
+            content,
+            cs.args_start as usize,
+            cursor_byte_offset as usize,
+        ) {
             return None;
         }
 

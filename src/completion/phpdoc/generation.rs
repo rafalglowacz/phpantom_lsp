@@ -1820,7 +1820,8 @@ fn build_throws_import_edits(
     let mut edits = Vec::new();
 
     for exc in &uncaught {
-        if let Some(fqn) = throws_analysis::resolve_exception_fqn(exc, use_map, file_namespace)
+        let exc_str = exc.to_string();
+        if let Some(fqn) = throws_analysis::resolve_exception_fqn(&exc_str, use_map, file_namespace)
             && !throws_analysis::has_use_import(content, &fqn)
             && let Some(edit) = build_use_edit(&fqn, &use_block, file_namespace)
         {

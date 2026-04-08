@@ -1047,7 +1047,7 @@ pub(crate) enum SubjectOutcome {
     /// (e.g. `int`, `string`, `bool|int`) with null stripped.
     Scalar(PhpType),
     /// Subject resolved to a class name that couldn't be loaded.
-    UnresolvableClass(String),
+    UnresolvableClass(PhpType),
     /// Subject type could not be resolved — no class information
     /// available.
     Untyped,
@@ -1272,7 +1272,7 @@ fn resolve_call_scalar_return(
 fn check_unresolvable_class_name(
     raw_type: &PhpType,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     if raw_type.all_members_scalar() {
         return None;
     }
@@ -1281,7 +1281,7 @@ fn check_unresolvable_class_name(
     let base = effective.base_name()?;
 
     if class_loader(base).is_none() {
-        Some(base.to_string())
+        Some(PhpType::Named(base.to_string()))
     } else {
         None
     }

@@ -675,7 +675,8 @@ fn check_needs_update(
         .map(|t| short_name(t).to_lowercase())
         .collect();
     for exc in &uncaught {
-        let short = short_name(exc);
+        let exc_str = exc.to_string();
+        let short = short_name(&exc_str);
         if !existing_lower.contains(&short.to_lowercase()) {
             return true;
         }
@@ -883,7 +884,8 @@ fn build_updated_docblock(
 
     let mut new_throws: Vec<String> = Vec::new();
     for exc in &uncaught {
-        let short = short_name(exc);
+        let exc_str = exc.to_string();
+        let short = short_name(&exc_str);
         if !existing_throws_lower.contains(&short.to_lowercase()) {
             new_throws.push(short.to_string());
         }
