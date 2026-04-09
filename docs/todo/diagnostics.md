@@ -294,38 +294,6 @@ resolution. This eliminates the secondary resolvers entirely.
 
 ---
 
-## D14. PHPCS diagnostic proxy
-
-**Impact: Low · Effort: Medium**
-
-Proxy PHP_CodeSniffer (PHPCS) diagnostics into the editor, following
-the same pattern as the existing PHPStan proxy. PHPCS reports coding
-standard violations (PSR-12, PSR-1, custom sniffs) and is widely used
-in PHP projects for enforcing style and detecting common mistakes.
-
-### Implementation
-
-1. Add a `[phpcs]` section to the config schema in `src/config.rs`
-   with `command` (default `"vendor/bin/phpcs"`), `timeout`,
-   `standard` (default: project's `phpcs.xml` or `phpcs.xml.dist`,
-   falling back to `PSR12`), and an `enabled` flag.
-2. Run PHPCS with `--report=json` on the current file and parse the
-   JSON output into LSP diagnostics. Each violation maps to a
-   diagnostic with the sniff name as the code (e.g.
-   `PSR12.Files.FileHeader.MissingPHPVersion`).
-3. Map PHPCS severity levels (`error` / `warning`) to LSP
-   `DiagnosticSeverity::Error` and `DiagnosticSeverity::Warning`.
-4. Mark fixable violations (PHPCS reports `fixable: true` per
-   violation) so that a companion code action can run `phpcbf` to
-   auto-fix them.
-5. Respect the same debounce and queueing logic used by the PHPStan
-   proxy to avoid overwhelming the tool on rapid edits.
-6. Support `phpcs:ignore` and `phpcs:disable` / `phpcs:enable`
-   suppression comments when diagnostic suppression intelligence
-   (D5) is implemented.
-
----
-
 ## D15. Type error diagnostics
 
 **Impact: Medium-High · Effort: High**

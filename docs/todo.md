@@ -32,7 +32,6 @@ within the same impact tier.
 | F9  | [Namespace renaming](todo/lsp-features.md#f9-namespace-renaming)                                                             | Medium      | Medium |
 | A40 | [Convert to instance variable](todo/actions.md#a40-convert-to-instance-variable)                                             | Medium      | Medium |
 | D10 | [PHPMD diagnostic proxy](todo/diagnostics.md#d10-phpmd-diagnostic-proxy)                                                     | Low         | Medium |
-| D14 | [PHPCS diagnostic proxy](todo/diagnostics.md#d14-phpcs-diagnostic-proxy)                                                     | Low         | Medium |
 | D15 | [Type error diagnostics](todo/diagnostics.md#d15-type-error-diagnostics) (argument, return, property type mismatches)        | Medium-High | High   |
 |     | **Release 0.8.0**                                                                                                            |             |        |
 

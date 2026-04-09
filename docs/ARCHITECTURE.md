@@ -1012,9 +1012,15 @@ Output uses PHPStan's table format (with progress bar and coloured output) so th
 
 ## Diagnostic Worker Architecture
 
-Diagnostics run in a background `tokio::spawn` task so they never block completion, hover, or signature help. The worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slot) are shared by `Arc::clone`, so the worker sees every mutation the main `Backend` makes.
+Diagnostics run in three independent background `tokio::spawn` tasks so they never block completion, hover, or signature help:
 
-Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the worker is spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the worker would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
+1. **Native diagnostic worker** — collects fast (syntax errors, unused imports, deprecated usage) and slow (unknown classes/members/functions, argument count, implementation errors) diagnostics. Debounces at 500 ms.
+2. **PHPStan worker** — runs PHPStan in editor mode (`--tmp-file` / `--instead-of`). Debounces at 2 000 ms.
+3. **PHPCS worker** — runs PHP_CodeSniffer via `phpcs --report=json` with stdin piping. Debounces at 2 000 ms.
+
+Each worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slots) are shared by `Arc::clone`, so every worker sees all mutations the main `Backend` makes. The PHPStan and PHPCS workers each have their own notify handle, pending-URI slot, and diagnostic cache so they run independently of each other and of the native diagnostic worker.
+
+Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the workers are spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the workers would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
 
 ## Name Resolution
 

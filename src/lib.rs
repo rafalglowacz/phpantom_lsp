@@ -119,6 +119,7 @@ pub(crate) mod names;
 mod parser;
 pub(crate) mod phar;
 pub mod php_type;
+mod phpcs;
 mod phpstan;
 mod references;
 mod rename;
@@ -456,6 +457,32 @@ pub struct Backend {
     /// and triggers a re-publish of the affected file.
     pub(crate) phpstan_last_diags:
         Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
+    /// Notification handle used to wake the PHPCS worker task.
+    ///
+    /// The PHPCS worker is a dedicated background task, separate from
+    /// the main diagnostic worker and the PHPStan worker, because PHPCS
+    /// is an external process that can take several seconds.  Running it
+    /// in its own task ensures that native diagnostics and PHPStan are
+    /// never blocked.
+    ///
+    /// At most one PHPCS process runs at a time.  If the user edits
+    /// a file while PHPCS is running, the pending URI is updated and
+    /// the worker picks it up after the current run finishes.
+    pub(crate) phpcs_notify: Arc<tokio::sync::Notify>,
+    /// The single file URI that the PHPCS worker should analyse next.
+    ///
+    /// Only the most recent file is kept: if the user switches files or
+    /// edits rapidly, earlier requests are superseded.  This is
+    /// intentional — PHPCS is too slow to queue up multiple files.
+    pub(crate) phpcs_pending_uri: Arc<Mutex<Option<String>>>,
+    /// Last-published PHPCS diagnostics per file URI.
+    ///
+    /// The fast and slow diagnostic phases merge these cached results
+    /// into their publish calls so that PHPCS errors remain visible
+    /// while the user edits (without waiting for a fresh PHPCS run).
+    /// The PHPCS worker updates this cache after each successful run
+    /// and triggers a re-publish of the affected file.
+    pub(crate) phpcs_last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
     /// Per-file `resultId` for pull diagnostics (`textDocument/diagnostic`).
     ///
     /// Maps file URI → monotonically increasing counter.  Bumped whenever
@@ -466,7 +493,7 @@ pub struct Backend {
     pub(crate) diag_result_ids: Arc<Mutex<HashMap<String, u64>>>,
     /// Combined diagnostic cache for pull diagnostics.
     ///
-    /// Stores the last-computed full diagnostic set (fast + slow + PHPStan)
+    /// Stores the last-computed full diagnostic set (fast + slow + PHPStan + PHPCS)
     /// per file URI.  When the client pulls diagnostics, the server
     /// returns this cached set.  Updated by the background diagnostic
     /// worker after each pass and by the PHPStan worker after each run.
@@ -504,7 +531,7 @@ pub struct Backend {
     /// the client will not handle them, blocking the server indefinitely.
     pub(crate) supports_work_done_progress: Arc<std::sync::atomic::AtomicBool>,
     /// Shared flag set to `true` when the LSP `shutdown` request is
-    /// received.  Background workers (diagnostic, PHPStan) check this
+    /// received.  Background workers (diagnostic, PHPStan, PHPCS) check this
     /// flag on each iteration and exit their loops.  The PHPStan
     /// `run_command_with_timeout` poll loop also checks it so that a
     /// running child process is killed promptly instead of waiting up
@@ -572,6 +599,9 @@ impl Backend {
             phpstan_notify: Arc::new(tokio::sync::Notify::new()),
             phpstan_pending_uri: Arc::new(Mutex::new(None)),
             phpstan_last_diags: Arc::new(Mutex::new(HashMap::new())),
+            phpcs_notify: Arc::new(tokio::sync::Notify::new()),
+            phpcs_pending_uri: Arc::new(Mutex::new(None)),
+            phpcs_last_diags: Arc::new(Mutex::new(HashMap::new())),
             diag_result_ids: Arc::new(Mutex::new(HashMap::new())),
             diag_last_full: Arc::new(Mutex::new(HashMap::new())),
             diag_suppressed: Arc::new(Mutex::new(Vec::new())),
@@ -628,6 +658,9 @@ impl Backend {
             phpstan_notify: Arc::new(tokio::sync::Notify::new()),
             phpstan_pending_uri: Arc::new(Mutex::new(None)),
             phpstan_last_diags: Arc::new(Mutex::new(HashMap::new())),
+            phpcs_notify: Arc::new(tokio::sync::Notify::new()),
+            phpcs_pending_uri: Arc::new(Mutex::new(None)),
+            phpcs_last_diags: Arc::new(Mutex::new(HashMap::new())),
             diag_result_ids: Arc::new(Mutex::new(HashMap::new())),
             diag_last_full: Arc::new(Mutex::new(HashMap::new())),
             diag_suppressed: Arc::new(Mutex::new(Vec::new())),
@@ -809,6 +842,14 @@ impl Backend {
         &self.phpstan_last_diags
     }
 
+    /// Borrow the PHPCS diagnostics cache (used by integration tests
+    /// to inject PHPCS diagnostics without running PHPCS).
+    pub fn phpcs_last_diags(
+        &self,
+    ) -> &Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>> {
+        &self.phpcs_last_diags
+    }
+
     /// Return the configured PHP version.
     pub fn php_version(&self) -> types::PhpVersion {
         *self.php_version.lock()
@@ -870,6 +911,9 @@ impl Backend {
             phpstan_notify: Arc::clone(&self.phpstan_notify),
             phpstan_pending_uri: Arc::clone(&self.phpstan_pending_uri),
             phpstan_last_diags: Arc::clone(&self.phpstan_last_diags),
+            phpcs_notify: Arc::clone(&self.phpcs_notify),
+            phpcs_pending_uri: Arc::clone(&self.phpcs_pending_uri),
+            phpcs_last_diags: Arc::clone(&self.phpcs_last_diags),
             diag_result_ids: Arc::clone(&self.diag_result_ids),
             diag_last_full: Arc::clone(&self.diag_last_full),
             diag_suppressed: Arc::clone(&self.diag_suppressed),

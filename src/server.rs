@@ -315,6 +315,14 @@ impl LanguageServer for Backend {
             phpstan_backend.phpstan_worker().await;
         });
 
+        // Spawn the PHPCS worker as a separate background task.
+        // Same pattern as the PHPStan worker: dedicated task, own
+        // debounce timer, single pending-URI slot.
+        let phpcs_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            phpcs_backend.phpcs_worker().await;
+        });
+
         // ── Dynamic capability registration ─────────────────────────
         // lsp-types 0.94 does not expose a `type_hierarchy_provider`
         // field on `ServerCapabilities`, so we register the capability
@@ -331,15 +339,16 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        // Signal background workers (diagnostic, PHPStan) to stop.
-        // The PHPStan `run_command_with_timeout` poll loop also checks
-        // this flag, so a running child process is killed within 50ms
-        // instead of waiting up to 60 seconds.
+        // Signal background workers (diagnostic, PHPStan, PHPCS) to
+        // stop.  The PHPStan/PHPCS poll loops also check this flag,
+        // so running child processes are killed within 50ms instead
+        // of waiting up to 60 seconds.
         self.shutdown_flag.store(true, Ordering::Release);
-        // Wake both workers so they see the flag immediately instead
+        // Wake all workers so they see the flag immediately instead
         // of sleeping until the next edit arrives.
         self.diag_notify.notify_one();
         self.phpstan_notify.notify_one();
+        self.phpcs_notify.notify_one();
         Ok(())
     }
 
