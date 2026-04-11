@@ -2861,3 +2861,172 @@ function test(): void {
         "Should not flag string vs SizeUnit when method chain resolves to string, got: {diags:?}"
     );
 }
+
+#[test]
+fn no_false_positive_for_class_template_via_method_return_type() {
+    // When a method returns a generic class (e.g. HasMany<Translation, Tag>),
+    // and we call a method on that result whose parameter is typed with a
+    // class-level template parameter (@param TRelatedModel $model), the type
+    // checker must substitute the template with the concrete type from the
+    // return type annotation.  Without this, we get a false positive:
+    // "expects TRelatedModel, got Translation".
+    let php = r#"<?php
+/**
+ * @template TRelatedModel
+ * @template TDeclaringModel
+ */
+class HasMany {
+    /** @param TRelatedModel $model */
+    public function save($model): void {}
+}
+
+class Translation {}
+class Tag {
+    /** @return HasMany<Translation, Tag> */
+    public function translations(): HasMany { return new HasMany(); }
+}
+
+function test(): void {
+    $tag = new Tag();
+    $translation = new Translation();
+    $tag->translations()->save($translation);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Translation passed to HasMany<Translation, Tag>::save(), got: {diags:?}"
+    );
+}
+
+#[test]
+fn flags_wrong_type_for_class_template_via_method_return_type() {
+    // Companion to the no-false-positive test above: when the wrong type
+    // is passed to a generic method resolved through a return type
+    // annotation, the diagnostic should still fire.
+    let php = r#"<?php
+/**
+ * @template TRelatedModel
+ * @template TDeclaringModel
+ */
+class HasMany {
+    /** @param TRelatedModel $model */
+    public function save($model): void {}
+}
+
+class Translation {}
+class Comment {}
+class Tag {
+    /** @return HasMany<Translation, Tag> */
+    public function translations(): HasMany { return new HasMany(); }
+}
+
+function test(): void {
+    $tag = new Tag();
+    $comment = new Comment();
+    $tag->translations()->save($comment);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        has_type_error(&diags),
+        "Should flag Comment passed to HasMany<Translation, Tag>::save() which expects Translation"
+    );
+}
+
+#[test]
+fn no_false_positive_for_class_template_via_static_method_return_type() {
+    // Same as B6 but through a static method return type.
+    let php = r#"<?php
+/**
+ * @template T
+ */
+class Repository {
+    /** @param T $entity */
+    public function persist($entity): void {}
+}
+
+class User {}
+
+class RepositoryFactory {
+    /** @return Repository<User> */
+    public static function userRepo(): Repository { return new Repository(); }
+}
+
+function test(): void {
+    $user = new User();
+    RepositoryFactory::userRepo()->persist($user);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag User passed to Repository<User>::persist() via static return, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_class_template_via_function_return_type() {
+    // When a standalone function returns a generic class, calling a method
+    // on its result should substitute the class-level template parameters.
+    let php = r#"<?php
+/**
+ * @template TItem
+ */
+class Collection {
+    /** @param TItem $item */
+    public function add($item): void {}
+}
+
+class Product {}
+
+/** @return Collection<Product> */
+function getProducts(): Collection { return new Collection(); }
+
+function test(): void {
+    $product = new Product();
+    getProducts()->add($product);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Product passed to Collection<Product>::add() via function return, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_class_template_two_params_via_return_type() {
+    // When a return type carries multiple template arguments, all should
+    // be substituted correctly in parameter types.
+    let php = r#"<?php
+/**
+ * @template TKey
+ * @template TValue
+ */
+class TypedMap {
+    /** @param TKey $key */
+    public function hasKey($key): bool { return false; }
+    /** @param TValue $value */
+    public function addValue($value): void {}
+}
+
+class Label {}
+
+class Registry {
+    /** @return TypedMap<string, Label> */
+    public function labels(): TypedMap { return new TypedMap(); }
+}
+
+function test(): void {
+    $reg = new Registry();
+    $reg->labels()->hasKey('foo');
+    $reg->labels()->addValue(new Label());
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag string/Label passed to TypedMap<string, Label> methods, got: {diags:?}"
+    );
+}

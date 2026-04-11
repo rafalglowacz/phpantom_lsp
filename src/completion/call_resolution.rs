@@ -500,10 +500,17 @@ impl Backend {
     /// [`SubjectExpr::StaticMethodCall`], [`SubjectExpr::FunctionCall`],
     /// [`SubjectExpr::Variable`], or [`SubjectExpr::NewExpr`].
     /// Any other variant falls through to `resolve_target_classes_expr`.
-    pub(crate) fn resolve_call_return_types_expr(
+    ///
+    /// Like [`resolve_call_return_types_expr`](Self::resolve_call_return_types_expr)
+    /// but also captures the raw return type hint (before class resolution)
+    /// into `return_type_hint_out` when provided.  This preserves generic
+    /// type parameters (e.g. `HasMany<Translation, Tag>`) that would
+    /// otherwise be lost when converting to `Vec<Arc<ClassInfo>>`.
+    pub(crate) fn resolve_call_return_types_expr_with_hint(
         callee: &SubjectExpr,
         text_args: &str,
         ctx: &ResolutionCtx<'_>,
+        mut return_type_hint_out: Option<&mut Option<PhpType>>,
     ) -> Vec<Arc<ClassInfo>> {
         match callee {
             // ── Instance method call: base->method(…) ───────────────
@@ -515,8 +522,37 @@ impl Backend {
                     super::resolver::resolve_target_classes_expr(base, AccessKind::Arrow, ctx),
                 );
 
+                // Capture the raw return type hint while we iterate
+                // the owner classes below.  We grab it from the first
+                // owner that has a matching method — before the return
+                // type gets flattened into ClassInfo.
+                let mut hint_captured = false;
                 let mut results = Vec::new();
+
                 for owner in &lhs_classes {
+                    // Capture the return type hint from the first owner
+                    // that has the method, before class resolution loses
+                    // generic parameters.  The resolve_class_fully call
+                    // is cached, so this doesn't duplicate work done by
+                    // resolve_method_return_types_with_args below.
+                    if !hint_captured && let Some(ref mut hint_out) = return_type_hint_out {
+                        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                            owner,
+                            ctx.class_loader,
+                            ctx.resolved_class_cache,
+                        );
+                        if let Some(m) = merged
+                            .methods
+                            .iter()
+                            .find(|m| m.name.eq_ignore_ascii_case(method_name))
+                        {
+                            if let Some(ref ret) = m.return_type {
+                                **hint_out = Some(ret.clone());
+                            }
+                            hint_captured = true;
+                        }
+                    }
+
                     let split_args = split_text_args(text_args);
                     let arg_refs = split_args.to_vec();
                     let template_subs =
@@ -559,6 +595,25 @@ impl Backend {
                 };
 
                 if let Some(ref owner) = owner_class {
+                    // Capture return type hint for static method calls.
+                    // The resolve_class_fully call is cached, so this
+                    // doesn't duplicate work.
+                    if let Some(ref mut hint_out) = return_type_hint_out {
+                        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                            owner,
+                            ctx.class_loader,
+                            ctx.resolved_class_cache,
+                        );
+                        if let Some(m) = merged
+                            .methods
+                            .iter()
+                            .find(|m| m.name.eq_ignore_ascii_case(method_name))
+                            && let Some(ref ret) = m.return_type
+                        {
+                            **hint_out = Some(ret.clone());
+                        }
+                    }
+
                     let split_args = split_text_args(text_args);
                     let arg_refs = split_args.to_vec();
                     let template_subs =
@@ -698,6 +753,10 @@ impl Backend {
                     }
 
                     if let Some(ref ret) = func_info.return_type {
+                        // Capture the function's return type hint.
+                        if let Some(ref mut hint_out) = return_type_hint_out {
+                            **hint_out = Some(ret.clone());
+                        }
                         return super::type_resolution::type_hint_to_classes_typed(
                             ret,
                             "",
@@ -856,6 +915,17 @@ impl Backend {
                 callee_classes
             }
         }
+    }
+
+    /// Thin wrapper around [`resolve_call_return_types_expr_with_hint`]
+    /// that discards the return type hint.  Existing callers that don't
+    /// need generic type preservation use this.
+    pub(crate) fn resolve_call_return_types_expr(
+        callee: &SubjectExpr,
+        text_args: &str,
+        ctx: &ResolutionCtx<'_>,
+    ) -> Vec<Arc<ClassInfo>> {
+        Self::resolve_call_return_types_expr_with_hint(callee, text_args, ctx, None)
     }
 
     /// Resolve a method call's return type, taking into account PHPStan

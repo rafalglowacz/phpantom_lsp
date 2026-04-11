@@ -133,22 +133,32 @@ foreach ($regexes as $type => $regex) {
 }
 ```
 
-## B5 — Unresolved function-level template return type leaks through to argument diagnostics
+## B5 — Unresolved template parameters leak raw names into argument diagnostics
 
-When a function declares `@template TReduceReturnType` and
-`@return TReduceReturnType` but no argument binds the template
-parameter, the return type resolves to the raw template name
-`TReduceReturnType` instead of `mixed` or remaining unresolved.
-When the result is passed to a function expecting a concrete type
-(e.g. `takes_int(int $x)`), the type error checker sees
-"TReduceReturnType vs int" and fires a false positive diagnostic.
+When a template parameter is not bound to a concrete type (either
+because no argument carries the binding, or because the class was
+instantiated without a generic annotation), the raw template name
+(e.g. `TValue`, `TKey`, `TReduceReturnType`, `TClosure`) leaks
+through to the type error checker. The diagnostic then reports
+"expects TValue, got string" instead of recognising the parameter
+as unresolved and suppressing the check.
 
-Template substitution should either resolve the return type from
-the call-site arguments or fall back to the template's bound
-(defaulting to `mixed`) so the raw name never leaks through to
-downstream diagnostics.
+This affects both function-level and class-level templates:
 
-Reproducer:
+- **Function-level:** `@template TReduceReturnType` with
+  `@return TReduceReturnType` where no argument binds the param.
+- **Class-level:** `Collection<TKey, TValue>` where the Collection
+  was created without a generic annotation (e.g. `collect([])`,
+  `new Collection()`). Methods like `push($item)` still have
+  `@param TValue $item` with the raw template name, so passing
+  a `string` fires "expects TValue, got string".
+
+Template substitution should either resolve the parameter from the
+call-site arguments / class-level generic annotation, or fall back
+to the template's bound (defaulting to `mixed`) so the raw name
+never leaks through to downstream diagnostics.
+
+Reproducer (function-level):
 
 ```php
 /**
@@ -165,45 +175,20 @@ function test(): void {
 }
 ```
 
-## B6 — Class-level template substitution doesn't propagate to parameter types in type error checker
-
-When a generic class like `HasMany<TRelatedModel, TDeclaringModel>`
-has a method with `@param TRelatedModel $model`, and the class is
-instantiated with concrete type arguments (e.g.
-`HasMany<Translation, Tag>`), the type error checker does not
-substitute `TRelatedModel → Translation` in the parameter type.
-The diagnostic sees "expects TRelatedModel, got Translation" and
-fires a false positive.
-
-The completion/hover pipeline already performs class-level template
-substitution via `build_substitution_map` in `inheritance.rs`, but
-the type error diagnostic collector does not apply the same
-substitution when comparing argument types against parameter types
-on generic class methods.
-
-Reproducer:
+Reproducer (class-level):
 
 ```php
 /**
- * @template TRelatedModel
- * @template TDeclaringModel
+ * @template TValue
  */
-class HasMany {
-    /** @param TRelatedModel $model */
-    public function save($model): void {}
-}
-
-class Translation {}
-class Tag {
-    /** @return HasMany<Translation, Tag> */
-    public function translations(): HasMany { return new HasMany(); }
+class Collection {
+    /** @param TValue $item */
+    public function push($item): void {}
 }
 
 function test(): void {
-    $tag = new Tag();
-    $translation = new Translation();
-    $tag->translations()->save($translation);
-    // false positive: "expects TRelatedModel, got Translation"
+    $items = new Collection();   // no generic annotation
+    $items->push('hello');       // false positive: "expects TValue, got string"
 }
 ```
 
@@ -241,4 +226,57 @@ class FooTest extends TestCase {
     private function useFoo(FooService $svc): void {}
 }
 ```
+
+## B8 — Class-level template parameters lost through chained method calls
+
+When a method returns a generic class (e.g. `Collection<Product>`)
+and the next method in the chain returns `self<TItem>` or another
+type referencing a class-level template parameter, the template
+substitution is lost because `resolve_call_return_types_expr`
+converts intermediate `ResolvedType`s (which carry generic args) to
+`Vec<Arc<ClassInfo>>` via `into_arced_classes`, discarding the
+`type_string` field that holds the generic parameters.
+
+The first call in the chain now correctly propagates generics (B6
+fix), but the second call resolves the base through
+`resolve_call_return_types_expr` → `MethodCall` →
+`into_arced_classes`, which strips the generic info before the
+method's return type can be template-substituted.
+
+Fixing this requires threading `ResolvedType` (with its
+`type_string`) through the `MethodCall` arm of
+`resolve_call_return_types_expr` so that class-level template
+arguments survive into the method return-type resolution step.
+
+Reproducer:
+
+```php
+/**
+ * @template TItem
+ */
+class Collection {
+    /** @param TItem $item */
+    public function add($item): void {}
+
+    /** @return self<TItem> */
+    public function filter(): self { return $this; }
+}
+
+class Product {}
+
+class Store {
+    /** @return Collection<Product> */
+    public function products(): Collection { return new Collection(); }
+}
+
+function test(): void {
+    $store = new Store();
+    $product = new Product();
+    // First level works (B6 fix): $store->products()->add($product)
+    // Second level fails: $store->products()->filter()->add($product)
+    // false positive: "expects TItem, got Product"
+    $store->products()->filter()->add($product);
+}
+```
+
 
