@@ -408,11 +408,18 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
         .unwrap_or(rt)
     });
 
-    if let Some(ref parsed) = raw_type
-        && let Some(key_type) = parsed.extract_key_type(true)
-    {
-        push_foreach_resolved_types_typed(key_type, ctx, results, conditional);
-        return;
+    if let Some(ref parsed) = raw_type {
+        // Try non-scalar key types first (e.g. SplObjectStorage<Request, Response>).
+        // Fall back to scalar key types (string, int, array-key) which are
+        // meaningful for the foreach key variable even though they don't
+        // resolve to a ClassInfo.
+        if let Some(key_type) = parsed
+            .extract_key_type(true)
+            .or_else(|| parsed.extract_key_type(false))
+        {
+            push_foreach_resolved_types_typed(key_type, ctx, results, conditional);
+            return;
+        }
     }
 
     // ── Fallback: resolve the iterated expression to ClassInfo and

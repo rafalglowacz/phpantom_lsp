@@ -301,8 +301,8 @@ resolution. This eliminates the secondary resolvers entirely.
 `is_type_compatible` in `src/diagnostics/type_errors.rs` silences
 several cases that are genuine bugs at runtime. Phase 1 was
 intentionally permissive to avoid false positives while the engine
-matured; Phase 2 tightens the five most impactful gaps. PHPStan and
-Psalm already flag most of these.
+matured; Phase 2 tightens the remaining gaps. PHPStan and Psalm
+already flag most of these.
 
 ### 1. Nullable arg → non-nullable param (lines 264–271)
 
@@ -317,14 +317,7 @@ Currently silenced conservatively. Passing the return value of a
 `void` function is always a bug — PHP 8 returns `null` but the call
 site clearly misunderstands the API. Should be **Error** severity.
 
-### 3. Backed enum → backing type (lines 547–565)
-
-Currently silenced because the pattern is "pervasive". PHP does not
-auto-coerce `Status::Active` to `1`; the developer must use
-`->value`. Under `declare(strict_types=1)` this crashes. Should be
-at least **Warning**, with a quick-fix suggestion to append `->value`.
-
-### 4. `int` → `string` type juggling (lines 313–322)
+### 3. `int` → `string` type juggling (lines 313–322)
 
 Currently unconditionally accepted because we can't know the
 `strict_types` setting. Under `declare(strict_types=1)` this is a
@@ -332,7 +325,7 @@ Currently unconditionally accepted because we can't know the
 and flagging when strict types are enabled. When the declare is
 absent or set to `0`, keep the current permissive behaviour.
 
-### 5. Union any-member-compatible threshold (lines 189–213)
+### 4. Union any-member-compatible threshold (lines 189–213)
 
 Currently: if ANY single member of an arg union is compatible with
 the param, the entire union passes. Combined with the other
@@ -342,6 +335,22 @@ checked, then `BadType` is the "any" member that gets skipped).
 Consider requiring all non-null members to be compatible, or at
 least flagging when a majority of members are incompatible.
 
+### 5. Reverse hierarchy acceptance (Direction 2)
 
+Currently: when the arg type is a *supertype* of the param type
+(e.g. `CarbonInterface` passed to `Carbon`), the diagnostic is
+silenced for all non-final classes because "the value *might* be
+the narrower type at runtime." This means the diagnostic can only
+catch type errors between completely unrelated classes, which
+severely limits its value. Passing `Animal` where `Dog` is expected
+is silently accepted.
+
+This is the single largest gap in the diagnostic. Tightening it
+requires control-flow analysis (instanceof guards, assert calls) to
+know whether the broader type was actually narrowed before the call
+site. Without CFA, the false positive rate would be high. Consider
+reporting at **Warning** severity with a message like "argument type
+`Animal` is broader than expected `Dog`; verify the value was
+narrowed before this call."
 
 

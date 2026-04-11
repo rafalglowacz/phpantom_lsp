@@ -152,6 +152,7 @@ impl Backend {
                         link_urls,
                         see_refs,
                         func_template_params,
+                        func_template_param_bounds,
                         func_template_bindings,
                         throws,
                     ) = if let Some(ctx) = doc_ctx {
@@ -171,10 +172,21 @@ impl Backend {
                         // Extract function-level @template params and their
                         // @param bindings for generic type substitution at
                         // call sites.
-                        let tpl_params: Vec<String> = info
+                        let params_full = info
                             .as_ref()
-                            .map(docblock::extract_template_params_from_info)
+                            .map(docblock::extract_template_params_full_from_info)
                             .unwrap_or_default();
+                        let tpl_params: Vec<String> =
+                            params_full.iter().map(|(n, _, _, _)| n.clone()).collect();
+                        let tpl_param_bounds: std::collections::HashMap<
+                            String,
+                            crate::php_type::PhpType,
+                        > = params_full
+                            .iter()
+                            .filter_map(|(name, bound, _, _)| {
+                                bound.as_ref().map(|b| (name.clone(), b.clone()))
+                            })
+                            .collect();
                         let tpl_bindings = if !tpl_params.is_empty() {
                             info.as_ref()
                                 .map(|i| {
@@ -253,6 +265,7 @@ impl Backend {
                             link_urls,
                             see_refs,
                             tpl_params,
+                            tpl_param_bounds,
                             tpl_bindings,
                             throws,
                         )
@@ -272,6 +285,7 @@ impl Backend {
                             Vec::new(),
                             Vec::new(),
                             Vec::new(),
+                            std::collections::HashMap::new(),
                             Vec::new(),
                             Vec::new(),
                         )
@@ -379,6 +393,7 @@ impl Backend {
                         deprecation_message,
                         deprecated_replacement,
                         template_params: func_template_params,
+                        template_param_bounds: func_template_param_bounds,
                         template_bindings: func_template_bindings,
                         throws,
                         is_polyfill: false,

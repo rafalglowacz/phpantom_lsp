@@ -813,8 +813,24 @@ fn resolve_class_fully_inner(
             // this interface.  If the class (or a parent) declared
             // `@implements ThisInterface<Type1, Type2>`, map the
             // interface's template params to those concrete types.
-            let iface_subs =
+            let mut iface_subs =
                 build_implements_substitution_map(&iface_name, &iface, &all_implements_generics);
+
+            // When no @implements generics were provided but the interface
+            // declares template parameters, substitute each template param
+            // with its declared upper bound (or `mixed`).  Without this,
+            // raw template names like `TKey` / `TValue` leak through
+            // inherited method signatures into downstream consumers.
+            if iface_subs.is_empty() && !iface.template_params.is_empty() {
+                for param in &iface.template_params {
+                    let bound = iface
+                        .template_param_bounds
+                        .get(param)
+                        .cloned()
+                        .unwrap_or_else(PhpType::mixed);
+                    iface_subs.insert(param.clone(), bound);
+                }
+            }
 
             // Collect @extends / @implements generics from the
             // interface so that template substitutions flow through

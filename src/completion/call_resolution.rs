@@ -190,7 +190,21 @@ impl Backend {
             // method's parameter and return types.
             let generic_args: Vec<PhpType> = match &rt.type_string {
                 PhpType::Generic(_, args) => args.clone(),
-                _ => vec![],
+                _ => {
+                    // When the resolved type has no generic annotation
+                    // but the class declares template parameters (e.g.
+                    // `$errors = new Collection()` without `<string>`),
+                    // fill in default type args from declared upper
+                    // bounds or `mixed`.  This follows PHPStan's
+                    // `resolveToBounds()` semantics and prevents raw
+                    // template names like `TValue` from leaking into
+                    // method parameter and return types.
+                    if !owner.template_params.is_empty() {
+                        crate::inheritance::default_type_args(&owner)
+                    } else {
+                        vec![]
+                    }
+                }
             };
 
             // ── Callable target cache check ─────────────────────────
@@ -229,8 +243,10 @@ impl Backend {
                     let borrow = cell.borrow();
                     borrow.as_ref().and_then(|map| map.get(key).cloned())
                 });
-                if let Some(result) = cached {
-                    return result;
+                match cached {
+                    Some(Some(target)) => return Some(target),
+                    Some(None) => continue,
+                    None => {}
                 }
             }
 
@@ -350,11 +366,27 @@ impl Backend {
         args_text: Option<&str>,
     ) -> Option<ResolvedCallableTarget> {
         let owner = super::resolver::resolve_static_owner_class(class, rctx)?;
-        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
-            &owner,
-            rctx.class_loader,
-            rctx.resolved_class_cache,
-        );
+
+        // When the class has template params but no generic annotation
+        // (e.g. `RunningBonus::collect(...)` where RunningBonus extends
+        // Data without `@extends` generics), substitute class-level
+        // template params with their declared upper bounds or `mixed`.
+        let merged = if !owner.template_params.is_empty() {
+            let default_args = crate::inheritance::default_type_args(&owner);
+            let base = crate::virtual_members::resolve_class_fully_maybe_cached(
+                &owner,
+                rctx.class_loader,
+                rctx.resolved_class_cache,
+            );
+            Arc::new(crate::inheritance::apply_generic_args(&base, &default_args))
+        } else {
+            crate::virtual_members::resolve_class_fully_maybe_cached(
+                &owner,
+                rctx.class_loader,
+                rctx.resolved_class_cache,
+            )
+        };
+
         let m = merged
             .methods
             .iter()
@@ -399,7 +431,6 @@ impl Backend {
     ) -> ResolvedCallableTarget {
         if let Some(at) = args_text
             && !func.template_params.is_empty()
-            && !func.template_bindings.is_empty()
         {
             let split_args: Vec<String> =
                 crate::completion::types::conditional::split_text_args(at)
@@ -845,15 +876,15 @@ impl Backend {
                     // Delegates to `build_function_template_subs` which
                     // handles Direct, ArrayElement, and GenericWrapper
                     // binding modes (e.g. `@param array<TKey, TValue>`).
-                    if !func_info.template_params.is_empty()
-                        && !func_info.template_bindings.is_empty()
-                        && func_info.return_type.is_some()
-                        && !text_args.is_empty()
-                    {
-                        let split_args: Vec<String> = split_text_args(text_args)
-                            .into_iter()
-                            .map(|s| s.to_string())
-                            .collect();
+                    if !func_info.template_params.is_empty() && func_info.return_type.is_some() {
+                        let split_args: Vec<String> = if text_args.is_empty() {
+                            vec![]
+                        } else {
+                            split_text_args(text_args)
+                                .into_iter()
+                                .map(|s| s.to_string())
+                                .collect()
+                        };
                         let subs = super::variable::rhs_resolution::build_function_template_subs(
                             &func_info,
                             &split_args,
@@ -1436,7 +1467,7 @@ impl Backend {
             });
 
         let method = match method {
-            Some(m) if !m.template_params.is_empty() && !m.template_bindings.is_empty() => m,
+            Some(m) if !m.template_params.is_empty() => m,
             _ => return HashMap::new(),
         };
 
@@ -1535,6 +1566,24 @@ impl Backend {
                         subs.insert(tpl_name.clone(), unwrapped);
                     }
                 }
+            }
+        }
+
+        // ── Fill in unbound method-level template params ────────
+        // Any template parameter that was not bound from call-site
+        // arguments is replaced with its declared upper bound
+        // (`@template T of Foo` → `Foo`) or `mixed`.  This follows
+        // PHPStan's `resolveToBounds()` semantics and prevents raw
+        // template names like `TReduceReturnType` from leaking into
+        // parameter and return types.
+        for tpl_name in &method.template_params {
+            if !subs.contains_key(tpl_name) {
+                let fallback = method
+                    .template_param_bounds
+                    .get(tpl_name)
+                    .cloned()
+                    .unwrap_or_else(PhpType::mixed);
+                subs.insert(tpl_name.clone(), fallback);
             }
         }
 
@@ -1801,14 +1850,18 @@ fn resolve_literal_type(text: &str) -> Option<PhpType> {
     // Numeric literals — try int first, then float.
     // Strip an optional leading minus for negative literals.
     let numeric = text.strip_prefix('-').unwrap_or(text);
-    if !numeric.is_empty() && numeric.bytes().all(|b| b.is_ascii_digit() || b == b'_') {
+    if !numeric.is_empty()
+        && numeric.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+        && numeric.bytes().any(|b| b.is_ascii_digit())
+    {
         return Some(PhpType::Named("int".to_string()));
     }
     if !numeric.is_empty()
         && numeric
             .bytes()
             .all(|b| b.is_ascii_digit() || b == b'.' || b == b'_')
-        && numeric.contains('.')
+        && numeric.bytes().filter(|&b| b == b'.').count() == 1
+        && numeric.bytes().any(|b| b.is_ascii_digit())
     {
         return Some(PhpType::Named("float".to_string()));
     }

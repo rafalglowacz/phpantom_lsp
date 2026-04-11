@@ -1076,6 +1076,14 @@ pub struct FunctionInfo {
     /// bindings to infer concrete types for each template parameter
     /// from the actual argument expressions.
     pub template_bindings: Vec<(String, String)>,
+    /// Upper bounds for function-level template parameters
+    /// (`@template T of Foo` → maps `"T"` to `Foo`).
+    ///
+    /// Used by `build_function_template_subs` to replace unbound
+    /// template parameters with their declared bound (or `mixed`
+    /// when no bound exists) so that raw template names never leak
+    /// into downstream consumers.
+    pub template_param_bounds: HashMap<String, PhpType>,
     /// Exception types from `@throws` docblock tags.
     ///
     /// Populated during parsing from the function's docblock.  Used by

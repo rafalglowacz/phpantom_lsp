@@ -3030,3 +3030,396 @@ function test(): void {
         "Should not flag string/Label passed to TypedMap<string, Label> methods, got: {diags:?}"
     );
 }
+
+// ── B5: Unresolved template params resolved to bounds/mixed ─────────────
+
+#[test]
+fn no_false_positive_for_new_generic_class_without_annotation() {
+    // When a generic class is instantiated without a generic annotation
+    // (e.g. `new Collection()`), unbound template params should resolve
+    // to their declared upper bound or `mixed`, not leak as raw names.
+    let php = r#"<?php
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+class Collection {
+    /** @param TValue $item */
+    public function add($item): void {}
+
+    /** @param TKey $key */
+    public function get($key): void {}
+}
+
+function test(): void {
+    $items = new Collection();
+    $items->add('hello');
+    $items->get(42);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag string/int passed to unbound TValue/TKey params on new Collection(), got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_method_level_template_unbound() {
+    // Method-level @template params that cannot be bound from call-site
+    // arguments should resolve to their upper bound or `mixed`.
+    let php = r#"<?php
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+class Collection {
+    /**
+     * @template TReduceInitial
+     * @template TReduceReturnType
+     * @param callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType $callback
+     * @param TReduceInitial $initial
+     * @return TReduceInitial|TReduceReturnType
+     */
+    public function reduce(callable $callback, $initial = null): mixed { return null; }
+}
+
+class Decimal {
+    public function __construct(string $v) {}
+    public function add(Decimal $other): Decimal { return $this; }
+}
+
+function takes_decimal(Decimal $d): void {}
+
+function test(): void {
+    $items = new Collection();
+    $total = $items->reduce(function (Decimal $carry): Decimal {
+        return $carry;
+    }, new Decimal('0.00'));
+    takes_decimal($total);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Decimal passed to Decimal when reduce return type has unbound TReduceReturnType, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_function_level_template_unbound_return() {
+    // Function-level @template params that cannot be bound from
+    // call-site arguments should resolve to their upper bound or
+    // `mixed`, not leak as raw names into the return type.
+    let php = r#"<?php
+/**
+ * @template TReduceReturnType
+ * @return TReduceReturnType
+ */
+function reduce_result() { return null; }
+
+function takes_int(int $x): void {}
+
+function test(): void {
+    $result = reduce_result();
+    takes_int($result);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag mixed passed to int when function template is unbound, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_collect_helper_without_args() {
+    // The `collect()` helper returns `Collection<TKey, TValue>` where
+    // TKey and TValue are function-level templates bound via the $value
+    // param.  When called with no args, all templates should resolve to
+    // their bounds (array-key / mixed).
+    let php = r#"<?php
+/**
+ * @template TKey of array-key
+ * @template TValue
+ * @param iterable<TKey, TValue>|null $value
+ * @return Collection<TKey, TValue>
+ */
+function make_collection($value = []) { return new Collection(); }
+
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+class Collection {
+    /** @param TValue $item */
+    public function add($item): void {}
+}
+
+function test(): void {
+    $items = make_collection();
+    $items->add('hello');
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag string passed to mixed (unbound TValue) on make_collection() result, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_static_method_template_with_closure_arg() {
+    // Static method with @template TClosure of Closure and @param TClosure.
+    // When a closure literal is passed, the template should be substituted
+    // with Closure (the bound) if direct resolution fails.
+    let php = r#"<?php
+class Matcher {
+    /**
+     * @template TClosure of \Closure
+     * @param TClosure $closure
+     */
+    public static function on($closure): void {}
+}
+
+function test(): void {
+    Matcher::on(fn(array $query): bool => true);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Closure passed to TClosure (bound is Closure), got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_foreach_key_reassigned_with_return_in_body() {
+    // Reproduces the real-world PurchaseFileDeviationMessage pattern:
+    // foreach key $type is string, reassigned to DeviationType::from($type)
+    // inside an if block that also has a return statement. The $type argument
+    // inside from() must resolve to string (the foreach key type), not
+    // DeviationType (the reassigned type from the prescan).
+    let php = r#"<?php
+enum DeviationType: string {
+    case Unknown = 'unknown';
+    case MissingItem = 'missing';
+    case UnorderedItem = 'unordered';
+}
+
+class PurchaseFileDeviationMessage
+{
+    /** @var array<string, string> */
+    private static array $unknownProductRegexes = [];
+
+    public static function fromMessage(string $message): self
+    {
+        foreach (self::$unknownProductRegexes as $type => $regex) {
+            if (preg_match($regex, $message, $matches)) {
+                $type = DeviationType::from($type);
+
+                if (array_key_exists('LineId', $matches)) {
+                    $lineId = (int)$matches['LineId'];
+                }
+
+                return new self();
+            }
+        }
+
+        return new self();
+    }
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Foreach key $type should be string when passed to from(), not DeviationType. Got: {msgs:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_interface_template_params_without_implements_generics() {
+    // When a class implements a generic interface but provides no
+    // @implements generics, the interface's template params should be
+    // substituted with their declared bounds (or mixed) instead of
+    // leaking as raw names like TKey / TValue into inherited methods.
+    let php = r#"<?php
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+interface BaseDataContract {
+    /**
+     * @param array<TKey, TValue> $items
+     */
+    public static function collect(mixed $items): mixed;
+}
+
+abstract class Data implements BaseDataContract {
+    public static function collect(mixed $items): mixed {
+        return $items;
+    }
+}
+
+final class RunningBonus extends Data {
+    public function __construct(public readonly float $points) {}
+}
+
+function test(): void {
+    RunningBonus::collect([new \stdClass()]);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag array<int, stdClass> passed to array<TKey, TValue> — interface template params should resolve to bounds, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_interface_template_through_intermediate_parent() {
+    // Same as above but with an extra level of inheritance: the interface
+    // template params must not leak through Data into RunningBonus.
+    let php = r#"<?php
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+interface GenericContract {
+    /**
+     * @param TValue $item
+     */
+    public function add(mixed $item): void;
+}
+
+abstract class AbstractData implements GenericContract {
+    public function add(mixed $item): void {}
+}
+
+class MiddleLayer extends AbstractData {}
+
+final class ConcreteItem extends MiddleLayer {}
+
+function test(): void {
+    $item = new ConcreteItem();
+    $item->add('hello');
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag string passed to mixed (TValue resolved to bound) through intermediate parent, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_inherited_method_with_generic_return_type() {
+    // When a parent class has a method returning a generic class and
+    // a child class inherits it, calling a method on the return value
+    // must substitute the template params from the parent's annotation.
+    let php = r#"<?php
+/**
+ * @template T
+ */
+class Container {
+    /** @param T $item */
+    public function store($item): void {}
+}
+
+class Product {}
+
+class BaseService {
+    /** @return Container<Product> */
+    public function getContainer(): Container { return new Container(); }
+}
+
+class ChildService extends BaseService {}
+
+function test(): void {
+    $child = new ChildService();
+    $product = new Product();
+    $child->getContainer()->store($product);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Product passed to Container<Product>::store() via inherited method, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_nullable_generic_return_type() {
+    // When a method returns `?Container<Product>` (nullable generic),
+    // null-safe chaining or a guarded call should still resolve the
+    // template params correctly.
+    let php = r#"<?php
+/**
+ * @template T
+ */
+class Wrapper {
+    /** @param T $item */
+    public function wrap($item): void {}
+}
+
+class Widget {}
+
+class Factory {
+    /** @return Wrapper<Widget>|null */
+    public function maybeCreate(): ?Wrapper { return new Wrapper(); }
+}
+
+function test(): void {
+    $factory = new Factory();
+    $w = $factory->maybeCreate();
+    if ($w !== null) {
+        $widget = new Widget();
+        $w->wrap($widget);
+    }
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Widget passed to Wrapper<Widget>::wrap() from nullable return, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_trait_method_with_generic_return_type() {
+    // When a trait provides a method returning a generic class and
+    // a class uses that trait, the generic return type must be
+    // resolved correctly on the using class.
+    let php = r#"<?php
+/**
+ * @template T
+ */
+class Bag {
+    /** @param T $item */
+    public function put($item): void {}
+}
+
+class Fruit {}
+
+trait HasBag {
+    /** @return Bag<Fruit> */
+    public function getBag(): Bag { return new Bag(); }
+}
+
+class Basket {
+    use HasBag;
+}
+
+function test(): void {
+    $basket = new Basket();
+    $fruit = new Fruit();
+    $basket->getBag()->put($fruit);
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Fruit passed to Bag<Fruit>::put() via trait method, got: {diags:?}"
+    );
+}

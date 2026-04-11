@@ -88,42 +88,25 @@ fn find_enclosing_body_statements<'a>(
                 }
             }
             Statement::Class(class) => {
-                for member in class.members.iter() {
-                    if let ClassLikeMember::Method(method) = member
-                        && let MethodBody::Concrete(block) = &method.body
-                    {
-                        let body_start = block.left_brace.start.offset;
-                        let body_end = block.right_brace.end.offset;
-                        if offset >= body_start && offset <= body_end {
-                            return block.statements.iter().collect();
-                        }
-                    }
+                if let Some(block) = crate::util::find_enclosing_method_block_in_members(
+                    class.members.iter(),
+                    offset,
+                ) {
+                    return block.statements.iter().collect();
                 }
             }
             Statement::Trait(tr) => {
-                for member in tr.members.iter() {
-                    if let ClassLikeMember::Method(method) = member
-                        && let MethodBody::Concrete(block) = &method.body
-                    {
-                        let body_start = block.left_brace.start.offset;
-                        let body_end = block.right_brace.end.offset;
-                        if offset >= body_start && offset <= body_end {
-                            return block.statements.iter().collect();
-                        }
-                    }
+                if let Some(block) =
+                    crate::util::find_enclosing_method_block_in_members(tr.members.iter(), offset)
+                {
+                    return block.statements.iter().collect();
                 }
             }
             Statement::Enum(en) => {
-                for member in en.members.iter() {
-                    if let ClassLikeMember::Method(method) = member
-                        && let MethodBody::Concrete(block) = &method.body
-                    {
-                        let body_start = block.left_brace.start.offset;
-                        let body_end = block.right_brace.end.offset;
-                        if offset >= body_start && offset <= body_end {
-                            return block.statements.iter().collect();
-                        }
-                    }
+                if let Some(block) =
+                    crate::util::find_enclosing_method_block_in_members(en.members.iter(), offset)
+                {
+                    return block.statements.iter().collect();
                 }
             }
             Statement::Namespace(ns) => {

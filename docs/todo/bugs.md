@@ -1,59 +1,75 @@
 # PHPantom — Bug Fixes
 
+Every bug below must be fixed at its root cause. "Detect the
+symptom and suppress the diagnostic" is not an acceptable fix.
+If the type resolution pipeline produces wrong data, fix the
+pipeline so it produces correct data. Downstream consumers
+(diagnostics, hover, completion, definition) should never need
+to second-guess upstream output.
+
 ## B2 — Variable resolution pipeline produces short names instead of FQN
 
-The variable resolution pipeline (`resolve_rhs_expression`,
-`try_inline_var_override`, `try_standalone_var_docblock`, etc.)
-returns `ResolvedType` values whose `type_string` field contains
-short class names from raw docblock text or AST identifiers.
-Parameter types on `ClassInfo` members are already FQN (resolved
-during `resolve_parent_class_names`), so comparisons between the
-two fail on name form alone.
+**Root cause:** The variable resolution pipeline returns
+`ResolvedType` values whose `type_string` field contains short
+class names taken verbatim from docblock text or AST identifiers.
+The pipeline never resolves these names through the use-map or
+class loader before storing them.
 
-Sources of short names:
+**Where to fix:** Every code path that produces a `ResolvedType`
+from raw source text must resolve names to FQN before returning.
+The fix belongs in the resolution pipeline itself, not in each
+downstream consumer. Specifically:
 
 - `try_inline_var_override` in `completion/variable/resolution.rs`
   gets a `PhpType` from `find_inline_var_docblock` and passes it
   to `from_type_string` or `from_classes_with_hint` without
-  resolving names through the use-map.
+  resolving names through the use-map. It must resolve first.
 - `resolve_rhs_instantiation` in `completion/variable/rhs_resolution.rs`
   constructs `PhpType::Named(name.to_string())` from the raw AST
-  identifier (short name) and passes it through
-  `from_classes_with_hint`. The `ClassInfo` has the FQN, but the
-  `type_string` field retains the short name.
+  identifier (short name). It must resolve the name to FQN before
+  wrapping it.
 - `try_standalone_var_docblock` in `closure_resolution.rs` has the
   same pattern as `try_inline_var_override`.
 - `find_iterable_raw_type_in_source` and `find_var_raw_type_in_source`
-  in `docblock/tags.rs` return raw docblock types; every caller
-  that stores them in a `ResolvedType` preserves short names.
+  in `docblock/tags.rs` return raw docblock types. Every caller
+  that stores them in a `ResolvedType` must resolve names first.
 
 Current mitigation: `collect_type_error_diagnostics` applies
 `resolve_names` with the class loader on every resolved argument
-type before comparison, so `type_error.argument` diagnostics are
-not affected. But other consumers (hover type display, definition
-matching, etc.) still see short names.
+type before comparison. This papers over the problem for one
+consumer but leaves others broken (hover type display, definition
+matching, etc.).
 
-Fixing at the source is complicated because the same `ResolvedType`
-values feed the PHPDoc generation code actions, which need short
-names for user-facing output. The proper fix is to always store
-FQN in `type_string` and shorten at display time (the way
+The proper fix is to always store FQN in `type_string` at the
+point of creation and shorten at display time (the way
 `implement_methods.rs` already does with `shorten_type`).
+Consumers that need short names for user-facing output (e.g.
+PHPDoc generation code actions) should shorten on the way out,
+not expect short names from the pipeline.
 
 ## B3 — Array access on bare `array` returns empty instead of `mixed`
 
-When a parameter is typed as bare `array` (no generic annotation),
-accessing an element with `$params['key']` resolves to an empty
-type instead of `mixed`. This causes downstream issues:
+**Root cause:** The type resolution pipeline does not handle array
+element access on the bare `array` type. When a parameter is typed
+as `array` (no generic annotation), accessing an element with
+`$params['key']` resolves to an empty/untyped result instead of
+`mixed`.
 
-- `$x = $params['key'] ?? null` resolves `$x` to `null` (only
-  the RHS of `??`) instead of `mixed|null`, because the LHS
-  array access produced nothing.
-- `type_error.argument` then flags `null` passed to `string`
-  even though the value could be any type at runtime.
+**Where to fix:** The array access resolution code (wherever
+`$var['key']` is resolved to a type) must recognise bare `array`
+and `mixed` as "unknown element type" and return `mixed`. This is
+a fix in the variable/expression type resolution pipeline, not in
+any diagnostic.
 
-The fix should make array access on bare `array` (and `mixed`)
-return `mixed` so that downstream resolution and diagnostics
-see the correct "we don't know" type.
+**Downstream effect:** Once the pipeline returns `mixed` for array
+access on bare `array`, the following resolve correctly without any
+additional changes:
+
+- `$x = $params['key'] ?? null` resolves `$x` to `mixed|null`
+  instead of just `null`.
+- `type_error.argument` no longer flags `null` passed to `string`
+  because the resolved type is `mixed|null`, which is compatible
+  with anything.
 
 Reproducer:
 
@@ -69,155 +85,157 @@ function foo(array $params = []): void {
 function bar(string $s): void {}
 ```
 
-## B4 — Foreach loop prescan leaks reassigned type into RHS of same assignment
+## B9 — `parent::__construct()` does not substitute `@extends` generics into inherited parameter types
 
-The loop-body prescan in `walk_foreach_statement` (around line 2512
-in `src/completion/variable/resolution.rs`) walks the entire foreach
-body with `cursor_offset = body_end` to discover loop-carried
-assignments. When a foreach key variable is reassigned inside the
-body (e.g. `$type = DeviationType::from($type)`), the prescan
-resolves the RHS and adds the result (`DeviationType`) to the
-variable's type set. This leaks the reassigned type into positions
-where it should not be visible — specifically, the `$type` argument
-on the RHS of the same assignment should still be `string` (the
-foreach key type), not `DeviationType`.
+**Root cause:** When a child class has `@extends Parent<Concrete>`
+and calls `parent::__construct($arg)`, the diagnostic pipeline
+resolves the callable target to the parent's constructor without
+applying the child's `@extends` generic substitution. The parent
+constructor's `@param ?T $item` retains the raw template name `T`
+instead of being substituted with the concrete type from the
+child's `@extends` annotation.
 
-The diagnostic false positive is now suppressed by the backed enum
-check, but hover on `$type` inside `from($type)` still incorrectly
-shows `DeviationType` instead of `string`.
-
-The prescan should exclude assignments whose RHS contains the
-variable being resolved, or the prescan results should not be
-merged until after the current statement's RHS has been resolved.
+**Where to fix:** The callable target resolution for
+`parent::__construct(...)` (in `resolve_constructor_callable` or
+the `NewExpr` arm of `resolve_callable_target_with_args`) must
+detect that the call originates from a child class, look up the
+child's `extends_generics`, and apply template substitution to the
+parent class before returning its constructor's parameter types.
 
 Reproducer:
 
 ```php
-/** @var array<string, string> */
-$regexes = [];
-foreach ($regexes as $type => $regex) {
-    if (preg_match($regex, $message)) {
-        $type = DeviationType::from($type);
-        // hover on $type inside from() shows DeviationType
-        // instead of string
+/**
+ * @template T of object
+ */
+class ItemResult {
+    /** @param ?T $item */
+    public function __construct(private readonly ?object $item) {}
+}
+
+/**
+ * @extends ItemResult<BonusCashItem>
+ */
+final class BonusCashItemResult extends ItemResult {
+    public function __construct(?BonusCashItem $credited) {
+        parent::__construct($credited);
+        // false positive: "expects ?T, got BonusCashItem"
     }
 }
+
+class BonusCashItem {}
 ```
 
-## B5 — Unresolved template parameters leak raw names into argument diagnostics
+## B10 — Foreach iteration on `@extends` subclass yields raw template param instead of concrete type
 
-When a template parameter is not bound to a concrete type (either
-because no argument carries the binding, or because the class was
-instantiated without a generic annotation), the raw template name
-(e.g. `TValue`, `TKey`, `TReduceReturnType`, `TClosure`) leaks
-through to the type error checker. The diagnostic then reports
-"expects TValue, got string" instead of recognising the parameter
-as unresolved and suppressing the check.
+**Root cause:** When iterating over a variable whose type is a
+subclass that extends a generic collection (e.g.
+`IntCollection extends Collection<int, int>`), the foreach
+element-type extraction does not look through the child's
+`@extends` generics to substitute the parent's template params.
+The iteration variable gets typed as raw `TValue` instead of `int`.
 
-This affects both function-level and class-level templates:
+**Where to fix:** The foreach element-type resolution (in
+`foreach_resolution.rs` or wherever the iterable element type is
+extracted) must resolve `@extends` generics from the child class
+before extracting the element type. When the variable's class is
+`IntCollection` and it extends `Collection<int, int>`, the
+iteration element type must be `int`, not `TValue`.
 
-- **Function-level:** `@template TReduceReturnType` with
-  `@return TReduceReturnType` where no argument binds the param.
-- **Class-level:** `Collection<TKey, TValue>` where the Collection
-  was created without a generic annotation (e.g. `collect([])`,
-  `new Collection()`). Methods like `push($item)` still have
-  `@param TValue $item` with the raw template name, so passing
-  a `string` fires "expects TValue, got string".
+**Replicate on shared project:**
 
-Template substitution should either resolve the parameter from the
-call-site arguments / class-level generic annotation, or fall back
-to the template's bound (defaulting to `mixed`) so the raw name
-never leaks through to downstream diagnostics.
+```
+phpantom_lsp analyze --project-root shared --no-colour 2>/dev/null -- src/database/Model/Products/Filters/ProductFilterTermCollection.php
+```
 
-Reproducer (function-level):
+Reproducer:
 
 ```php
 /**
- * @template TReduceReturnType
- * @return TReduceReturnType
- */
-function reduce_result() { return null; }
-
-function takes_int(int $x): void {}
-
-function test(): void {
-    $result = reduce_result();
-    takes_int($result); // false positive: "expects int, got TReduceReturnType"
-}
-```
-
-Reproducer (class-level):
-
-```php
-/**
+ * @template TKey of array-key
  * @template TValue
  */
-class Collection {
-    /** @param TValue $item */
-    public function push($item): void {}
+class Collection implements \ArrayAccess {
+    /** @return TValue */
+    public function offsetGet(mixed $offset): mixed {}
+    public function offsetExists(mixed $offset): bool {}
+    public function offsetSet(mixed $offset, mixed $value): void {}
+    public function offsetUnset(mixed $offset): void {}
 }
 
+/** @extends Collection<int, int> */
+final class IntCollection extends Collection {}
+
 function test(): void {
-    $items = new Collection();   // no generic annotation
-    $items->push('hello');       // false positive: "expects TValue, got string"
+    $ids = new IntCollection();
+    foreach ($ids as $id) {
+        // $id should be int, but resolves to TValue
+        array_key_exists($id, [1 => 'a']);
+        // false positive: "expects int|string, got TValue"
+    }
 }
 ```
 
-## B7 — `createMock()` returns `MockObject` instead of `MockObject&T` intersection
+## B11 — Static method-level `@template` not substituted when argument is a closure literal
 
-PHPUnit's `createMock(Foo::class)` should return the intersection
-type `MockObject&Foo`, but the resolution pipeline only produces
-`MockObject`. This causes false-positive type errors whenever a
-mock is passed to a function expecting the mocked type.
+**Root cause:** When a static method declares a method-level
+`@template T of SomeType` and `@param T $param`, and the call-site
+argument is a closure literal (e.g. `fn(array $q): bool => ...`),
+`build_method_template_subs` either fails to resolve the argument
+text to a type or the binding mode does not fire. The raw template
+name (e.g. `TClosure`) leaks into the parameter type.
 
-The fix belongs in the call resolution pipeline: when the callee
-is `TestCase::createMock` (or `getMockBuilder(...)->getMock()`,
-`createPartialMock`, `createStub`, etc.) and the argument is a
-`class-string<T>` literal, the return type should be
-`MockObject&T`. This is the same pattern as `@template T` with
-`@return MockObject&T` — the stubs may already declare this, in
-which case the issue is that template substitution doesn't fire
-for the `class-string` argument.
+**Where to fix:** `build_method_template_subs` in
+`call_resolution.rs` and/or `resolve_arg_text_to_type`. When the
+argument text starts with `fn(` or `function(`, it should be
+recognised as a `Closure` type (or more specifically
+`Closure(params): ReturnType`) and used to bind the template param.
 
 Reproducer:
 
 ```php
-use PHPUnit\Framework\TestCase;
-
-class FooService {
-    public function doWork(): string { return 'ok'; }
+class Mockery {
+    /**
+     * @template TClosure of \Closure
+     * @param TClosure $closure
+     * @return ClosureMatcher
+     */
+    public static function on($closure) {
+        return new ClosureMatcher($closure);
+    }
 }
 
-class FooTest extends TestCase {
-    public function testFoo(): void {
-        $mock = $this->createMock(FooService::class);
-        // $mock is MockObject, should be MockObject&FooService
-        $this->useFoo($mock); // false positive: expects FooService, got MockObject
-    }
-    private function useFoo(FooService $svc): void {}
+class ClosureMatcher {}
+
+function test(): void {
+    Mockery::on(fn(array $query): bool => true);
+    // false positive: "expects TClosure, got Closure"
 }
 ```
 
 ## B8 — Class-level template parameters lost through chained method calls
 
-When a method returns a generic class (e.g. `Collection<Product>`)
-and the next method in the chain returns `self<TItem>` or another
-type referencing a class-level template parameter, the template
-substitution is lost because `resolve_call_return_types_expr`
-converts intermediate `ResolvedType`s (which carry generic args) to
-`Vec<Arc<ClassInfo>>` via `into_arced_classes`, discarding the
-`type_string` field that holds the generic parameters.
+**Root cause:** When a method returns a generic class (e.g.
+`Collection<Product>`) and the next method in the chain accesses a
+member of that class, the generic type arguments are discarded
+during the chain resolution. Specifically,
+`resolve_call_return_types_expr` converts intermediate
+`ResolvedType` values (which carry generic args in their
+`type_string` field) to `Vec<Arc<ClassInfo>>` via
+`into_arced_classes`. This conversion discards the `type_string`,
+so by the time the next method's return type needs to be
+template-substituted, the generic arguments are gone.
 
-The first call in the chain now correctly propagates generics (B6
-fix), but the second call resolves the base through
-`resolve_call_return_types_expr` → `MethodCall` →
-`into_arced_classes`, which strips the generic info before the
-method's return type can be template-substituted.
+**Where to fix:** The `MethodCall` arm of
+`resolve_call_return_types_expr` must thread `ResolvedType` (with
+its `type_string`) through to the method return-type resolution
+step instead of flattening to bare `ClassInfo` first. The generic
+arguments from the intermediate return type must survive into
+`build_generic_subs` so that template substitution works at every
+level of the chain, not just the first.
 
-Fixing this requires threading `ResolvedType` (with its
-`type_string`) through the `MethodCall` arm of
-`resolve_call_return_types_expr` so that class-level template
-arguments survive into the method return-type resolution step.
+The first call in a chain already works (B6 fix). The fix here is
+to apply the same pattern to subsequent calls in the chain.
 
 Reproducer:
 
@@ -243,7 +261,7 @@ class Store {
 function test(): void {
     $store = new Store();
     $product = new Product();
-    // First level works (B6 fix): $store->products()->add($product)
+    // First level works: $store->products()->add($product)
     // Second level fails: $store->products()->filter()->add($product)
     // false positive: "expects TItem, got Product"
     $store->products()->filter()->add($product);

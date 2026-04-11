@@ -523,11 +523,7 @@ impl Backend {
                 }
 
                 SubjectOutcome::Resolved(ref base_classes) => {
-                    // Capture diagnostic count before the coarse member
-                    // check so we can roll back if re-resolution succeeds.
-                    let diag_count_before = out.len();
-
-                    let result = self.check_member_on_resolved_classes(
+                    let (result, coarse_diags) = self.check_member_on_resolved_classes(
                         base_classes,
                         member_name,
                         is_static,
@@ -538,7 +534,6 @@ impl Backend {
                         content,
                         span.start,
                         span.end,
-                        out,
                     );
 
                     // ── Narrowing re-resolution fallback ────────────
@@ -550,45 +545,42 @@ impl Backend {
                     //
                     // This is the rare path — most accesses find the
                     // member on the coarse type and never reach here.
-                    let result = if result != MemberCheckResult::Ok && is_narrowable_variable {
-                        let rctx = ResolutionCtx {
-                            current_class,
-                            all_classes: &local_classes,
-                            content,
-                            cursor_offset: span.start,
-                            class_loader: &class_loader,
-                            resolved_class_cache: Some(resolved_cache),
-                            function_loader: Some(&function_loader),
-                        };
-                        let fresh = resolve_subject_outcome(subject_text, access_kind, &rctx);
-                        if let SubjectOutcome::Resolved(ref fresh_classes) = fresh {
-                            // Remove the diagnostic(s) emitted by the
-                            // coarse check so the re-check can replace
-                            // them with a fresh verdict.
-                            out.truncate(diag_count_before);
-                            // Re-check with the narrowed classes.
-                            self.check_member_on_resolved_classes(
-                                fresh_classes,
-                                member_name,
-                                is_static,
-                                is_method_call,
-                                is_docblock_ref,
-                                &class_loader,
-                                resolved_cache,
+                    let (result, diags) =
+                        if result != MemberCheckResult::Ok && is_narrowable_variable {
+                            let rctx = ResolutionCtx {
+                                current_class,
+                                all_classes: &local_classes,
                                 content,
-                                span.start,
-                                span.end,
-                                out,
-                            )
+                                cursor_offset: span.start,
+                                class_loader: &class_loader,
+                                resolved_class_cache: Some(resolved_cache),
+                                function_loader: Some(&function_loader),
+                            };
+                            let fresh = resolve_subject_outcome(subject_text, access_kind, &rctx);
+                            if let SubjectOutcome::Resolved(ref fresh_classes) = fresh {
+                                // Use the fresh diagnostics instead of the coarse ones.
+                                self.check_member_on_resolved_classes(
+                                    fresh_classes,
+                                    member_name,
+                                    is_static,
+                                    is_method_call,
+                                    is_docblock_ref,
+                                    &class_loader,
+                                    resolved_cache,
+                                    content,
+                                    span.start,
+                                    span.end,
+                                )
+                            } else {
+                                // Re-resolution changed the outcome category
+                                // (e.g. became Untyped).  Keep the original
+                                // diagnostic from the coarse check.
+                                (result, coarse_diags)
+                            }
                         } else {
-                            // Re-resolution changed the outcome category
-                            // (e.g. became Untyped).  Keep the original
-                            // diagnostic from the coarse check.
-                            result
-                        }
-                    } else {
-                        result
-                    };
+                            (result, coarse_diags)
+                        };
+                    out.extend(diags);
 
                     // Only break the chain when the member is truly
                     // missing (no magic method fallback).  When
@@ -629,8 +621,8 @@ impl Backend {
         content: &str,
         start: u32,
         end: u32,
-        out: &mut Vec<Diagnostic>,
-    ) -> MemberCheckResult {
+    ) -> (MemberCheckResult, Vec<Diagnostic>) {
+        let mut diagnostics = Vec::new();
         // ── Quick check on pre-resolved base classes ────────────────
         // `resolve_target_classes` already returns fully-resolved
         // classes in many code paths (e.g. `type_hint_to_classes_typed`
@@ -652,16 +644,16 @@ impl Backend {
                 .iter()
                 .any(|c| has_magic_method_for_access(c, is_static, false))
         {
-            return MemberCheckResult::Ok;
+            return (MemberCheckResult::Ok, diagnostics);
         }
         if base_classes.iter().any(|c| c.name == "stdClass") {
-            return MemberCheckResult::Ok;
+            return (MemberCheckResult::Ok, diagnostics);
         }
         if base_classes.iter().any(|c| {
             member_exists(c, member_name, is_static, is_method_call)
                 || (is_docblock_ref && member_exists_relaxed(c, member_name, is_method_call))
         }) {
-            return MemberCheckResult::Ok;
+            return (MemberCheckResult::Ok, diagnostics);
         }
 
         // ── Fully resolve each class (inheritance + virtual members) ─
@@ -686,12 +678,12 @@ impl Backend {
                 .iter()
                 .any(|c| has_magic_method_for_access(c, is_static, false))
         {
-            return MemberCheckResult::Ok;
+            return (MemberCheckResult::Ok, diagnostics);
         }
 
         // ── Skip stdClass (universal object container) ──────────────
         if resolved_classes.iter().any(|c| c.name == "stdClass") {
-            return MemberCheckResult::Ok;
+            return (MemberCheckResult::Ok, diagnostics);
         }
 
         // ── Check whether the member exists on ANY branch ───────────
@@ -699,7 +691,7 @@ impl Backend {
             member_exists(c, member_name, is_static, is_method_call)
                 || (is_docblock_ref && member_exists_relaxed(c, member_name, is_method_call))
         }) {
-            return MemberCheckResult::Ok;
+            return (MemberCheckResult::Ok, diagnostics);
         }
 
         // ── Check for __call / __callStatic on ANY branch ───────────
@@ -720,7 +712,7 @@ impl Backend {
         // ── Member is unresolved on ALL branches — emit diagnostic ──
         let range = match offset_range_to_lsp_range(content, start as usize, end as usize) {
             Some(r) => r,
-            None => return MemberCheckResult::Ok,
+            None => return (MemberCheckResult::Ok, diagnostics),
         };
 
         let kind_label = if is_method_call {
@@ -756,18 +748,19 @@ impl Backend {
             )
         };
 
-        out.push(make_diagnostic(
+        diagnostics.push(make_diagnostic(
             range,
             DiagnosticSeverity::WARNING,
             UNKNOWN_MEMBER_CODE,
             message,
         ));
 
-        if has_magic_call {
+        let result = if has_magic_call {
             MemberCheckResult::MagicFallback
         } else {
             MemberCheckResult::Break
-        }
+        };
+        (result, diagnostics)
     }
 }
 

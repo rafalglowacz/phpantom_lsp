@@ -2472,8 +2472,17 @@ fn walk_foreach_statement<'b>(
     // ── Pre-scan for loop-carried assignments ──
     // When the cursor is inside the loop body, assignments that appear
     // textually after the cursor are live on subsequent iterations.
-    // Pre-scan the body to pick them up as conditional types before the
-    // normal positional walk (which skips statements after the cursor).
+    // Pre-scan the body to pick them up as conditional types.
+    //
+    // IMPORTANT: the prescan results are collected into a separate Vec
+    // and merged AFTER the normal body walk.  If we merged before the
+    // normal walk, a self-referencing assignment like
+    //   `$type = DeviationType::from($type)`
+    // would pollute the type of `$type` on the RHS: the prescan would
+    // add `DeviationType` to the results, and the normal walk would
+    // then see `string|DeviationType` instead of just `string` when
+    // resolving `$type` inside `from($type)`.
+    let mut deferred_prescan: Vec<ResolvedType> = Vec::new();
     if cursor_inside {
         match &foreach.body {
             ForeachBody::Statement(inner) => {
@@ -2481,7 +2490,7 @@ fn walk_foreach_statement<'b>(
                     std::iter::once(*inner),
                     body_span.end.offset,
                     ctx,
-                    results,
+                    &mut deferred_prescan,
                 );
             }
             ForeachBody::ColonDelimited(body) => {
@@ -2489,7 +2498,7 @@ fn walk_foreach_statement<'b>(
                     body.statements.iter(),
                     body_span.end.offset,
                     ctx,
-                    results,
+                    &mut deferred_prescan,
                 );
             }
         }
@@ -2509,6 +2518,14 @@ fn walk_foreach_statement<'b>(
         ForeachBody::ColonDelimited(body) => {
             walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
         }
+    }
+
+    // Now merge the deferred prescan results.  At this point the normal
+    // walk has already resolved all RHS expressions using the types
+    // available at each statement's position, so loop-carried types
+    // from the prescan no longer pollute same-statement RHS resolution.
+    if !deferred_prescan.is_empty() {
+        ResolvedType::extend_unique(results, deferred_prescan);
     }
 }
 

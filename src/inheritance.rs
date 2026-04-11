@@ -1096,14 +1096,57 @@ pub(crate) fn build_generic_subs(
     let mut subs = HashMap::new();
     for (i, param_name) in class.template_params.iter().enumerate() {
         if i < offset {
+            // Skipped (right-aligned) params: fall back to their
+            // declared upper bound or `mixed` so the raw template
+            // name never leaks into downstream consumers.
+            let fallback = class
+                .template_param_bounds
+                .get(param_name)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed);
+            subs.insert(param_name.clone(), fallback);
             continue;
         }
         if let Some(arg) = type_args.get(i - offset) {
             subs.insert(param_name.clone(), arg.clone());
+        } else {
+            // Unbound param (more template params than type args and
+            // right-alignment didn't apply): use upper bound or `mixed`.
+            let fallback = class
+                .template_param_bounds
+                .get(param_name)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed);
+            subs.insert(param_name.clone(), fallback);
         }
     }
 
     subs
+}
+
+/// Build default type arguments for a class whose template parameters
+/// have no concrete bindings (e.g. `new Collection()` without a generic
+/// annotation).
+///
+/// Each template parameter is mapped to its declared upper bound
+/// (`@template T of Foo` → `Foo`) or `mixed` when no bound exists.
+/// The returned vector is ordered to match `class.template_params`.
+///
+/// This follows PHPStan's `resolveToBounds()` semantics: unbound
+/// template parameters are erased to their bounds so that downstream
+/// consumers never see raw template names like `TValue`.
+pub(crate) fn default_type_args(class: &ClassInfo) -> Vec<PhpType> {
+    class
+        .template_params
+        .iter()
+        .map(|p| {
+            class
+                .template_param_bounds
+                .get(p)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed)
+        })
+        .collect()
 }
 
 /// Apply explicit generic type arguments to a class's members.

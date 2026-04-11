@@ -25,7 +25,7 @@ use crate::completion::resolver::{Loaders, VarResolutionCtx};
 use crate::completion::variable::foreach_resolution::resolve_expression_type;
 use crate::parser::{with_parse_cache, with_parsed_program};
 use crate::php_type::{PhpType, is_array_like_name};
-use crate::types::{BackedEnumType, ClassInfo, ClassLikeKind, ResolvedCallableTarget};
+use crate::types::{ClassInfo, ResolvedCallableTarget};
 use crate::util::is_subtype_of_typed;
 
 use super::helpers::{find_innermost_enclosing_class, make_diagnostic};
@@ -70,6 +70,29 @@ fn is_type_compatible(
     param_type: &PhpType,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> bool {
+    // ── Architecture note ───────────────────────────────────────
+    //
+    // This function is a diagnostic-policy layer on top of the core
+    // type system.  It contains two kinds of checks:
+    //
+    // 1. **MAYBE escape hatches** — cases where the types *might*
+    //    be compatible at runtime but we can't prove it statically.
+    //    These return `true` (suppress the diagnostic) to avoid
+    //    false positives.  They encode diagnostic policy, not type
+    //    theory, and are unique to this function.
+    //
+    // 2. **Hierarchy checks with permissive fallbacks** — nominal
+    //    subtype checks that fall back to `true` when a class can't
+    //    be loaded, rather than producing a false positive.
+    //
+    // Strict subtype relationships (Cat <: Animal, never <: T,
+    // Closure(int): void <: callable, array<int, string> <: array)
+    // are handled by the `is_subtype_of_typed` fallback at the end
+    // of this function and should NOT be duplicated here.
+    //
+    // See D14 in docs/todo/diagnostics.md for the Phase 2 plan to
+    // tighten specific MAYBE rules.
+
     // Skip if either type is unresolved/unknown.
     if arg_type.is_untyped() || param_type.is_untyped() {
         return true;
@@ -84,10 +107,6 @@ fn is_type_compatible(
     if let PhpType::Union(members) = arg_type
         && members.iter().any(|m| m.is_mixed())
     {
-        return true;
-    }
-    // `never` is the bottom type — always compatible as argument.
-    if arg_type.is_never() {
         return true;
     }
     // `void` should never appear as an argument but skip it conservatively.
@@ -199,21 +218,14 @@ fn is_type_compatible(
         return true;
     }
 
-    // ── Bare Closure/callable accepted by callable specification ─
+    // ── Bare Closure/callable ↔ callable specification: MAYBE ───
     // When the param is a callable specification like
     // `Closure(Builder<X>): mixed` and the arg is a bare `Closure`
     // or `callable`, we can't verify the signature — stay silent.
+    // (The reverse direction — callable spec <: bare Closure — is a
+    // strict YES handled by the `is_subtype_of_typed` fallback.)
     if matches!(param_type, PhpType::Callable { .. })
         && (arg_type.is_closure() || arg_type.is_callable())
-    {
-        return true;
-    }
-
-    // ── Callable specification accepted by bare Closure/callable ─
-    // The reverse: arg is `Closure(int): void`, param is `Closure`
-    // or `callable`.  The specification is always a valid instance.
-    if matches!(arg_type, PhpType::Callable { .. })
-        && (param_type.is_closure() || param_type.is_callable())
     {
         return true;
     }
@@ -221,15 +233,9 @@ fn is_type_compatible(
     // ── Bare array ↔ typed array: MAYBE ─────────────────────────
     // A bare `array` is untyped — it *might* satisfy `array<K,V>`,
     // `list<X>`, `T[]`, or an array shape.  We can't prove it wrong.
+    // (The reverse — typed array <: bare array — is a strict YES
+    // handled by the `is_subtype_of_typed` fallback.)
     if is_bare_array(arg_type) && is_any_array_type(param_type) {
-        return true;
-    }
-
-    // ── Typed array → bare array: YES ───────────────────────────
-    // `array<K,V>`, `list<X>`, `T[]` are all subtypes of `array`.
-    // The structural check handles `Named("list") <: Named("array")`
-    // but misses `Generic("array", [int, string]) <: Named("array")`.
-    if is_bare_array(param_type) && is_any_array_type(arg_type) {
         return true;
     }
 
@@ -318,86 +324,35 @@ fn is_type_compatible(
         return true;
     }
 
-    // ── Array-like / traversable-like → iterable<...> ───────────
-    // Any array type or traversable-like class (Collection, etc.)
-    // satisfies iterable generics.  We can't verify the generic
-    // type arguments covariantly at this phase, so stay silent
-    // (MAYBE) whenever the base types are compatible.
-    if let PhpType::Generic(name, _) = param_type
-        && name.eq_ignore_ascii_case("iterable")
-        && (arg_type.is_array_like()
-            || matches!(arg_type, PhpType::Generic(n, _) if is_array_like_name(n))
-            || matches!(arg_type, PhpType::Array(_) | PhpType::ArrayShape(_))
-            || arg_type
-                .base_name()
-                .and_then(class_loader)
-                .is_some_and(|cls| crate::util::is_subtype_of(&cls, "Traversable", class_loader))
-            || arg_type.is_object_like())
-    {
-        // For object-like args, verify via hierarchy that the class
-        // actually implements Traversable/IteratorAggregate/Iterator.
-        // If we can't load the class, stay permissive.
-        if arg_type.is_object_like()
-            && !arg_type.is_array_like()
-            && !arg_type
-                .base_name()
-                .and_then(class_loader)
-                .is_some_and(|cls| crate::util::is_subtype_of(&cls, "Traversable", class_loader))
-        {
-            if let Some(class_name) = arg_type.base_name() {
-                if let Some(cls) = class_loader(class_name) {
-                    let is_trav = crate::util::is_subtype_of(&cls, "Traversable", class_loader);
-                    if !is_trav {
-                        // Class loaded but not traversable — don't accept
-                    } else {
-                        return true;
-                    }
-                } else {
-                    // Can't load — stay permissive
-                    return true;
-                }
-            } else {
-                // Bare `object` — stay permissive
-                return true;
-            }
-        } else {
-            return true;
-        }
-    }
-
-    // ── Traversable-like → Arrayable<K,V>|iterable<K,V> union ──
-    // Collections implement both Arrayable and iterable.  When the
-    // param is a union containing `Arrayable<...>` or `iterable<...>`,
-    // a Collection (or any traversable-like) should satisfy it.
-    // The union-level check already recurses into each branch, but
-    // the individual branch may be a Generic("Arrayable", ...) that
-    // the hierarchy check can't resolve because it doesn't compare
-    // generic arguments.  Handle this explicitly.
+    // ── Array-like / traversable-like → generic iterable/Traversable ─
+    // When the param is a generic `iterable<K,V>`, `Traversable<K,V>`,
+    // or any interface that extends Traversable (e.g. `Arrayable<K,V>`),
+    // we can't verify the generic type arguments covariantly at this
+    // phase.  Stay silent (MAYBE) when the base types are compatible.
     if let PhpType::Generic(name, _) = param_type
         && (name.eq_ignore_ascii_case("iterable")
             || class_loader(name)
                 .is_some_and(|cls| crate::util::is_subtype_of(&cls, "Traversable", class_loader)))
     {
-        if arg_type
-            .base_name()
-            .and_then(class_loader)
-            .is_some_and(|cls| crate::util::is_subtype_of(&cls, "Traversable", class_loader))
+        // Array-like args always satisfy iterable/Traversable generics.
+        if arg_type.is_array_like()
+            || matches!(arg_type, PhpType::Generic(n, _) if is_array_like_name(n))
+            || matches!(arg_type, PhpType::Array(_) | PhpType::ArrayShape(_))
         {
             return true;
         }
-        // Hierarchy fallback: check if the arg's class implements
-        // Traversable transitively (e.g. Collection → Enumerable →
-        // IteratorAggregate → Traversable).
+        // Object-like args: check hierarchy for Traversable.
+        // Can't load → stay permissive; bare `object` → stay permissive.
         if let Some(class_name) = arg_type.base_name() {
             if let Some(cls) = class_loader(class_name) {
-                let is_trav = crate::util::is_subtype_of(&cls, "Traversable", class_loader);
-                if is_trav {
+                if crate::util::is_subtype_of(&cls, "Traversable", class_loader) {
                     return true;
                 }
             } else {
-                // Can't load — stay permissive
                 return true;
             }
+        } else if arg_type.is_object_like() {
+            return true;
         }
     }
 
@@ -546,36 +501,23 @@ fn is_type_compatible(
         return true;
     }
 
-    // ── class-string covariance through class hierarchy ─────────
-    // `class-string<Exception>` should be accepted where
-    // `class-string<Throwable>` is expected, since Exception
-    // extends Throwable.
-    if let (PhpType::ClassString(Some(sub_inner)), PhpType::ClassString(Some(sup_inner))) =
-        (arg_type, param_type)
-        && is_subtype_of_typed(sub_inner, sup_inner, class_loader)
-    {
-        return true;
-    }
-
-    // ── Class hierarchy: two-way check ──────────────────────────
+    // ── Class hierarchy: reverse direction MAYBE ────────────────
     //
-    // Direction 1 — arg extends/implements param: YES.
-    //   `Cat` passed to `Animal` where `Cat extends Animal`.
-    //   This is the normal subtype direction.  The structural
-    //   `is_subtype_of_typed` at the bottom already handles this
-    //   for names it can resolve structurally, but the class_loader
-    //   walk may find relationships it missed.
+    // Direction 1 (arg <: param, e.g. `Cat` passed to `Animal`)
+    // is a strict YES handled by the `is_subtype_of_typed` fallback
+    // at the end of this function.  No need to duplicate it here.
     //
-    // Direction 2 — param extends/implements arg: MAYBE.
-    //   `CarbonInterface` passed to `Carbon` where `Carbon`
-    //   implements `CarbonInterface`.  The argument is a *broader*
-    //   type; the value *might* be the narrower concrete at runtime
-    //   (the developer may have checked with instanceof, or the
-    //   API always returns the concrete type despite being typed as
-    //   the interface).  However, if the arg's class is **final**,
-    //   the value cannot be any subtype — it is exactly that class.
-    //   So `final class Jack` passed to `JackSparrow` (where Jack
-    //   does not extend JackSparrow) is a definite NO.
+    // Direction 2 (param <: arg, e.g. `CarbonInterface` passed to
+    // `Carbon` where `Carbon implements CarbonInterface`) is a MAYBE:
+    // the argument is a *broader* type but the value *might* be the
+    // narrower concrete at runtime (the developer may have checked
+    // with instanceof, or the API always returns the concrete type
+    // despite being typed as the interface).
+    //
+    // However, if the arg's class is **final**, the value cannot be
+    // any subtype — it is exactly that class.  So `final class Jack`
+    // passed to `JackSparrow` (where Jack does not extend
+    // JackSparrow) is a definite NO.
     //
     // We intentionally do NOT treat `object` or `stdClass` as
     // universal supertypes here.  `base_name()` returns `None` for
@@ -583,116 +525,21 @@ fn is_type_compatible(
     // this block.  `stdClass` has a base_name but is not a parent
     // of arbitrary classes in PHP — the hierarchy walk will simply
     // not find a relationship, which is correct.
-    // ── Backed enum → backing type: MAYBE ───────────────────────
-    // PHP backed enums (e.g. `enum Status: int`) have a `.value`
-    // property of their backing type.  Many codebases pass enum
-    // instances where the backing type is expected — PHP doesn't
-    // auto-coerce, but the pattern is pervasive enough (especially
-    // with int-backed enums passed to DB layers, comparison
-    // functions, etc.) that flagging it produces noise.
-    //
-    // This check is placed before the base-name pair block because
-    // the param type may be a union (e.g. `int|string`) which has
-    // no base_name.  We check whether any member of the param type
-    // matches the backing type.
-    if let Some(arg_base) = arg_type.base_name()
-        && let Some(cls) = class_loader(arg_base)
-        && cls.kind == ClassLikeKind::Enum
-    {
-        let backing_matches = match &cls.backed_type {
-            Some(BackedEnumType::Int) => param_type_accepts_int(param_type),
-            Some(BackedEnumType::String) => param_type_accepts_string(param_type),
-            _ => false,
-        };
-        if backing_matches {
-            return true;
-        }
-    }
 
     if let (Some(arg_base), Some(param_base)) = (arg_type.base_name(), param_type.base_name()) {
         let arg_cls = class_loader(arg_base);
-        let param_cls_lazy = || class_loader(param_base);
 
-        // Direction 1: arg is a subtype of param (normal direction).
-        // YES — definitely compatible.
-        if let Some(ref cls) = arg_cls
-            && crate::util::is_subtype_of(cls, param_base, class_loader)
-        {
-            return true;
-        }
-
-        // Direction 2: param is a subtype of arg (reverse direction).
-        // The arg is broader — the value *might* be the narrower type.
-        // But if the arg's class is final, it cannot be any subtype,
-        // so this is a definite NO (we don't return true).
         let arg_is_final = arg_cls.as_ref().is_some_and(|cls| cls.is_final);
         if !arg_is_final {
             if is_subtype_of_typed(param_type, arg_type, class_loader) {
                 return true;
             }
             // Also try loading param and walking up to arg.
-            if let Some(param_cls) = param_cls_lazy()
+            if let Some(param_cls) = class_loader(param_base)
                 && crate::util::is_subtype_of(&param_cls, arg_base, class_loader)
             {
                 return true;
             }
-        }
-    }
-
-    // ── Object-like arg → Countable: check hierarchy ────────────
-    // Only accept objects whose class actually implements Countable.
-    // Uses the transitive hierarchy walker so that interfaces
-    // inherited through parent interfaces are found (e.g.
-    // Collection → Enumerable → Countable).
-    // If the class can't be loaded, stay permissive to avoid false positives.
-    if arg_type.is_object_like()
-        && let Some(sup) = param_type.base_name()
-        && sup.eq_ignore_ascii_case("Countable")
-    {
-        if let Some(class_name) = arg_type.base_name() {
-            if let Some(cls) = class_loader(class_name) {
-                if crate::util::is_subtype_of(&cls, "Countable", class_loader) {
-                    return true;
-                }
-                // Class loaded but doesn't implement Countable — fall through
-            } else {
-                // Can't load class — stay permissive
-                return true;
-            }
-        } else {
-            // Bare `object` type — stay permissive
-            return true;
-        }
-    }
-
-    // ── Object-like arg → iterable/Traversable: check hierarchy ─
-    // Only accept objects whose class actually implements Traversable/
-    // Iterator/IteratorAggregate.  Uses the transitive hierarchy
-    // walker so that interfaces inherited through intermediate
-    // interfaces are found (e.g. Collection → Enumerable →
-    // IteratorAggregate → Traversable).
-    // If can't load, stay permissive.
-    if arg_type.is_object_like()
-        && (param_type
-            .base_name()
-            .and_then(class_loader)
-            .is_some_and(|cls| crate::util::is_subtype_of(&cls, "Traversable", class_loader))
-            || matches!(param_type, PhpType::Generic(n, _) if n.eq_ignore_ascii_case("iterable")))
-    {
-        if let Some(class_name) = arg_type.base_name() {
-            if let Some(cls) = class_loader(class_name) {
-                let is_traversable = crate::util::is_subtype_of(&cls, "Traversable", class_loader);
-                if is_traversable {
-                    return true;
-                }
-                // Class loaded but doesn't implement traversable — fall through
-            } else {
-                // Can't load class — stay permissive
-                return true;
-            }
-        } else {
-            // Bare `object` type — stay permissive
-            return true;
         }
     }
 
@@ -836,13 +683,6 @@ fn is_refined_scalar_pair(arg: &PhpType, param: &PhpType) -> bool {
                 | "non-negative-int"
                 | "non-positive-int"
                 | "non-zero-int"
-        ) | (
-            "float" | "double",
-            "positive-int"
-                | "negative-int"
-                | "non-negative-int"
-                | "non-positive-int"
-                | "non-zero-int"
         )
     )
 }
@@ -874,26 +714,6 @@ fn contains_self_or_parent(ty: &PhpType) -> bool {
             matches!(low.as_str(), "self" | "static" | "$this" | "parent")
                 || args.iter().any(contains_self_or_parent)
         }
-        _ => false,
-    }
-}
-
-/// Whether the param type accepts `int` values, including inside unions.
-fn param_type_accepts_int(ty: &PhpType) -> bool {
-    match ty {
-        PhpType::Named(s) => matches!(s.to_ascii_lowercase().as_str(), "int" | "integer"),
-        PhpType::Nullable(inner) => param_type_accepts_int(inner),
-        PhpType::Union(members) => members.iter().any(param_type_accepts_int),
-        _ => false,
-    }
-}
-
-/// Whether the param type accepts `string` values, including inside unions.
-fn param_type_accepts_string(ty: &PhpType) -> bool {
-    match ty {
-        PhpType::Named(s) => s.eq_ignore_ascii_case("string"),
-        PhpType::Nullable(inner) => param_type_accepts_string(inner),
-        PhpType::Union(members) => members.iter().any(param_type_accepts_string),
         _ => false,
     }
 }

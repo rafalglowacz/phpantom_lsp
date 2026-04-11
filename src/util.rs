@@ -1045,6 +1045,18 @@ pub(crate) fn is_subtype_of_typed(
         return true;
     }
 
+    // ── class-string covariance through nominal hierarchy ────────
+    // The structural `is_subtype_of` handles `class-string<Cat> <:
+    // class-string<Animal>` only when `Cat` and `Animal` are
+    // structurally equal.  Extend to nominal hierarchy so that
+    // `class-string<Cat>` is accepted where `class-string<Animal>`
+    // is expected when `Cat extends Animal`.
+    if let (PhpType::ClassString(Some(sub_inner)), PhpType::ClassString(Some(sup_inner))) =
+        (subtype, supertype)
+    {
+        return is_subtype_of_typed(sub_inner, sup_inner, class_loader);
+    }
+
     // ── Nominal class hierarchy check ───────────────────────────
     // Both sides must resolve to a class name for the hierarchy walk.
     let sub_name = subtype.base_name();
@@ -1877,6 +1889,35 @@ pub(crate) fn infer_type_from_literal(expr: &str) -> Option<PhpType> {
     }
 
     // Not a simple literal.
+    None
+}
+
+/// Find the concrete method body block that contains `offset` within
+/// the given class-like members.  Returns `None` if no method body
+/// spans the offset.
+///
+/// This is the shared kernel behind "find enclosing body" operations
+/// used by extract-function, property-assignment narrowing, and
+/// similar features that need to locate the method body surrounding
+/// the cursor.
+pub(crate) fn find_enclosing_method_block_in_members<'a>(
+    members: impl Iterator<Item = &'a mago_syntax::ast::class_like::member::ClassLikeMember<'a>>,
+    offset: u32,
+) -> Option<&'a mago_syntax::ast::block::Block<'a>> {
+    use mago_syntax::ast::class_like::member::ClassLikeMember;
+    use mago_syntax::ast::class_like::method::MethodBody;
+
+    for member in members {
+        if let ClassLikeMember::Method(method) = member
+            && let MethodBody::Concrete(block) = &method.body
+        {
+            let body_start = block.left_brace.start.offset;
+            let body_end = block.right_brace.end.offset;
+            if offset >= body_start && offset <= body_end {
+                return Some(block);
+            }
+        }
+    }
     None
 }
 

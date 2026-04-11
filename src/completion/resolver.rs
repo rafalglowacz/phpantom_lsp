@@ -541,37 +541,29 @@ fn resolve_target_classes_expr_inner(
 
         // ── Call expression ─────────────────────────────────────
         SubjectExpr::CallExpr { callee, args_text } => {
-            // First pass: resolve the call to classes (cheap).
-            let classes = Backend::resolve_call_return_types_expr(callee, args_text, ctx);
-            // Only capture the raw return type hint when at least one
-            // resolved class has template parameters.  Non-generic
-            // classes don't benefit from the hint, and skipping it
-            // avoids an extra resolve_class_fully lookup on every
-            // call expression in builder chains.
-            let needs_hint = classes.iter().any(|c| !c.template_params.is_empty());
-            if needs_hint {
-                let mut hint: Option<PhpType> = None;
-                let classes2 = Backend::resolve_call_return_types_expr_with_hint(
-                    callee,
-                    args_text,
-                    ctx,
-                    Some(&mut hint),
-                );
-                if let Some(h) = hint {
-                    let class_vec: Vec<ClassInfo> =
-                        classes2.into_iter().map(Arc::unwrap_or_clone).collect();
-                    return ResolvedType::from_classes_with_hint(class_vec, h);
-                }
-                classes2
-                    .into_iter()
-                    .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
-                    .collect()
-            } else {
-                classes
-                    .into_iter()
-                    .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
-                    .collect()
+            let mut hint: Option<PhpType> = None;
+            let classes = Backend::resolve_call_return_types_expr_with_hint(
+                callee,
+                args_text,
+                ctx,
+                Some(&mut hint),
+            );
+
+            // Use the raw return type hint only when at least one
+            // resolved class has template parameters — non-generic
+            // classes don't benefit from it.
+            if let Some(h) = hint
+                && classes.iter().any(|c| !c.template_params.is_empty())
+            {
+                let class_vec: Vec<ClassInfo> =
+                    classes.into_iter().map(Arc::unwrap_or_clone).collect();
+                return ResolvedType::from_classes_with_hint(class_vec, h);
             }
+
+            classes
+                .into_iter()
+                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                .collect()
         }
 
         // ── Property chain ──────────────────────────────────────

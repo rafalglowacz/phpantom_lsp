@@ -687,6 +687,7 @@ mod tests {
             deprecation_message: None,
             deprecated_replacement: None,
             template_params: vec![],
+            template_param_bounds: HashMap::new(),
             template_bindings: vec![],
             throws: Vec::new(),
             is_polyfill: false,

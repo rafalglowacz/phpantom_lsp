@@ -3508,9 +3508,16 @@ fn is_scalar_name(name: &str) -> bool {
 /// interface, or enum names (as opposed to scalar types, keywords,
 /// or pseudo-types).
 ///
-/// This is used as a positive-space guard: only names that pass this
-/// check are treated as class-like. Unknown pseudo-types fail closed
-/// (not class-like) rather than open.
+/// This is used as a positive-space guard in the `"object"` subtype
+/// arm of [`is_named_subtype`]: only names that pass this check are
+/// treated as class-like (and therefore subtypes of `object`).
+///
+/// Names in [`is_scalar_name`] are excluded (not class-like).  Any
+/// remaining identifier that starts with a letter or `_` is assumed
+/// to be a class name.  This means unknown pseudo-types that are NOT
+/// in `is_scalar_name` fail **open** (treated as class-like).  When
+/// new PHPStan pseudo-types are introduced, they must be added to
+/// `is_scalar_name` to avoid being misclassified as class names.
 fn is_class_like_name(name: &str) -> bool {
     // FQN with namespace separator — definitely a class.
     if name.contains('\\') {
@@ -3520,9 +3527,11 @@ fn is_class_like_name(name: &str) -> bool {
     if is_scalar_name(name) {
         return false;
     }
-    // Must start with an uppercase letter to look like a class name.
-    // Pseudo-types like "never", "void", "resource" are lowercase.
-    name.starts_with(|c: char| c.is_ascii_uppercase())
+    // After filtering out all known scalars, keywords, and pseudo-types,
+    // any remaining name that starts with a valid PHP identifier character
+    // is treated as a class name. PHP allows lowercase class names
+    // (e.g. finfo, simplexmlelement), so we don't require uppercase.
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
 }
 
 /// Map a PHPStan/docblock type name to its native PHP equivalent.
