@@ -938,6 +938,7 @@ impl Backend {
 
         let class_loader = self.class_loader(ctx);
         let function_loader = self.function_loader(ctx);
+        let meta_guard = self.phpstorm_meta.read();
 
         let resolved = ResolvedType::into_classes(
             crate::completion::variable::resolution::resolve_variable_types(
@@ -948,6 +949,7 @@ impl Backend {
                 cursor_offset,
                 &class_loader,
                 Loaders::with_function(Some(&function_loader)),
+                Some(&meta_guard),
             ),
         );
 

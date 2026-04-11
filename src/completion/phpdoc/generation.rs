@@ -1625,6 +1625,7 @@ pub(crate) fn infer_inline_variable_type(
         all_classes,
         class_loader,
         crate::completion::resolver::Loaders::with_function(function_loader),
+        None,
     )
 }
 

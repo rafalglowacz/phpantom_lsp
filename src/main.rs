@@ -209,6 +209,10 @@ async fn main() {
                 .with_writer(std::io::stderr)
                 .init();
 
+            tracing::info!(
+                "PHPantom LSP started (stdio). Logs go to stderr; indexing runs after initialize/initialized."
+            );
+
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
 

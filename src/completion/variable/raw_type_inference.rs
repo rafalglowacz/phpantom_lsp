@@ -142,6 +142,7 @@ fn infer_element_type<'b>(value: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>)
                 ctx.all_classes,
                 ctx.class_loader,
                 crate::completion::resolver::Loaders::with_function(ctx.function_loader()),
+                ctx.phpstorm_meta,
             )
         }
         // ── Parenthesized ──
@@ -270,6 +271,41 @@ pub(in crate::completion) fn extract_argument_text(
         content[left..right].trim().to_string()
     } else {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod extract_argument_text_tests {
+    use mago_span::HasSpan;
+    use mago_syntax::ast::*;
+
+    use crate::parser::with_parsed_program;
+
+    use super::extract_argument_text;
+
+    #[test]
+    fn app_make_chain_extracts_make_args() {
+        let content = "<?php\n$x = app()->make(LogManager::class);\n";
+        with_parsed_program(content, "extract_argument_text_tests", |program, content| {
+            let mut assign_rhs = None;
+            for stmt in program.statements.iter() {
+                let Statement::Expression(es) = stmt else {
+                    continue;
+                };
+                if let Expression::Assignment(a) = es.expression {
+                    assign_rhs = Some(a.rhs);
+                    break;
+                }
+            }
+            let rhs = assign_rhs.expect("assignment");
+            let Expression::Call(Call::Method(mc)) = rhs else {
+                panic!("expected outer call to be method call, got {:?}", rhs);
+            };
+            let mname = &content[mc.method.span().start.offset as usize..mc.method.span().end.offset as usize];
+            assert_eq!(mname, "make");
+            let t = extract_argument_text(&mc.argument_list, content);
+            assert_eq!(t, "LogManager::class", "extract_argument_text for app()->make(...): got {:?}", t);
+        });
     }
 }
 

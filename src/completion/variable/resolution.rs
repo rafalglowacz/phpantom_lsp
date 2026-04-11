@@ -165,6 +165,7 @@ pub(crate) fn resolve_variable_types(
     cursor_offset: u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Vec<ResolvedType> {
     // ── Depth guard ─────────────────────────────────────────────
     let depth = VAR_RESOLUTION_DEPTH.with(|d| {
@@ -189,7 +190,7 @@ pub(crate) fn resolve_variable_types(
             resolved_class_cache: None,
             enclosing_return_type: None,
             branch_aware: false,
-            phpstorm_meta: None,
+            phpstorm_meta,
         };
 
         resolve_variable_in_statements(program.statements.iter(), &ctx)
@@ -214,6 +215,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
     cursor_offset: u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Vec<ResolvedType> {
     // ── Depth guard (same as resolve_variable_types) ────────────
     let depth = VAR_RESOLUTION_DEPTH.with(|d| {
@@ -241,7 +243,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
                 resolved_class_cache: None,
                 enclosing_return_type: None,
                 branch_aware: true,
-                phpstorm_meta: None,
+                phpstorm_meta,
             };
 
             resolve_variable_in_statements(program.statements.iter(), &ctx)
@@ -3205,6 +3207,7 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
             offset as u32,
             ctx.class_loader,
             Loaders::with_function(ctx.function_loader()),
+            ctx.phpstorm_meta,
         );
         if !resolved.is_empty() {
             let joined = crate::types::ResolvedType::types_joined(&resolved);

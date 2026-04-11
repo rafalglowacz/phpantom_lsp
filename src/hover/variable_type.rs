@@ -84,6 +84,7 @@ pub(crate) fn resolve_variable_type_string(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Option<String> {
     // 1. Inline @var override: `/** @var Type $var */`
     //
@@ -171,6 +172,7 @@ pub(crate) fn resolve_variable_type_string(
         cursor_offset,
         class_loader,
         loaders,
+        phpstorm_meta,
     );
     if !resolved.is_empty() {
         let joined = ResolvedType::type_strings_joined(&resolved);
@@ -1010,6 +1012,7 @@ fn resolve_expression_to_classes(
                 cursor_offset,
                 class_loader,
                 Loaders::default(),
+                None,
             ),
         );
         if !types.is_empty() {

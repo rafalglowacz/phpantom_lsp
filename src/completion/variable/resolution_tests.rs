@@ -236,6 +236,7 @@ function test() {
         cursor_offset,
         &class_loader,
         Loaders::default(),
+        None,
     ));
 
     let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();
@@ -371,6 +372,7 @@ function test() {
         cursor_offset,
         &class_loader,
         Loaders::default(),
+        None,
     ));
 
     let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();
@@ -405,6 +407,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $data to a type");
@@ -440,6 +443,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $config to a type");
@@ -472,6 +476,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $data to a type");
@@ -520,6 +525,7 @@ function test() {
         cursor_offset,
         &class_loader,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $items to a type");
@@ -555,6 +561,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $items to a type");
@@ -586,6 +593,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $items to a type");
@@ -619,6 +627,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     assert!(!results.is_empty(), "Should resolve $x to a type");
@@ -650,6 +659,7 @@ function test() {
         cursor_offset,
         &|_| None,
         Loaders::default(),
+        None,
     );
 
     // Numeric keys are not shape entries, so the type should stay as
@@ -746,6 +756,7 @@ class LoggedConnection extends BaseConnector {
         cursor_offset,
         &class_loader,
         Loaders::default(),
+        None,
     ));
 
     let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();

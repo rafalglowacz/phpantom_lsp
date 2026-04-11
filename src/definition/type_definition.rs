@@ -48,15 +48,19 @@ impl Backend {
         let function_loader = self.function_loader(&ctx);
 
         let type_names: Vec<String> = match &symbol.kind {
-            SymbolKind::Variable { name } => resolve_variable_type_names(
-                name,
-                content,
-                offset,
-                current_class,
-                &ctx,
-                &class_loader,
-                &function_loader,
-            ),
+            SymbolKind::Variable { name } => {
+                let meta_guard = self.phpstorm_meta.read();
+                resolve_variable_type_names(
+                    name,
+                    content,
+                    offset,
+                    current_class,
+                    &ctx,
+                    &class_loader,
+                    &function_loader,
+                    Some(&meta_guard),
+                )
+            }
 
             SymbolKind::MemberAccess {
                 subject_text,
@@ -275,6 +279,7 @@ fn resolve_variable_type_names(
     ctx: &FileContext,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: &dyn Fn(&str) -> Option<FunctionInfo>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Vec<String> {
     let var_name = format!("${}", name);
 
@@ -295,6 +300,7 @@ fn resolve_variable_type_names(
         &ctx.classes,
         class_loader,
         crate::completion::resolver::Loaders::with_function(Some(function_loader)),
+        phpstorm_meta,
     ) {
         return PhpType::parse(&type_str).top_level_class_names();
     }
@@ -318,6 +324,7 @@ fn resolve_variable_type_names(
             cursor_offset,
             class_loader,
             Loaders::with_function(Some(function_loader)),
+            phpstorm_meta,
         ),
     );
 

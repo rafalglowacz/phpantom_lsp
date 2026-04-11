@@ -460,6 +460,7 @@ pub(crate) fn infer_return_type(
                     expr_offset,
                     class_loader,
                     Loaders::with_function(function_loader),
+                    None,
                 );
                 let type_str = ResolvedType::type_strings_joined(&results);
                 if !type_str.is_empty() {

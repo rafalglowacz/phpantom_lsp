@@ -215,6 +215,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
             foreach_offset,
             ctx.class_loader,
             Loaders::with_function(ctx.function_loader()),
+            ctx.phpstorm_meta,
         );
         if resolved.is_empty() {
             None
@@ -376,6 +377,7 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
                 foreach_offset,
                 ctx.class_loader,
                 Loaders::with_function(ctx.function_loader()),
+                ctx.phpstorm_meta,
             );
             if resolved.is_empty() {
                 None

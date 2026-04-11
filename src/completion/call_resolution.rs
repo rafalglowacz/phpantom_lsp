@@ -1286,6 +1286,33 @@ impl Backend {
         subs
     }
 
+    /// Expand a bare class name using the current file's `use` map and namespace
+    /// (same idea as [`Backend::resolve_class_name`] but returns an FQN string).
+    fn expand_unqualified_class_name_via_file(short: &str, ctx: &ResolutionCtx<'_>) -> Option<String> {
+        crate::parser::with_parsed_program(ctx.content, "expand_unqualified_class_name_via_file", |program, _| {
+            let mut use_map = HashMap::new();
+            Backend::extract_use_statements_from_statements(program.statements.iter(), &mut use_map);
+            let file_ns = Backend::extract_namespace_from_statements(program.statements.iter());
+
+            if let Some(fqn) = use_map.get(short) {
+                return Some(crate::phpstorm_meta::normalize_fqn(fqn));
+            }
+            if let Some(c) = find_class_by_name(ctx.all_classes, short) {
+                return Some(c.fqn());
+            }
+            if let Some(ns) = file_ns {
+                let qualified = format!("{}\\{}", ns, short);
+                if (ctx.class_loader)(&qualified).is_some() {
+                    return Some(qualified);
+                }
+            }
+            if (ctx.class_loader)(short).is_some() {
+                return Some(short.to_string());
+            }
+            None
+        })
+    }
+
     /// Resolve an argument text string to a type name.
     ///
     /// Handles common patterns:
@@ -1300,14 +1327,20 @@ impl Backend {
     ) -> Option<String> {
         let trimmed = arg_text.trim();
 
-        // ClassName::class → ClassName
+        // ClassName::class → ClassName (expand `use` imports + namespace for bare names)
         if let Some(name) = trimmed.strip_suffix("::class")
             && !name.is_empty()
             && name
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
         {
-            return Some(name.to_string());
+            let mut resolved = name.to_string();
+            if !resolved.contains('\\') {
+                if let Some(expanded) = Self::expand_unqualified_class_name_via_file(&resolved, ctx) {
+                    resolved = expanded;
+                }
+            }
+            return Some(resolved);
         }
 
         // new ClassName(…) → ClassName
@@ -1499,6 +1532,47 @@ impl Backend {
         }
     }
 
+    /// PhpStorm `map([...])` values may use `@` as a placeholder meaning "the type of the
+    /// call argument" (same idea as `type(0)` on `override(Class::make(0), …)`).
+    fn phpstorm_map_value_to_classes(
+        type_str: &str,
+        text_args: &str,
+        ctx: &ResolutionCtx<'_>,
+        owner_class: &str,
+        all_classes: &[Arc<ClassInfo>],
+        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    ) -> Vec<Arc<ClassInfo>> {
+        if type_str == "@" {
+            let args = split_text_args(text_args);
+            let Some(arg) = args.first().map(|s| s.trim()) else {
+                return vec![];
+            };
+            let Some(ty) = Self::resolve_arg_text_to_type(arg, ctx) else {
+                return vec![];
+            };
+            let parsed = PhpType::parse(&ty);
+            return super::type_resolution::type_hint_to_classes_typed(
+                &parsed,
+                owner_class,
+                all_classes,
+                class_loader,
+            )
+            .into_iter()
+            .map(Arc::new)
+            .collect();
+        }
+        let parsed = PhpType::parse(type_str);
+        super::type_resolution::type_hint_to_classes_typed(
+            &parsed,
+            owner_class,
+            all_classes,
+            class_loader,
+        )
+        .into_iter()
+        .map(Arc::new)
+        .collect()
+    }
+
     fn phpstorm_resolve_map_classes(
         entries: &[(MapLookupKey, String)],
         text_args: &str,
@@ -1514,16 +1588,14 @@ impl Backend {
                 continue;
             }
             if Self::phpstorm_map_key_matches(key, arg0, ctx) {
-                let parsed = PhpType::parse(type_str);
-                let v: Vec<Arc<ClassInfo>> = super::type_resolution::type_hint_to_classes_typed(
-                    &parsed,
+                let v = Self::phpstorm_map_value_to_classes(
+                    type_str,
+                    text_args,
+                    ctx,
                     owner_class,
                     all_classes,
                     class_loader,
-                )
-                .into_iter()
-                .map(Arc::new)
-                .collect();
+                );
                 if !v.is_empty() {
                     return v;
                 }
@@ -1531,16 +1603,14 @@ impl Backend {
         }
         for (key, type_str) in entries {
             if matches!(key, MapLookupKey::Default) {
-                let parsed = PhpType::parse(type_str);
-                return super::type_resolution::type_hint_to_classes_typed(
-                    &parsed,
+                return Self::phpstorm_map_value_to_classes(
+                    type_str,
+                    text_args,
+                    ctx,
                     owner_class,
                     all_classes,
                     class_loader,
-                )
-                .into_iter()
-                .map(Arc::new)
-                .collect();
+                );
             }
         }
         vec![]
@@ -1655,6 +1725,7 @@ impl Backend {
                 ctx.cursor_offset,
                 class_loader,
                 Loaders::with_function(ctx.function_loader),
+                ctx.phpstorm_meta,
             );
             if !resolved.is_empty() {
                 return Some(ResolvedType::type_strings_joined(&resolved));

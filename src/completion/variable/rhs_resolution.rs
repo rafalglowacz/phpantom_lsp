@@ -241,6 +241,7 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
                 ctx.cursor_offset,
                 ctx.class_loader,
                 Loaders::with_function(ctx.function_loader()),
+                ctx.phpstorm_meta,
             )
         }
         // ── Concatenation: `"prefix" . $var` → string ───────────────
@@ -822,6 +823,7 @@ fn resolve_rhs_array_access<'b>(
                     access_offset as u32,
                     ctx.class_loader,
                     Loaders::with_function(ctx.function_loader()),
+                    ctx.phpstorm_meta,
                 );
                 if resolved.is_empty() {
                     None
@@ -1102,6 +1104,7 @@ fn resolve_arg_variable_raw_type(
         rctx.cursor_offset,
         rctx.class_loader,
         Loaders::with_function(rctx.function_loader),
+        rctx.phpstorm_meta,
     );
     if resolved.is_empty() {
         None
@@ -1587,6 +1590,7 @@ fn resolve_rhs_method_call_inner<'b>(
                 object.span().end.offset,
                 ctx.class_loader,
                 crate::completion::resolver::Loaders::with_function(ctx.function_loader()),
+                ctx.phpstorm_meta,
             );
             if !resolved.is_empty() {
                 let classes = ResolvedType::into_classes(resolved.clone());
@@ -1675,12 +1679,29 @@ fn resolve_rhs_method_call_inner<'b>(
         );
         if !results.is_empty() {
             let classes: Vec<ClassInfo> = results.into_iter().map(Arc::unwrap_or_clone).collect();
-            return match ret_type_string {
-                Some(ref hint) => {
-                    ResolvedType::from_classes_with_hint(classes, PhpType::parse(hint))
-                }
+            // Use the declared return type as the display hint only when it is
+            // a class-like type that adds information over the resolved class
+            // name itself (e.g. `Builder<Article>` preserves generic params).
+            // When the declared type is non-class (e.g. `mixed`, `object`,
+            // scalars), it would shadow the concrete type resolved via
+            // PhpStorm meta or template substitution, so we skip it and let
+            // `from_classes` use the class name directly.
+            let informative_hint = ret_type_string.as_ref().and_then(|hint| {
+                let parsed = PhpType::parse(hint);
+                let resolves_to_class = !crate::completion::type_resolution::type_hint_to_classes_typed(
+                    &parsed,
+                    &owner.name,
+                    ctx.all_classes,
+                    ctx.class_loader,
+                )
+                .is_empty();
+                if resolves_to_class { Some(parsed) } else { None }
+            });
+            let result = match informative_hint {
+                Some(hint) => ResolvedType::from_classes_with_hint(classes, hint),
                 None => ResolvedType::from_classes(classes),
             };
+            return result;
         }
 
         // The method has a return type string but `type_hint_to_classes`

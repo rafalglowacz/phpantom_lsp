@@ -71,6 +71,7 @@ impl Backend {
         let class_loader = self.class_loader_with(&local_classes, &file_use_map, &file_namespace);
         let function_loader = self.function_loader_with(&file_use_map, &file_namespace);
         let cache = &self.resolved_class_cache;
+        let meta_guard = self.phpstorm_meta.read();
 
         // ── Walk every symbol span ──────────────────────────────────────
         for span in &symbol_map.spans {
@@ -154,6 +155,7 @@ impl Backend {
                                     &local_classes,
                                     &class_loader,
                                     &function_loader,
+                                    Some(&meta_guard),
                                 )
                             });
 
@@ -416,6 +418,7 @@ fn resolve_variable_subject(
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: &dyn Fn(&str) -> Option<crate::types::FunctionInfo>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Option<ClassInfo> {
     let var_name = subject_text.trim();
 
@@ -438,6 +441,7 @@ fn resolve_variable_subject(
         access_offset,
         class_loader,
         Loaders::with_function(Some(function_loader)),
+        phpstorm_meta,
     ));
 
     results.into_iter().next()

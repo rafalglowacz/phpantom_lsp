@@ -331,3 +331,254 @@ async fn completion_phpstorm_meta_map_keys() {
         methods_d
     );
 }
+
+/// `map(['' => '@'])` — JetBrains placeholder meaning "type of the call argument" (here: `type(0)`).
+#[tokio::test]
+async fn completion_phpstorm_meta_map_at_placeholder() {
+    let factory = concat!(
+        "<?php\n",
+        "namespace Demo;\n",
+        "class Factory {\n",
+        "    public static function make(string $abstract) {\n",
+        "        return null;\n",
+        "    }\n",
+        "}\n",
+    );
+    let meta = concat!(
+        "<?php\n",
+        "namespace PHPSTORM_META {\n",
+        "    override(\\Demo\\Factory::make(0), map(['' => '@']));\n",
+        "}\n",
+    );
+    let site = concat!(
+        "<?php\n",
+        "namespace App;\n",
+        "class X {\n",
+        "    function t() {\n",
+        "        \\Demo\\Factory::make(\\Demo\\Alpha::class)->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let (backend, dir) = create_psr4_workspace(
+        COMPOSER,
+        &[
+            ("src/Alpha.php", ALPHA),
+            ("src/Factory.php", factory),
+            (".phpstorm.meta.php", meta),
+            ("site.php", site),
+        ],
+    );
+
+    backend.initialized(InitializedParams {}).await;
+
+    let uri = site_uri();
+    let text = std::fs::read_to_string(dir.path().join("site.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text,
+            },
+        })
+        .await;
+
+    let line = "        \\Demo\\Factory::make(\\Demo\\Alpha::class)->";
+    let col = line.chars().count() as u32;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 4,
+                    character: col,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    let items = match result {
+        Some(CompletionResponse::Array(items)) => items,
+        other => panic!("expected completion list, got {:?}", other),
+    };
+    let methods: Vec<&str> = items
+        .iter()
+        .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+        .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+        .collect();
+    assert!(
+        methods.contains(&"alphaMethod"),
+        "map @ placeholder should resolve like type(0), got {:?}",
+        methods
+    );
+}
+
+/// Hover on `$x` should reflect `map(['' => '@'])` (same metadata as completion).
+#[tokio::test]
+async fn hover_phpstorm_meta_map_at_placeholder() {
+    let factory = concat!(
+        "<?php\n",
+        "namespace Demo;\n",
+        "class Factory {\n",
+        "    public static function make(string $abstract) {\n",
+        "        return null;\n",
+        "    }\n",
+        "}\n",
+    );
+    let meta = concat!(
+        "<?php\n",
+        "namespace PHPSTORM_META {\n",
+        "    override(\\Demo\\Factory::make(0), map(['' => '@']));\n",
+        "}\n",
+    );
+    let site = concat!(
+        "<?php\n",
+        "namespace App;\n",
+        "use Demo\\Alpha;\n",
+        "class X {\n",
+        "    function t() {\n",
+        "        $x = \\Demo\\Factory::make(Alpha::class);\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let (backend, dir) = create_psr4_workspace(
+        COMPOSER,
+        &[
+            ("src/Alpha.php", ALPHA),
+            ("src/Factory.php", factory),
+            (".phpstorm.meta.php", meta),
+            ("site.php", site),
+        ],
+    );
+
+    backend.initialized(InitializedParams {}).await;
+
+    let uri = site_uri();
+    let text = std::fs::read_to_string(dir.path().join("site.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text,
+            },
+        })
+        .await;
+
+    // Cursor on `$` in `$x = ...` (line 5, 0-based)
+    let hover = backend
+        .hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 5,
+                    character: 8,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("expected hover");
+
+    let body = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup hover, got {:?}", other),
+    };
+    assert!(
+        body.contains("Alpha") && body.contains("$x"),
+        "hover should show Demo\\\\Alpha for $x, got {}",
+        body
+    );
+}
+
+/// Instance method `->make()` (not static `::make`) — same PhpStorm override key `Class::make`.
+#[tokio::test]
+async fn hover_phpstorm_meta_map_at_instance_make_chain() {
+    let factory = concat!(
+        "<?php\n",
+        "namespace Demo;\n",
+        "class Factory {\n",
+        "    public function make(string $abstract) {\n",
+        "        return null;\n",
+        "    }\n",
+        "}\n",
+    );
+    let meta = concat!(
+        "<?php\n",
+        "namespace PHPSTORM_META {\n",
+        "    override(\\Demo\\Factory::make(0), map(['' => '@']));\n",
+        "}\n",
+    );
+    let site = concat!(
+        "<?php\n",
+        "namespace App;\n",
+        "use Demo\\Alpha;\n",
+        "class X {\n",
+        "    function t() {\n",
+        "        $f = new \\Demo\\Factory();\n",
+        "        $x = $f->make(Alpha::class);\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let (backend, dir) = create_psr4_workspace(
+        COMPOSER,
+        &[
+            ("src/Alpha.php", ALPHA),
+            ("src/Factory.php", factory),
+            (".phpstorm.meta.php", meta),
+            ("site.php", site),
+        ],
+    );
+
+    backend.initialized(InitializedParams {}).await;
+
+    let uri = site_uri();
+    let text = std::fs::read_to_string(dir.path().join("site.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text,
+            },
+        })
+        .await;
+
+    let hover = backend
+        .hover(HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 6,
+                    character: 8,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        })
+        .await
+        .unwrap()
+        .expect("expected hover");
+
+    let body = match hover.contents {
+        HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup hover, got {:?}", other),
+    };
+    assert!(
+        body.contains("Alpha") && body.contains("$x"),
+        "instance ->make() with map @ should resolve $x to Alpha, got {}",
+        body
+    );
+}
+

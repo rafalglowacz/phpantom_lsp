@@ -449,6 +449,7 @@ fn resolve_var_type(
 
     let current_class = find_class_at_offset(&ctx.classes, cursor_offset);
 
+    let meta_guard = backend.phpstorm_meta.read();
     crate::hover::variable_type::resolve_variable_type_string(
         var_name,
         content,
@@ -457,6 +458,7 @@ fn resolve_var_type(
         &ctx.classes,
         &class_loader,
         loaders,
+        Some(&meta_guard),
     )
 }
 

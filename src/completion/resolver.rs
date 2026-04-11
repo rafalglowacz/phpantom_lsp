@@ -806,6 +806,7 @@ pub(crate) fn resolve_target_classes_expr(
                     ctx.cursor_offset,
                     class_loader,
                     Loaders::with_function(ctx.function_loader),
+                    ctx.phpstorm_meta,
                 );
                 if resolved.is_empty() {
                     None
@@ -1059,6 +1060,7 @@ fn resolve_subject_outcome_variable(var_name: &str, ctx: &ResolutionCtx<'_>) -> 
         ctx.cursor_offset,
         ctx.class_loader,
         Loaders::with_function(ctx.function_loader),
+        ctx.phpstorm_meta,
     );
 
     if !resolved.is_empty() {
@@ -1090,6 +1092,7 @@ fn resolve_subject_outcome_variable(var_name: &str, ctx: &ResolutionCtx<'_>) -> 
         ctx.all_classes,
         ctx.class_loader,
         Loaders::with_function(ctx.function_loader),
+        ctx.phpstorm_meta,
     ) && let Some(unresolved) = check_unresolvable_class_name(&raw_type, ctx.class_loader)
     {
         return SubjectOutcome::UnresolvableClass(unresolved);
@@ -1309,6 +1312,7 @@ fn resolve_variable_fallback(
         ctx.cursor_offset,
         class_loader,
         Loaders::with_function(function_loader),
+        ctx.phpstorm_meta,
     );
 
     // ── `class-string<T>` unwrapping for `$var::` access ────────
