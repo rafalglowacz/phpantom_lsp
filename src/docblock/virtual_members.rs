@@ -70,10 +70,15 @@ pub fn extract_property_tags(docblock: &str) -> Vec<(String, Option<PhpType>)> {
         // generics like `Collection<int, Model>` are treated as one unit.
         let (type_token, remainder) = split_type_token(desc);
 
-        // Find the `$name` in the remainder.
+        // Find the `$name` in the remainder.  Fall back to the first
+        // bare token when the `$` sigil is absent (e.g. `@property int id`),
+        // which is a common real-world omission.
         let prop_name = match remainder.split_whitespace().find(|t| t.starts_with('$')) {
             Some(name) => name,
-            None => continue,
+            None => match remainder.split_whitespace().next() {
+                Some(token) => token,
+                None => continue,
+            },
         };
 
         let name = prop_name.strip_prefix('$').unwrap_or(prop_name);

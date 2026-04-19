@@ -186,6 +186,18 @@ fn provides_property_read_and_write_tags() {
 }
 
 #[test]
+fn property_tag_without_dollar_sigil() {
+    let provider = PHPDocProvider;
+    let mut class = make_class("Model");
+    class.class_docblock = Some("/** @property int id */".to_string());
+
+    let result = provider.provide(&class, &no_loader, None);
+    assert_eq!(result.properties.len(), 1, "sigil-less @property should be accepted");
+    assert_eq!(result.properties[0].name, "id");
+    assert_eq!(result.properties[0].type_hint_str().as_deref(), Some("int"));
+}
+
+#[test]
 fn property_tags_are_public_and_non_static() {
     let provider = PHPDocProvider;
     let mut class = make_class("Model");
