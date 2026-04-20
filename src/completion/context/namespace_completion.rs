@@ -94,7 +94,7 @@ fn infer_namespaces_from_path(
     }
 
     // Sort by specificity descending (longest base_path first).
-    results.sort_by(|a, b| b.specificity.cmp(&a.specificity));
+    results.sort_by_key(|b| std::cmp::Reverse(b.specificity));
     results
 }
 

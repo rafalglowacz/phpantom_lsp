@@ -259,20 +259,20 @@ impl Backend {
                     });
                 }
                 // Also match property declarations that appear as Variable spans.
-                SymbolKind::Variable { name } if name == target_name => {
-                    if symbol_map
-                        .var_def_kind_at(name, span.start)
-                        .is_some_and(|k| *k == VarDefKind::Property)
-                    {
-                        highlights.push(DocumentHighlight {
-                            range: byte_range_to_lsp_range(
-                                content,
-                                span.start as usize,
-                                span.end as usize,
-                            ),
-                            kind: Some(DocumentHighlightKind::WRITE),
-                        });
-                    }
+                SymbolKind::Variable { name }
+                    if name == target_name
+                        && symbol_map
+                            .var_def_kind_at(name, span.start)
+                            .is_some_and(|k| *k == VarDefKind::Property) =>
+                {
+                    highlights.push(DocumentHighlight {
+                        range: byte_range_to_lsp_range(
+                            content,
+                            span.start as usize,
+                            span.end as usize,
+                        ),
+                        kind: Some(DocumentHighlightKind::WRITE),
+                    });
                 }
                 _ => {}
             }

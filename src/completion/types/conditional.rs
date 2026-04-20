@@ -365,11 +365,11 @@ pub fn split_text_args(text: &str) -> Vec<&str> {
             continue;
         }
         match ch {
-            '\\' => {
+            '\\'
                 // Only treat as escape if inside a quote
-                if in_single_quote || in_double_quote {
-                    prev_was_backslash = true;
-                }
+                if in_single_quote || in_double_quote =>
+            {
+                prev_was_backslash = true;
             }
             '\'' if !in_double_quote => {
                 in_single_quote = !in_single_quote;

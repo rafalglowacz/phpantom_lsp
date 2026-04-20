@@ -579,20 +579,25 @@ fn expr_contains_enclosing_closure<'b>(
             }
             // Also check the object/class expression for method calls.
             match call {
-                Call::Method(mc) => {
-                    if expr_contains_enclosing_closure(content, mc.object, cursor_offset, vars) {
-                        return true;
-                    }
+                Call::Method(mc)
+                    if expr_contains_enclosing_closure(content, mc.object, cursor_offset, vars) =>
+                {
+                    return true;
                 }
-                Call::NullSafeMethod(nmc) => {
-                    if expr_contains_enclosing_closure(content, nmc.object, cursor_offset, vars) {
-                        return true;
-                    }
+                Call::NullSafeMethod(nmc)
+                    if expr_contains_enclosing_closure(
+                        content,
+                        nmc.object,
+                        cursor_offset,
+                        vars,
+                    ) =>
+                {
+                    return true;
                 }
-                Call::StaticMethod(sc) => {
-                    if expr_contains_enclosing_closure(content, sc.class, cursor_offset, vars) {
-                        return true;
-                    }
+                Call::StaticMethod(sc)
+                    if expr_contains_enclosing_closure(content, sc.class, cursor_offset, vars) =>
+                {
+                    return true;
                 }
                 _ => {}
             }
@@ -605,20 +610,35 @@ fn expr_contains_enclosing_closure<'b>(
         Expression::Array(arr) => {
             for elem in arr.elements.iter() {
                 match elem {
-                    ArrayElement::KeyValue(kv) => {
-                        if expr_contains_enclosing_closure(content, kv.value, cursor_offset, vars) {
-                            return true;
-                        }
+                    ArrayElement::KeyValue(kv)
+                        if expr_contains_enclosing_closure(
+                            content,
+                            kv.value,
+                            cursor_offset,
+                            vars,
+                        ) =>
+                    {
+                        return true;
                     }
-                    ArrayElement::Value(v) => {
-                        if expr_contains_enclosing_closure(content, v.value, cursor_offset, vars) {
-                            return true;
-                        }
+                    ArrayElement::Value(v)
+                        if expr_contains_enclosing_closure(
+                            content,
+                            v.value,
+                            cursor_offset,
+                            vars,
+                        ) =>
+                    {
+                        return true;
                     }
-                    ArrayElement::Variadic(v) => {
-                        if expr_contains_enclosing_closure(content, v.value, cursor_offset, vars) {
-                            return true;
-                        }
+                    ArrayElement::Variadic(v)
+                        if expr_contains_enclosing_closure(
+                            content,
+                            v.value,
+                            cursor_offset,
+                            vars,
+                        ) =>
+                    {
+                        return true;
                     }
                     _ => {}
                 }
@@ -628,20 +648,35 @@ fn expr_contains_enclosing_closure<'b>(
         Expression::LegacyArray(arr) => {
             for elem in arr.elements.iter() {
                 match elem {
-                    ArrayElement::KeyValue(kv) => {
-                        if expr_contains_enclosing_closure(content, kv.value, cursor_offset, vars) {
-                            return true;
-                        }
+                    ArrayElement::KeyValue(kv)
+                        if expr_contains_enclosing_closure(
+                            content,
+                            kv.value,
+                            cursor_offset,
+                            vars,
+                        ) =>
+                    {
+                        return true;
                     }
-                    ArrayElement::Value(v) => {
-                        if expr_contains_enclosing_closure(content, v.value, cursor_offset, vars) {
-                            return true;
-                        }
+                    ArrayElement::Value(v)
+                        if expr_contains_enclosing_closure(
+                            content,
+                            v.value,
+                            cursor_offset,
+                            vars,
+                        ) =>
+                    {
+                        return true;
                     }
-                    ArrayElement::Variadic(v) => {
-                        if expr_contains_enclosing_closure(content, v.value, cursor_offset, vars) {
-                            return true;
-                        }
+                    ArrayElement::Variadic(v)
+                        if expr_contains_enclosing_closure(
+                            content,
+                            v.value,
+                            cursor_offset,
+                            vars,
+                        ) =>
+                    {
+                        return true;
                     }
                     _ => {}
                 }

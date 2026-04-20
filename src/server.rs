@@ -1344,7 +1344,7 @@ impl Backend {
         // longest-prefix-first matching works.
         {
             let mut psr4 = self.psr4_mappings.write();
-            psr4.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+            psr4.sort_by_key(|b| std::cmp::Reverse(b.prefix.len()));
         }
 
         // ── Full-scan loose files ───────────────────────────────────

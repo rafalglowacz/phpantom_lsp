@@ -307,16 +307,14 @@ fn find_standalone_function_by_docblock<'a>(
 ) -> Option<FunctionWithDocblock> {
     for stmt in statements.iter() {
         match stmt {
-            Statement::Function(func) => {
-                if cursor_on_docblock(cursor, func, trivia, content) {
-                    return build_info_for_function_like(
-                        func.span().start.offset,
-                        &func.parameter_list,
-                        func.return_type_hint.as_ref(),
-                        trivia,
-                        content,
-                    );
-                }
+            Statement::Function(func) if cursor_on_docblock(cursor, func, trivia, content) => {
+                return build_info_for_function_like(
+                    func.span().start.offset,
+                    &func.parameter_list,
+                    func.return_type_hint.as_ref(),
+                    trivia,
+                    content,
+                );
             }
             Statement::Namespace(ns) => {
                 for s in ns.statements().iter() {
@@ -1155,17 +1153,14 @@ fn find_param_insert_position(lines: &[DocLine]) -> usize {
             DocLine::Text(_) | DocLine::Empty => {
                 last_text_or_empty = Some(i);
             }
-            DocLine::Return(_) => {
-                if first_return_or_throws.is_none() {
-                    first_return_or_throws = Some(i);
-                }
+            DocLine::Return(_) if first_return_or_throws.is_none() => {
+                first_return_or_throws = Some(i);
             }
-            DocLine::OtherTag(text) => {
+            DocLine::OtherTag(text)
                 if (text.starts_with("@throws") || text.starts_with("@return"))
-                    && first_return_or_throws.is_none()
-                {
-                    first_return_or_throws = Some(i);
-                }
+                    && first_return_or_throws.is_none() =>
+            {
+                first_return_or_throws = Some(i);
             }
             _ => {}
         }
@@ -1202,10 +1197,8 @@ fn find_throws_insert_position(lines: &[DocLine]) -> usize {
             DocLine::OtherTag(text) if text.starts_with("@throws") => {
                 last_throws = Some(i);
             }
-            DocLine::Return(_) => {
-                if first_return.is_none() {
-                    first_return = Some(i);
-                }
+            DocLine::Return(_) if first_return.is_none() => {
+                first_return = Some(i);
             }
             _ => {}
         }

@@ -853,19 +853,17 @@ fn find_var_in_destructuring_iter<'a>(
                     return Some(r);
                 }
             }
-            Expression::Variable(Variable::Direct(dv)) => {
-                if dv.name == var_name {
-                    let var_start = dv.span.start.offset;
-                    let var_end = dv.span.end.offset;
-                    if cursor_offset >= var_start && cursor_offset < var_end {
-                        return Some(ExprDefResult::AtDefinition);
-                    }
-                    if var_start < cursor_offset {
-                        return Some(ExprDefResult::Found(DefSite {
-                            offset: var_start,
-                            end_offset: var_end,
-                        }));
-                    }
+            Expression::Variable(Variable::Direct(dv)) if dv.name == var_name => {
+                let var_start = dv.span.start.offset;
+                let var_end = dv.span.end.offset;
+                if cursor_offset >= var_start && cursor_offset < var_end {
+                    return Some(ExprDefResult::AtDefinition);
+                }
+                if var_start < cursor_offset {
+                    return Some(ExprDefResult::Found(DefSite {
+                        offset: var_start,
+                        end_offset: var_end,
+                    }));
                 }
             }
             _ => {}

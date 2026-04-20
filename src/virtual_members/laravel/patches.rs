@@ -219,19 +219,16 @@ fn patch_db_select_return_types(class: &mut ClassInfo) {
     for method in class.methods.make_mut().iter_mut() {
         let method = Arc::make_mut(method);
         match method.name.as_str() {
-            "select" | "selectFromWriteConnection" | "selectResultSets" => {
+            "select" | "selectFromWriteConnection" | "selectResultSets"
                 if method
                     .return_type
                     .as_ref()
-                    .is_some_and(|rt| rt.is_bare_array())
-                {
-                    method.return_type = Some(array_of_std.clone());
-                }
+                    .is_some_and(|rt| rt.is_bare_array()) =>
+            {
+                method.return_type = Some(array_of_std.clone());
             }
-            "selectOne" => {
-                if method.return_type.as_ref().is_some_and(|rt| rt.is_mixed()) {
-                    method.return_type = Some(std_or_null.clone());
-                }
+            "selectOne" if method.return_type.as_ref().is_some_and(|rt| rt.is_mixed()) => {
+                method.return_type = Some(std_or_null.clone());
             }
             _ => {}
         }

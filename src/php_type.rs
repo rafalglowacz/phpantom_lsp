@@ -2083,10 +2083,8 @@ impl PhpType {
     /// params/return, shapes, class-string inner types, etc.
     fn collect_top_level_class_names(&self, names: &mut Vec<String>) {
         match self {
-            PhpType::Named(s) => {
-                if !is_keyword_type(s) && !s.is_empty() && !names.contains(s) {
-                    names.push(s.clone());
-                }
+            PhpType::Named(s) if !is_keyword_type(s) && !s.is_empty() && !names.contains(s) => {
+                names.push(s.clone());
             }
 
             PhpType::Nullable(inner) => inner.collect_top_level_class_names(names),
@@ -2099,10 +2097,10 @@ impl PhpType {
 
             // For generics, only the base name is top-level.
             // `Collection<int, User>` → `["Collection"]`.
-            PhpType::Generic(name, _) => {
-                if !is_keyword_type(name) && !name.is_empty() && !names.contains(name) {
-                    names.push(name.clone());
-                }
+            PhpType::Generic(name, _)
+                if !is_keyword_type(name) && !name.is_empty() && !names.contains(name) =>
+            {
+                names.push(name.clone());
             }
 
             // `User[]` — the inner type is the top-level class.

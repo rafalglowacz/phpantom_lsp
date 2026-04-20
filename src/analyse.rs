@@ -1025,16 +1025,8 @@ const BAR_WIDTH: usize = 28;
 /// Render a PHPStan-style progress bar string:
 /// ` 120/883 [▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░]  13%`
 fn progress_bar(done: usize, total: usize) -> String {
-    let pct = if total == 0 {
-        100
-    } else {
-        (done * 100) / total
-    };
-    let filled = if total == 0 {
-        BAR_WIDTH
-    } else {
-        (done * BAR_WIDTH) / total
-    };
+    let pct = (done * 100).checked_div(total).unwrap_or(100);
+    let filled = (done * BAR_WIDTH).checked_div(total).unwrap_or(BAR_WIDTH);
     let empty = BAR_WIDTH - filled;
 
     format!(
