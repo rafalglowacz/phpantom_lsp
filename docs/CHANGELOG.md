@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Analyzer and LSP no longer hang on files with deeply nested loops.** Files with multiple levels of foreach/while/for inside if-branches caused exponential blowup in the forward walker's two-pass loop strategy. A unified loop-depth guard now bounds re-walks regardless of code path (diagnostics, completion, hover), preventing hangs on all previously stuck files across three test projects.
+- **Analyzer and LSP no longer hang on files with deeply nested loops.** Files with multiple levels of foreach/while/for inside if-branches caused exponential blowup in the forward walker's two-pass loop strategy. A unified loop-depth guard now bounds re-walks regardless of code path (diagnostics, completion, hover), preventing hangs on all previously stuck files across three test projects. The `WALK_DEPTH`, `PROCESS_DEPTH`, and `IN_ARRAY_KEY_ASSIGN` thread-local guards have been removed entirely now that the root causes are fixed structurally.
 
 ### Changed
 
@@ -36,8 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Infinite loop on array key reassignment patterns.** Files containing `$arr['key'] = f($arr['key'])` or similar read-then-write patterns on the same array key no longer hang the analyzer indefinitely.
-- **`analyze` stack overflow on large codebases.** Worker threads in the `analyze` command no longer overflow the stack on projects with deeply nested PHP files.
+- **Infinite loop on array key reassignment patterns.** Files containing `$arr['key'] = f($arr['key'])` or similar read-then-write patterns on the same array key no longer hang the analyzer. The root cause was `resolve_arg_raw_type` bypassing the scope resolver and re-entering the forward walker; it now reads from the in-progress scope instead.
+- **`analyze` stack overflow on large codebases.** Diagnostic worker threads in the `analyze` command no longer need inflated 32 MB stacks. With depth guards and re-entry cycles eliminated, the default stack size suffices.
 - **Analysis crash on large files.** Files with hundreds of class definitions (e.g. single-file playgrounds) no longer crash with a stack overflow during analysis.
 - **`class-string<T>` parameter completion.** Parameters typed as `class-string<T>` with a bounded template (`@template T of Foo`) now resolve to the bound class during completion and diagnostics. Static member access like `$class::KEY` and `$class::from()` finds members on the bound class.
 - **Inherited parameter types propagate to child methods.** When a child method overrides a parent method without its own `@param` docblock, the parent's richer type annotation (e.g. `list<Pen>` vs bare `array`) is now used for completion inside the child method body.

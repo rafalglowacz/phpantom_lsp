@@ -1757,16 +1757,6 @@ impl<'a> ForwardWalkCtx<'a> {
 
 // ─── Forward walk entry point ───────────────────────────────────────────────
 
-// Thread-local depth counter for `walk_body_forward` recursion.
-// Used to detect and break infinite nesting.
-thread_local! {
-    static WALK_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-// Maximum nesting depth for `walk_body_forward`.  PHP code rarely
-// nests beyond 10-15 levels; 50 is a generous safety margin.
-const MAX_WALK_DEPTH: u32 = 50;
-
 thread_local! {
     /// Tracks the current loop nesting depth (foreach, while, for,
     /// do-while).  Used to reduce the number of loop iterations for
@@ -1819,15 +1809,6 @@ pub(crate) fn walk_body_forward<'b>(
     scope: &mut ScopeState,
     ctx: &ForwardWalkCtx<'_>,
 ) {
-    let depth = WALK_DEPTH.with(|d| {
-        let v = d.get() + 1;
-        d.set(v);
-        v
-    });
-    if depth > MAX_WALK_DEPTH {
-        WALK_DEPTH.with(|d| d.set(depth - 1));
-        return;
-    }
     // When the diagnostic scope cache is active, record snapshots at
     // every statement boundary — even inside branches (if/else, try,
     // foreach, loops).  Without this, member accesses inside branch
@@ -1911,8 +1892,6 @@ pub(crate) fn walk_body_forward<'b>(
             record_scope_snapshot(stmt_span.end.offset, scope);
         }
     }
-
-    WALK_DEPTH.with(|d| d.set(depth - 1));
 }
 
 /// Resolve the target variable from a method body using the forward
@@ -2445,13 +2424,6 @@ fn build_type_string_only_result(
 
 // ─── Statement processing ───────────────────────────────────────────────────
 
-// Thread-local depth counter for `process_statement` recursion.
-thread_local! {
-    static PROCESS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
-const MAX_PROCESS_DEPTH: u32 = 80;
-
 /// Process a single statement, updating `scope` with any variable
 /// assignments, narrowing, or control-flow effects.
 fn process_statement<'b>(
@@ -2459,15 +2431,6 @@ fn process_statement<'b>(
     scope: &mut ScopeState,
     ctx: &ForwardWalkCtx<'_>,
 ) {
-    let depth = PROCESS_DEPTH.with(|d| {
-        let v = d.get() + 1;
-        d.set(v);
-        v
-    });
-    if depth > MAX_PROCESS_DEPTH {
-        PROCESS_DEPTH.with(|d| d.set(depth - 1));
-        return;
-    }
     match stmt {
         Statement::Expression(expr_stmt) => {
             process_expression_statement(expr_stmt, scope, ctx);
@@ -2522,7 +2485,6 @@ fn process_statement<'b>(
         }
         _ => {}
     }
-    PROCESS_DEPTH.with(|d| d.set(depth - 1));
 }
 
 // ─── Expression statement handling ──────────────────────────────────────────
@@ -3874,24 +3836,6 @@ fn process_array_key_assignment<'b>(
     scope: &mut ScopeState,
     ctx: &ForwardWalkCtx<'_>,
 ) {
-    // Guard against infinite re-entry.  When `resolve_rhs_with_scope`
-    // triggers re-evaluation of the same array key assignment (e.g.
-    // `$a['k'] = f($a['k'])` where reading `$a['k']` re-enters
-    // through the scope resolver), bail out to break the cycle.
-    thread_local! {
-        static IN_ARRAY_KEY_ASSIGN: Cell<bool> = const { Cell::new(false) };
-    }
-    if IN_ARRAY_KEY_ASSIGN.with(|c| c.get()) {
-        return;
-    }
-    IN_ARRAY_KEY_ASSIGN.with(|c| c.set(true));
-    struct ArrayKeyAssignGuard;
-    impl Drop for ArrayKeyAssignGuard {
-        fn drop(&mut self) {
-            IN_ARRAY_KEY_ASSIGN.with(|c| c.set(false));
-        }
-    }
-    let _guard = ArrayKeyAssignGuard;
     // Delegate to the existing check_expression_for_assignment
     // infrastructure for array key assignments.  This handles
     // both string-keyed shape building and generic element tracking.
@@ -5024,31 +4968,6 @@ fn collect_arglist_variables(
     }
 }
 
-/// Check whether two scope states have the same types for all variables.
-/// Used for fixed-point detection in loop iteration.
-fn scopes_equal(a: &ScopeState, b: &ScopeState) -> bool {
-    if a.locals.len() != b.locals.len() {
-        return false;
-    }
-    for (name, a_types) in &a.locals {
-        match b.locals.get(name) {
-            None => return false,
-            Some(b_types) => {
-                if a_types.len() != b_types.len() {
-                    return false;
-                }
-                // Compare by type_string since ResolvedType may not impl PartialEq.
-                for (at, bt) in a_types.iter().zip(b_types.iter()) {
-                    if at.type_string != bt.type_string {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-    true
-}
-
 /// Check whether the post-walk scope has any NEW or CHANGED variable
 /// types compared to the pre-loop scope.  This is the Mago-style
 /// fixed-point check that runs BEFORE a re-walk: if nothing changed,
@@ -5182,10 +5101,15 @@ fn process_foreach<'b>(foreach: &'b Foreach<'b>, scope: &mut ScopeState, ctx: &F
         ForeachBody::Statement(inner) => vec![*inner],
         ForeachBody::ColonDelimited(body) => body.statements.iter().collect(),
     };
-    let assignment_depth = clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
+    let assignment_depth =
+        clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
 
     // ── Initial walk (always performed) ─────────────────────────
-    let initial_ctx = if assignment_depth > 1 { &discovery_ctx } else { ctx };
+    let initial_ctx = if assignment_depth > 1 {
+        &discovery_ctx
+    } else {
+        ctx
+    };
     match &foreach.body {
         ForeachBody::Statement(inner) => {
             walk_body_forward(std::iter::once(*inner), scope, initial_ctx);
@@ -5697,10 +5621,15 @@ fn process_while<'b>(while_stmt: &'b While<'b>, scope: &mut ScopeState, ctx: &Fo
         WhileBody::Statement(inner) => vec![*inner],
         WhileBody::ColonDelimited(body) => body.statements.iter().collect(),
     };
-    let assignment_depth = clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
+    let assignment_depth =
+        clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
 
     // ── Initial walk (always performed) ─────────────────────────
-    let initial_ctx = if assignment_depth > 1 { &discovery_ctx } else { ctx };
+    let initial_ctx = if assignment_depth > 1 {
+        &discovery_ctx
+    } else {
+        ctx
+    };
     match &while_stmt.body {
         WhileBody::Statement(inner) => {
             walk_body_forward(std::iter::once(*inner), scope, initial_ctx);
@@ -5801,10 +5730,15 @@ fn process_for<'b>(for_stmt: &'b For<'b>, scope: &mut ScopeState, ctx: &ForwardW
         ForBody::Statement(inner) => vec![*inner],
         ForBody::ColonDelimited(body) => body.statements.iter().collect(),
     };
-    let assignment_depth = clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
+    let assignment_depth =
+        clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
 
     // ── Initial walk (always performed) ─────────────────────────
-    let initial_ctx = if assignment_depth > 1 { &discovery_ctx } else { ctx };
+    let initial_ctx = if assignment_depth > 1 {
+        &discovery_ctx
+    } else {
+        ctx
+    };
     match &for_stmt.body {
         ForBody::Statement(inner) => {
             walk_body_forward(std::iter::once(*inner), scope, initial_ctx);
@@ -5870,7 +5804,8 @@ fn process_do_while<'b>(dw: &'b DoWhile<'b>, scope: &mut ScopeState, ctx: &Forwa
 
     // ── Assignment-depth-bounded loop iteration ─────────────────
     let body_stmts: Vec<&Statement<'b>> = vec![dw.statement];
-    let assignment_depth = clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
+    let assignment_depth =
+        clamp_iterations_for_depth(assignment_map_depth(&body_stmts), loop_depth);
 
     // ── Initial walk (always performed) ─────────────────────────
     walk_body_forward(std::iter::once(dw.statement), scope, ctx);

@@ -725,40 +725,6 @@ like:
 
 ---
 
-## P27. Remove `WALK_DEPTH` / `PROCESS_DEPTH` guards and 32 MB stack threads
-
-**Impact: Low · Effort: Low**
-
-After the assignment-depth-bounded loop iteration landed (P20), the
-exponential blowup from loop/if-branch interaction is eliminated.
-The remaining depth guards in the forward walker are:
-
-- `WALK_DEPTH` / `MAX_WALK_DEPTH = 50`: guards `walk_body_forward`
-  recursion across all block nesting (if/else, try/catch, switch).
-- `PROCESS_DEPTH` / `MAX_PROCESS_DEPTH = 80`: guards
-  `process_statement` recursion for the same nesting.
-
-PHP code rarely nests beyond 15 levels; these caps (50, 80) exist as
-safety nets and should never fire on real code now that the
-exponential loop path is gone.
-
-Additionally, the `analyse.rs` Phase 2 diagnostic workers use
-`stack_size(32 * 1024 * 1024)` because the forward walker's deep
-recursion could overflow the default 8 MB stack. With the loop
-depth bounded, the recursion depth is bounded by actual PHP nesting
-(~15 levels) and default stack sizes should suffice.
-
-### Fix
-
-1. Run the full test suite and `analyse` on the largest available
-   projects with logging when either depth cap fires.
-2. If neither fires, remove both counters entirely.
-3. Remove the `stack_size(32 * 1024 * 1024)` calls on diagnostic
-   worker threads in `analyse.rs`. Keep the eager-population and
-   index-worker thread stacks (those are tracked by ER5 separately).
-
----
-
 # Remaining anti-pattern fixes
 
 Most remaining depth-cap issues are addressed by ER5 (class

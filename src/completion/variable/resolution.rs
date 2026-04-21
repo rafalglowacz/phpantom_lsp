@@ -1336,20 +1336,35 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
             return Some(raw);
         }
 
-        // No docblock — walk the AST for the variable's assignment
-        // to extract the raw iterable type.  This handles cases like
+        // No docblock — resolve the variable's type to extract the
+        // raw iterable type.  This handles cases like
         // `$users = $this->getUsers(); array_pop($users)` where
         // `$users` has no `@var` annotation but was assigned from a
         // method returning `list<User>`.
-        let resolved = resolve_variable_types(
-            &var_text,
-            ctx.current_class,
-            ctx.all_classes,
-            ctx.content,
-            offset as u32,
-            ctx.class_loader,
-            Loaders::with_function(ctx.function_loader()),
-        );
+        //
+        // When a scope_var_resolver is available (forward walker is
+        // active), read from the in-progress ScopeState.  Falling
+        // through to resolve_variable_types would re-enter the
+        // forward walker, causing infinite recursion on patterns
+        // like `$a['k'] = f($a['k'])`.
+        let resolved = if let Some(resolver) = ctx.scope_var_resolver {
+            let prefixed = if var_text.starts_with('$') {
+                var_text.clone()
+            } else {
+                format!("${}", var_text)
+            };
+            resolver(&prefixed)
+        } else {
+            resolve_variable_types(
+                &var_text,
+                ctx.current_class,
+                ctx.all_classes,
+                ctx.content,
+                offset as u32,
+                ctx.class_loader,
+                Loaders::with_function(ctx.function_loader()),
+            )
+        };
         if !resolved.is_empty() {
             let joined = crate::types::ResolvedType::types_joined(&resolved);
             if joined.extract_value_type(true).is_some() {

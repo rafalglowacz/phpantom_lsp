@@ -297,7 +297,6 @@ pub async fn run(options: AnalyseOptions) -> i32 {
                     let file_data = &file_data;
                     std::thread::Builder::new()
                     .name("diag-worker".into())
-                    .stack_size(32 * 1024 * 1024)
                     .spawn_scoped(s, move || {
                     let mut results: Vec<(String, Vec<FileDiagnostic>)> = Vec::new();
                     loop {

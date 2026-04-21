@@ -25,7 +25,6 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                                                | Impact      | Effort      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ----------- |
-| P27 | [Remove `WALK_DEPTH`/`PROCESS_DEPTH` guards and 32 MB stack threads](todo/performance.md#p27-remove-walk_depth--process_depth-guards-and-32-mb-stack-threads) | Low | Low |
 | ER5 | [Mago-style separated metadata](todo/eager-resolution.md#er5--mago-style-separated-metadata)                                                                        | High        | High        |
 | P9  | [`resolved_class_cache` generic-arg specialisation](todo/performance.md#p9-resolved_class_cache-generic-arg-specialisation)                                         | Medium      | Medium      |
 | P18 | [Subtype result caching](todo/performance.md#p18-subtype-result-caching) (per-request HashMap for hierarchy walks)                                                  | Medium      | Low         |
