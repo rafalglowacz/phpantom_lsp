@@ -3062,9 +3062,6 @@ class InlayHintsDemo
             return strtoupper($u->name);
         });
 
-        // Multiple params: "int " before $a, "int " before $b, ": int" after parens.
-        $sum = $this->reduce(fn($a, $b) => $a + $b);
-
         // Partial typing: only the untyped $b gets a hint.
         $sum2 = $this->reduce(fn(int $a, $b) => $a + $b);
 
@@ -3072,8 +3069,7 @@ class InlayHintsDemo
         $emails = $this->mapUsers(fn(User $u): string => $u->email);
 
         // Standalone functions with callable params work too:
-        $sorted = sortByKey(['b', 'a', 'c'], fn($a, $b) => strcmp($a, $b));
-
+        $doubled = $this->transformItems([1, 2, 3], fn($x) => $x * 2);
 
         // Method call context — filter shows "Order " before $o, ": bool" after.
         $big = $this->filterOrders(fn($o) => $o->total > 100);
@@ -3084,6 +3080,14 @@ class InlayHintsDemo
 
     public function search(string $needle, int $limit = 10): mixed { return null; }
 
+    /**
+     * @template T
+     * @param array<T> $items
+     * @param callable(T): T $fn
+     * @return array<T>
+     */
+    public function transformItems(array $items, callable $fn): array { return $fn(); }
+
     /** @param \Closure(User): string $fn */
     public function mapUsers(\Closure $fn): array { return []; }
 
@@ -3092,24 +3096,6 @@ class InlayHintsDemo
 
     /** @param callable(Order): bool $fn */
     public function filterOrders(callable $fn): array { return []; }
-}
-
-/**
- * @param array<string> $items
- * @param callable(string, string): int $cmp
- * @return array<string>
- */
-function sortByKey(array $items, callable $cmp): array
-{
-    usort($items, $cmp);
-    return $items;
-}
-
-
-class Order
-{
-    public float $total = 0.0;
-    public string $status = 'pending';
 }
 
 

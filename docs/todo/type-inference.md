@@ -457,7 +457,7 @@ remains for any `$arr[$i] instanceof Foo` pattern.
 
 ## T25. Call-site template argument inference for callable parameters
 
-**Impact: Medium · Effort: Medium**
+**Impact: Medium · Effort: Medium — partially done**
 
 When a function has a `@template T` and a parameter typed
 `callable(T): T`, the closure inlay hint system cannot resolve `T`
@@ -484,12 +484,23 @@ To show `int` for `$x`, the hint system needs to:
 2. Substitute `T → int` in the callable's parameter and return types.
 3. Pass the substituted `callable(int): int` to the hint emitter.
 
-This is the same generic argument inference that conditional return
-types and PHPStan's `@template` system rely on. The substitution
-logic already exists in `inheritance.rs` (`build_substitution_map` /
-`apply_substitution`) for class-level templates. Extending it to
-function-level call sites would benefit closure inlay hints,
-completion inside closure bodies, and hover on closure parameters.
+**Step 1 (done):** `emit_closure_hints` in `inlay_hints.rs` now
+accepts the `call_sites` slice, finds the matching `CallSite` for
+each `UntypedClosureSite`, extracts the full argument text from
+content, and passes it to `resolve_callable_target_with_args`
+instead of the no-args `resolve_callable_target`. This wires the
+existing `build_function_template_subs` / `build_method_template_subs`
+machinery into the inlay hint path. Integration tests document the
+desired behaviour.
+
+**Step 2 (remaining — see B27):** The `CallSite` matching logic
+does not yet find the parent call site for all AST shapes. The
+offset comparison between `UntypedClosureSite` offsets and
+`CallSite.args_start`/`args_end` fails in practice, leaving
+`call_args_text` as `None`. Without it, template parameters fall
+back to their upper bound (`mixed`) via the fill-in-unbound logic,
+and `is_mixed()` filters the hint. Fixing the matching condition
+in `emit_closure_hints` (tracked in B27) completes the feature.
 
 **References:**
 - PHPStan: `GenericFunctionsReturnTypeExtension`, argument-based

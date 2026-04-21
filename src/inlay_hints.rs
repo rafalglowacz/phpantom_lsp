@@ -74,8 +74,8 @@ impl Backend {
             self.emit_closure_hints(
                 content,
                 &symbol_map.untyped_closure_sites,
-                range_start,
-                range_end,
+                &symbol_map.call_sites,
+                (range_start, range_end),
                 &ctx,
                 &mut hints,
             );
@@ -239,11 +239,12 @@ impl Backend {
         &self,
         content: &str,
         sites: &[UntypedClosureSite],
-        range_start: u32,
-        range_end: u32,
+        call_sites: &[CallSite],
+        range: (u32, u32),
         ctx: &FileContext,
         hints: &mut Vec<InlayHint>,
     ) {
+        let (range_start, range_end) = range;
         for site in sites {
             // Quick range check: use close_paren_offset if available,
             // otherwise the first untyped param offset.
@@ -258,13 +259,44 @@ impl Backend {
                 continue;
             }
 
+            // Find the matching CallSite so we can extract the full
+            // argument text for template substitution.  We match by
+            // call expression string and verify that any of the
+            // closure site's offsets fall within the call site's
+            // argument range.  We check ALL untyped-param offsets
+            // and the close-paren offset since the representative
+            // offset alone may not be inside the parent call's range
+            // for all AST shapes.
+            let call_args_text: Option<&str> = {
+                let closure_offsets: Vec<u32> = site
+                    .untyped_params
+                    .iter()
+                    .map(|&(_, off)| off)
+                    .chain(site.close_paren_offset)
+                    .collect();
+                call_sites
+                    .iter()
+                    .find(|cs| {
+                        cs.call_expression == site.parent_call_expression
+                            && closure_offsets
+                                .iter()
+                                .any(|&off| off >= cs.args_start && off <= cs.args_end)
+                    })
+                    .and_then(|cs| content.get(cs.args_start as usize..cs.args_end as usize))
+            };
+
             // Resolve the callable to get the parameter's type signature.
+            // Pass the call-site argument text so that function/method-level
+            // @template parameters are inferred from the sibling arguments
+            // and substituted into parameter type hints (e.g. turning
+            // `callable(T): T` into `callable(int): int`).
             let position = offset_to_position(content, representative_offset.unwrap_or(0) as usize);
-            let resolved = match self.resolve_callable_target(
+            let resolved = match self.resolve_callable_target_with_args(
                 &site.parent_call_expression,
                 content,
                 position,
                 ctx,
+                call_args_text,
             ) {
                 Some(r) => r,
                 None => continue,
