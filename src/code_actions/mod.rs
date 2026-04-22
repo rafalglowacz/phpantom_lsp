@@ -83,6 +83,7 @@ mod generate_property_hooks;
 pub(crate) mod implement_methods;
 mod import_class;
 mod inline_variable;
+mod mago;
 pub(crate) mod phpstan;
 mod promote_constructor_param;
 mod remove_unused_import;
@@ -186,6 +187,9 @@ impl Backend {
 
         // ── PHPStan-specific quickfixes (deferred) ──────────────────────
         self.collect_phpstan_actions(uri, content, params, &mut actions);
+
+        // ── Mago quick-fix code actions ─────────────────────────────────
+        self.collect_mago_fix_actions(uri, content, params, &mut actions);
 
         // ── Change visibility ───────────────────────────────────────────
         self.collect_change_visibility_actions(uri, content, params, &mut actions);

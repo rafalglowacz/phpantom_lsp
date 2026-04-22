@@ -1362,11 +1362,9 @@ impl Backend {
             }
 
             // Drain any extra stored permits.
-            let _ = tokio::time::timeout(
-                std::time::Duration::ZERO,
-                self.mago_lint_notify.notified(),
-            )
-            .await;
+            let _ =
+                tokio::time::timeout(std::time::Duration::ZERO, self.mago_lint_notify.notified())
+                    .await;
 
             // ── Step 2: debounce ────────────────────────────────────
             loop {
@@ -1421,14 +1419,11 @@ impl Backend {
             let bin_dir: Option<String> = crate::composer::read_composer_package(&workspace_root)
                 .map(|pkg| crate::composer::get_bin_dir(&pkg));
 
-            let resolved = match mago::resolve_mago(
-                Some(&workspace_root),
-                &config.mago,
-                bin_dir.as_deref(),
-            ) {
-                Some(r) => r,
-                None => continue,
-            };
+            let resolved =
+                match mago::resolve_mago(Some(&workspace_root), &config.mago, bin_dir.as_deref()) {
+                    Some(r) => r,
+                    None => continue,
+                };
 
             // ── Step 5: run mago lint (the slow part) ───────────────
             let mago_config = config.mago.clone();
@@ -1564,14 +1559,11 @@ impl Backend {
             let bin_dir: Option<String> = crate::composer::read_composer_package(&workspace_root)
                 .map(|pkg| crate::composer::get_bin_dir(&pkg));
 
-            let resolved = match mago::resolve_mago(
-                Some(&workspace_root),
-                &config.mago,
-                bin_dir.as_deref(),
-            ) {
-                Some(r) => r,
-                None => continue,
-            };
+            let resolved =
+                match mago::resolve_mago(Some(&workspace_root), &config.mago, bin_dir.as_deref()) {
+                    Some(r) => r,
+                    None => continue,
+                };
 
             // ── Step 5: run mago analyze (the slow part) ────────────
             let mago_config = config.mago.clone();

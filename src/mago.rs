@@ -54,12 +54,6 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Posit
 
 use crate::config::MagoConfig;
 
-/// Default `mago lint` timeout in milliseconds (30 seconds).
-const DEFAULT_LINT_TIMEOUT_MS: u64 = 30_000;
-
-/// Default `mago analyze` timeout in milliseconds (60 seconds).
-const DEFAULT_ANALYZE_TIMEOUT_MS: u64 = 60_000;
-
 // ── Tool resolution ─────────────────────────────────────────────────
 
 /// A resolved Mago binary ready to invoke.
@@ -172,7 +166,7 @@ pub(crate) fn run_mago_lint(
     config: &MagoConfig,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<Diagnostic>, String> {
-    let timeout_ms = config.lint_timeout.unwrap_or(DEFAULT_LINT_TIMEOUT_MS);
+    let timeout_ms = config.lint_timeout_ms();
     let timeout = Duration::from_millis(timeout_ms);
 
     let mut cmd = Command::new(&resolved.path);
@@ -232,7 +226,7 @@ pub(crate) fn run_mago_analyze(
     config: &MagoConfig,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<Vec<Diagnostic>, String> {
-    let timeout_ms = config.analyze_timeout.unwrap_or(DEFAULT_ANALYZE_TIMEOUT_MS);
+    let timeout_ms = config.analyze_timeout_ms();
     let timeout = Duration::from_millis(timeout_ms);
 
     let mut cmd = Command::new(&resolved.path);
@@ -260,16 +254,14 @@ pub(crate) fn run_mago_analyze(
             }
         }
         1 => parse_mago_json(&result.stdout, content, &file_path_str, "mago-analyze"),
-        _ => {
-            match parse_mago_json(&result.stdout, content, &file_path_str, "mago-analyze") {
-                Ok(diags) if !diags.is_empty() => Ok(diags),
-                _ => Err(format!(
-                    "Mago analyze exited with code {} (stderr: {})",
-                    result.code,
-                    result.stderr.trim()
-                )),
-            }
-        }
+        _ => match parse_mago_json(&result.stdout, content, &file_path_str, "mago-analyze") {
+            Ok(diags) if !diags.is_empty() => Ok(diags),
+            _ => Err(format!(
+                "Mago analyze exited with code {} (stderr: {})",
+                result.code,
+                result.stderr.trim()
+            )),
+        },
     }
 }
 
@@ -343,10 +335,7 @@ fn parse_mago_issue(
     source_name: &str,
 ) -> Option<Diagnostic> {
     let message = issue.get("message")?.as_str()?;
-    let code = issue
-        .get("code")
-        .and_then(|c| c.as_str())
-        .unwrap_or("mago");
+    let code = issue.get("code").and_then(|c| c.as_str()).unwrap_or("mago");
 
     let level = issue
         .get("level")
@@ -414,11 +403,9 @@ fn parse_mago_issue(
     // Build the full message: main message + annotation message + notes + help.
     let mut full_message = message.to_string();
 
-    if let Some(ann_msg) = annotation_message {
-        if !ann_msg.is_empty() && ann_msg != message {
-            full_message.push_str("\n");
-            full_message.push_str(ann_msg);
-        }
+    if let Some(ann_msg) = annotation_message.filter(|m| !m.is_empty() && *m != message) {
+        full_message.push('\n');
+        full_message.push_str(ann_msg);
     }
 
     if let Some(notes) = issue.get("notes").and_then(|n| n.as_array()) {
@@ -430,12 +417,52 @@ fn parse_mago_issue(
         }
     }
 
-    if let Some(help) = issue.get("help").and_then(|h| h.as_str()) {
-        if !help.is_empty() {
-            full_message.push_str("\nHelp: ");
-            full_message.push_str(help);
-        }
+    if let Some(help) = issue
+        .get("help")
+        .and_then(|h| h.as_str())
+        .filter(|h| !h.is_empty())
+    {
+        full_message.push_str("\nHelp: ");
+        full_message.push_str(help);
     }
+
+    // Extract edits for the current file, if any.
+    let data = issue
+        .get("edits")
+        .and_then(|e| e.as_array())
+        .and_then(|edits_array| {
+            let mut file_edits = Vec::new();
+            for entry in edits_array {
+                let tuple = entry.as_array()?;
+                if tuple.len() != 2 {
+                    continue;
+                }
+                let file_id = &tuple[0];
+                let path = file_id.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                if !paths_match(path, file_path_str) {
+                    continue;
+                }
+                let text_edits = tuple[1].as_array()?;
+                for te in text_edits {
+                    let range_obj = te.get("range")?;
+                    let start = range_obj.get("start").and_then(|s| s.as_u64())?;
+                    let end = range_obj.get("end").and_then(|e| e.as_u64())?;
+                    let new_text = te.get("new_text").and_then(|t| t.as_str())?;
+                    let safety = te.get("safety").and_then(|s| s.as_str()).unwrap_or("Safe");
+                    file_edits.push(serde_json::json!({
+                        "start": start,
+                        "end": end,
+                        "new_text": new_text,
+                        "safety": safety,
+                    }));
+                }
+            }
+            if file_edits.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({ "mago_edits": file_edits }))
+            }
+        });
 
     Some(Diagnostic {
         range: diag_range,
@@ -446,13 +473,13 @@ fn parse_mago_issue(
         message: full_message,
         related_information: None,
         tags: None,
-        data: None,
+        data,
     })
 }
 
 /// Convert a byte offset within `content` to an LSP `Position`
 /// (0-based line, UTF-16 character offset).
-fn byte_offset_to_position(content: &str, offset: usize) -> Position {
+pub(crate) fn byte_offset_to_position(content: &str, offset: usize) -> Position {
     let mut line = 0u32;
     let mut col = 0u32;
     for (i, ch) in content.char_indices() {
@@ -521,11 +548,9 @@ fn run_command_with_timeout(
         .map_err(|e| format!("Failed to spawn {}: {}", tool_name, e))?;
 
     // Write buffer content to stdin, then close it.
-    if let Some(content) = stdin_content {
-        if let Some(mut stdin) = child.stdin.take() {
-            std::io::Write::write_all(&mut stdin, content.as_bytes())
-                .map_err(|e| format!("Failed to write to {} stdin: {}", tool_name, e))?;
-        }
+    if let Some((content, mut stdin)) = stdin_content.zip(child.stdin.take()) {
+        std::io::Write::write_all(&mut stdin, content.as_bytes())
+            .map_err(|e| format!("Failed to write to {} stdin: {}", tool_name, e))?;
     }
 
     let start = std::time::Instant::now();
@@ -756,9 +781,11 @@ mod tests {
         assert!(diags[0].message.contains("Type mismatch in return."));
         assert!(diags[0].message.contains("returns int here"));
         assert!(diags[0].message.contains("Note: expected string, got int"));
-        assert!(diags[0]
-            .message
-            .contains("Help: Change the return type or the value."));
+        assert!(
+            diags[0]
+                .message
+                .contains("Help: Change the return type or the value.")
+        );
     }
 
     // ── parse_mago_json — empty result ──────────────────────────────
@@ -952,10 +979,7 @@ mod tests {
     #[test]
     fn lint_timeout_default() {
         let config = MagoConfig::default();
-        assert_eq!(
-            config.lint_timeout.unwrap_or(DEFAULT_LINT_TIMEOUT_MS),
-            30_000
-        );
+        assert_eq!(config.lint_timeout_ms(), 30_000);
     }
 
     #[test]
@@ -965,19 +989,13 @@ mod tests {
             lint_timeout: Some(15_000),
             analyze_timeout: None,
         };
-        assert_eq!(
-            config.lint_timeout.unwrap_or(DEFAULT_LINT_TIMEOUT_MS),
-            15_000
-        );
+        assert_eq!(config.lint_timeout_ms(), 15_000);
     }
 
     #[test]
     fn analyze_timeout_default() {
         let config = MagoConfig::default();
-        assert_eq!(
-            config.analyze_timeout.unwrap_or(DEFAULT_ANALYZE_TIMEOUT_MS),
-            60_000
-        );
+        assert_eq!(config.analyze_timeout_ms(), 60_000);
     }
 
     #[test]
@@ -987,12 +1005,7 @@ mod tests {
             lint_timeout: None,
             analyze_timeout: Some(120_000),
         };
-        assert_eq!(
-            config
-                .analyze_timeout
-                .unwrap_or(DEFAULT_ANALYZE_TIMEOUT_MS),
-            120_000
-        );
+        assert_eq!(config.analyze_timeout_ms(), 120_000);
     }
 
     // ── annotation message not duplicated when same as issue message ─
@@ -1035,6 +1048,77 @@ mod tests {
     }
 
     // ── Helper to build issue JSON for severity tests ───────────────
+
+    #[test]
+    fn parse_edits_from_json() {
+        let content = "<?php\nfoo();\n";
+        let file_path = "/tmp/test.php";
+        let json = r#"{
+            "issues": [
+                {
+                    "level": "Warning",
+                    "code": "fixable",
+                    "message": "Use bar() instead",
+                    "notes": [],
+                    "help": "",
+                    "annotations": [
+                        {
+                            "message": "",
+                            "kind": "Primary",
+                            "span": {
+                                "file_id": {
+                                    "name": "test.php",
+                                    "path": "/tmp/test.php",
+                                    "size": 14,
+                                    "file_type": "Host"
+                                },
+                                "start": { "offset": 6, "line": 1 },
+                                "end": { "offset": 11, "line": 1 }
+                            }
+                        }
+                    ],
+                    "edits": [
+                        [
+                            { "name": "test.php", "path": "/tmp/test.php", "size": 14, "file_type": "Host" },
+                            [
+                                { "range": { "start": 6, "end": 11 }, "new_text": "bar()", "safety": "Safe" }
+                            ]
+                        ],
+                        [
+                            { "name": "other.php", "path": "/tmp/other.php", "size": 20, "file_type": "Host" },
+                            [
+                                { "range": { "start": 0, "end": 5 }, "new_text": "baz()", "safety": "Unsafe" }
+                            ]
+                        ]
+                    ]
+                }
+            ]
+        }"#;
+        let diags = parse_mago_json(json, content, file_path, "mago-lint").unwrap();
+        assert_eq!(diags.len(), 1);
+
+        let data = diags[0].data.as_ref().expect("diagnostic should have data");
+        let mago_edits = data
+            .get("mago_edits")
+            .expect("should have mago_edits key")
+            .as_array()
+            .expect("mago_edits should be an array");
+        assert_eq!(mago_edits.len(), 1);
+        assert_eq!(mago_edits[0]["start"], 6);
+        assert_eq!(mago_edits[0]["end"], 11);
+        assert_eq!(mago_edits[0]["new_text"], "bar()");
+        assert_eq!(mago_edits[0]["safety"], "Safe");
+    }
+
+    #[test]
+    fn parse_no_edits_leaves_data_none() {
+        let content = "<?php\nfoo();\n";
+        let file_path = "/tmp/test.php";
+        let json = make_issue_json("Error", "test", "some error", file_path, 6, 11);
+        let diags = parse_mago_json(&json, content, file_path, "mago-lint").unwrap();
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].data.is_none());
+    }
 
     fn make_issue_json(
         level: &str,

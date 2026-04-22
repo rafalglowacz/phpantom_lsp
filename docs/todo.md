@@ -25,7 +25,6 @@ within the same impact tier.
 
 | #   | Item                                                                             | Impact | Effort |
 | --- | -------------------------------------------------------------------------------- | ------ | ------ |
-| D12 | [Mago diagnostic proxy](todo/diagnostics.md#d12-mago-diagnostic-proxy)           | Medium | Medium |
 | F9  | [Namespace renaming](todo/lsp-features.md#f9-namespace-renaming)                 | Medium | Medium |
 | A40 | [Convert to instance variable](todo/actions.md#a40-convert-to-instance-variable) | Medium | Medium |
 | D10 | [PHPMD diagnostic proxy](todo/diagnostics.md#d10-phpmd-diagnostic-proxy)         | Low    | Medium |

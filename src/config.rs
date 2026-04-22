@@ -762,10 +762,7 @@ analyze-timeout = 45000
         );
         assert_eq!(config.phpcs.standard.as_deref(), Some("PSR12"));
         assert_eq!(config.phpcs.timeout_ms(), 15_000);
-        assert_eq!(
-            config.mago.command.as_deref(),
-            Some("/usr/local/bin/mago")
-        );
+        assert_eq!(config.mago.command.as_deref(), Some("/usr/local/bin/mago"));
         assert_eq!(config.mago.lint_timeout_ms(), 15_000);
         assert_eq!(config.mago.analyze_timeout_ms(), 45_000);
         assert!(!config.mago.is_disabled());

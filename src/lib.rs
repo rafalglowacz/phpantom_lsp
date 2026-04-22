@@ -116,11 +116,11 @@ mod hover;
 pub(crate) mod inheritance;
 mod inlay_hints;
 mod linked_editing;
+mod mago;
 pub(crate) mod names;
 mod parser;
 pub(crate) mod phar;
 pub mod php_type;
-mod mago;
 mod phpcs;
 mod phpstan;
 mod references;
@@ -498,13 +498,15 @@ pub struct Backend {
     /// The single file URI that the Mago lint worker should analyse next.
     pub(crate) mago_lint_pending_uri: Arc<Mutex<Option<String>>>,
     /// Last-published Mago lint diagnostics per file URI.
-    pub(crate) mago_lint_last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
+    pub(crate) mago_lint_last_diags:
+        Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
     /// Notification handle used to wake the Mago analyze worker task.
     pub(crate) mago_analyze_notify: Arc<tokio::sync::Notify>,
     /// The single file URI that the Mago analyze worker should analyse next.
     pub(crate) mago_analyze_pending_uri: Arc<Mutex<Option<String>>>,
     /// Last-published Mago analyze diagnostics per file URI.
-    pub(crate) mago_analyze_last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
+    pub(crate) mago_analyze_last_diags:
+        Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
     /// Per-file `resultId` for pull diagnostics (`textDocument/diagnostic`).
     ///
     /// Maps file URI → monotonically increasing counter.  Bumped whenever
