@@ -477,21 +477,8 @@ pub(crate) fn extract_var_description_from_info(info: &DocblockInfo) -> Option<S
 ///
 /// Returns the remainder of the string after the type token.
 fn skip_type_token(s: &str) -> &str {
-    let mut depth = 0i32;
-    let mut end = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' | '(' | '{' => depth += 1,
-            '>' | ')' | '}' => depth -= 1,
-            _ if c.is_whitespace() && depth == 0 => {
-                end = i;
-                break;
-            }
-            _ => {}
-        }
-        end = i + c.len_utf8();
-    }
-    &s[end..]
+    let (_token, rest) = crate::docblock::type_strings::split_type_token(s);
+    rest
 }
 
 /// Convert basic HTML markup in docblock text to Markdown equivalents.
@@ -558,6 +545,13 @@ pub(crate) fn shorten_type_string(ty: &str) -> String {
 /// cycle that `shorten_type_string` incurs when the caller already has a
 /// `PhpType` value.
 pub(crate) fn shorten_php_type(ty: &PhpType) -> String {
+    // Defensive fallback: in practice `Raw` values never reach this function
+    // because all callers pass `PhpType` values from struct fields
+    // (`type_hint`, `return_type`, `native_return_type`) that are populated
+    // via `PhpType::parse()`, which only produces `Raw` for completely
+    // unparseable strings.  The guard remains so that future callers that
+    // might pass `Raw` values still get reasonable short names instead of
+    // fully-qualified namespace paths.
     if matches!(ty, PhpType::Raw(_)) {
         return shorten_type_string_fallback(&ty.to_string());
     }

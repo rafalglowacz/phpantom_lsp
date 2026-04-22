@@ -33,10 +33,7 @@ impl Backend {
         all_classes: &[Arc<ClassInfo>],
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     ) -> Option<ClassInfo> {
-        let fqn = match &candidate.file_namespace {
-            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, candidate.name),
-            _ => candidate.name.clone(),
-        };
+        let fqn = candidate.fqn();
         crate::util::find_class_by_name(all_classes, &fqn)
             .map(|arc| ClassInfo::clone(arc))
             .or_else(|| class_loader(&fqn).map(Arc::unwrap_or_clone))

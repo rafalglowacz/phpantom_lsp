@@ -32,11 +32,13 @@
 //! rules are only available when `--with-phpstan` is passed.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tower_lsp::lsp_types::*;
 
+use crate::analyse::OutputFormat;
 use crate::code_actions::build_line_deletion_edit;
 use crate::parser::with_parse_cache;
 use crate::util::position_to_byte_offset;
@@ -58,6 +60,8 @@ pub struct FixOptions {
     pub use_colour: bool,
     /// Whether to run PHPStan-based fixers (requires `--with-phpstan`).
     pub with_phpstan: bool,
+    /// Output format.
+    pub output_format: OutputFormat,
 }
 
 /// A single fix applied to a file.
@@ -259,12 +263,13 @@ pub async fn run(options: FixOptions) -> i32 {
 
     let file_count = files.len();
     let use_colour = options.use_colour;
+    let output_format = options.output_format;
     let n_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
 
     // ── Phase 1: Parse all files (parallel) ─────────────────────────
-    if use_colour {
+    if use_colour && output_format == OutputFormat::Table {
         eprint!("\r\x1b[2K {}", progress_bar(0, file_count, "Parsing"));
     }
     let next_idx = AtomicUsize::new(0);
@@ -308,7 +313,7 @@ pub async fn run(options: FixOptions) -> i32 {
         indexed
     });
 
-    if use_colour {
+    if use_colour && output_format == OutputFormat::Table {
         eprint!(
             "\r\x1b[2K {}\n",
             progress_bar(file_count, file_count, "Parsing")
@@ -316,7 +321,7 @@ pub async fn run(options: FixOptions) -> i32 {
     }
 
     // ── Phase 2: Fix files (parallel) ───────────────────────────────
-    if use_colour {
+    if use_colour && output_format == OutputFormat::Table {
         eprint!("\r\x1b[2K {}", progress_bar(0, file_count, "Fixing"));
     }
     let next_idx = AtomicUsize::new(0);
@@ -337,7 +342,10 @@ pub async fn run(options: FixOptions) -> i32 {
                         if i >= file_count {
                             break;
                         }
-                        if use_colour && i.is_multiple_of(20) {
+                        if use_colour
+                            && output_format == OutputFormat::Table
+                            && i.is_multiple_of(20)
+                        {
                             eprint!("\r\x1b[2K {}", progress_bar(i + 1, file_count, "Fixing"));
                         }
 
@@ -396,7 +404,7 @@ pub async fn run(options: FixOptions) -> i32 {
         merged
     });
 
-    if use_colour {
+    if use_colour && output_format == OutputFormat::Table {
         eprint!(
             "\r\x1b[2K {}\n",
             progress_bar(file_count, file_count, "Fixing")
@@ -409,20 +417,40 @@ pub async fn run(options: FixOptions) -> i32 {
     sorted_results.sort_by(|a, b| a.display_path.cmp(&b.display_path));
 
     if sorted_results.is_empty() {
-        print_success_box(use_colour);
+        match output_format {
+            OutputFormat::Table => print_success_box(use_colour),
+            OutputFormat::Github => {} // no output on success
+            OutputFormat::Json => print_fix_json(&[], 0, dry_run),
+        }
         return 0;
     }
 
     let total_fixes: usize = sorted_results.iter().map(|r| r.fixes.len()).sum();
     let files_changed = sorted_results.len();
 
-    // Print summary of changes.
-    for result in &sorted_results {
-        print_fix_table(&result.display_path, &result.fixes, use_colour);
+    match output_format {
+        OutputFormat::Table => {
+            // When running in GitHub Actions, also emit annotations
+            // alongside the table (same behaviour as PHPStan).
+            if std::env::var("GITHUB_ACTIONS").is_ok() {
+                print_fix_github_annotations(&sorted_results);
+            }
+            for result in &sorted_results {
+                print_fix_table(&result.display_path, &result.fixes, use_colour);
+            }
+        }
+        OutputFormat::Github => {
+            print_fix_github_annotations(&sorted_results);
+        }
+        OutputFormat::Json => {
+            print_fix_json(&sorted_results, total_fixes, dry_run);
+        }
     }
 
     if dry_run {
-        print_dry_run_box(total_fixes, files_changed, use_colour);
+        if output_format == OutputFormat::Table {
+            print_dry_run_box(total_fixes, files_changed, use_colour);
+        }
         return 2;
     }
 
@@ -440,7 +468,9 @@ pub async fn run(options: FixOptions) -> i32 {
         return 1;
     }
 
-    print_fixed_box(total_fixes, files_changed, use_colour);
+    if output_format == OutputFormat::Table {
+        print_fixed_box(total_fixes, files_changed, use_colour);
+    }
 
     0
 }
@@ -550,6 +580,86 @@ fn print_fixed_box(total_fixes: usize, files_changed: usize, use_colour: bool) {
 }
 
 // ── Progress bar ────────────────────────────────────────────────────────────
+
+// ── GitHub Actions annotations ──────────────────────────────────────────────
+
+/// Emit GitHub Actions workflow commands for fix results.
+///
+/// Each fix is printed as a `::notice` annotation so it appears as an
+/// inline annotation on pull request diffs.
+fn print_fix_github_annotations(results: &[FileFixResult]) {
+    for result in results {
+        for fix in &result.fixes {
+            let message = crate::analyse::format_github_message(&fix.description);
+            println!(
+                "::notice file={path},line={line},col=0,title={rule}::{message}",
+                path = result.display_path,
+                line = fix.line,
+                rule = fix.rule,
+            );
+        }
+    }
+}
+
+/// Print fix results as a single JSON object.
+///
+/// ```json
+/// {
+///   "totals": { "fixes": 3, "dry_run": false },
+///   "files": {
+///     "src/Foo.php": {
+///       "fixes": 1,
+///       "changes": [
+///         { "line": 5, "rule": "unused_import", "description": "..." }
+///       ]
+///     }
+///   }
+/// }
+/// ```
+fn print_fix_json(results: &[FileFixResult], total_fixes: usize, dry_run: bool) {
+    let mut out = String::from("{\n");
+    let _ = writeln!(
+        out,
+        "  \"totals\": {{ \"fixes\": {}, \"dry_run\": {} }},",
+        total_fixes, dry_run
+    );
+
+    if results.is_empty() {
+        out.push_str("  \"files\": {}\n");
+    } else {
+        out.push_str("  \"files\": {\n");
+        for (i, result) in results.iter().enumerate() {
+            let _ = write!(
+                out,
+                "    {}: {{\n      \"fixes\": {},\n      \"changes\": [\n",
+                crate::analyse::json_escape(&result.display_path),
+                result.fixes.len()
+            );
+            for (j, fix) in result.fixes.iter().enumerate() {
+                let _ = write!(
+                    out,
+                    "        {{ \"line\": {}, \"rule\": {}, \"description\": {} }}",
+                    fix.line,
+                    crate::analyse::json_escape(&fix.rule),
+                    crate::analyse::json_escape(&fix.description),
+                );
+                if j + 1 < result.fixes.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str("      ]\n    }");
+            if i + 1 < results.len() {
+                out.push(',');
+            }
+            out.push('\n');
+        }
+        out.push_str("  }\n");
+    }
+
+    out.push('}');
+    println!("{out}");
+}
 
 const BAR_WIDTH: usize = 28;
 

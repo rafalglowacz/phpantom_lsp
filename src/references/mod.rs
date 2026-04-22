@@ -118,7 +118,7 @@ impl Backend {
                 }
                 self.find_variable_references(uri, content, name, span_start, include_declaration)
             }
-            SymbolKind::ClassReference { name, is_fqn } => {
+            SymbolKind::ClassReference { name, is_fqn, .. } => {
                 let ctx = self.file_context(uri);
                 let fqn = if *is_fqn {
                     name.clone()
@@ -421,7 +421,7 @@ impl Backend {
 
             for span in &symbol_map.spans {
                 match &span.kind {
-                    SymbolKind::ClassReference { name, is_fqn } => {
+                    SymbolKind::ClassReference { name, is_fqn, .. } => {
                         let resolved = if *is_fqn {
                             name.clone()
                         } else if let Some(fqn) =

@@ -132,8 +132,7 @@ pub fn build_where_property_methods_for_class(
     let return_type = PhpType::Generic(
         ELOQUENT_BUILDER_FQN.to_string(),
         vec![PhpType::Named(class.name.clone())],
-    )
-    .to_string();
+    );
 
     let value_param = ParameterInfo {
         name: "$value".to_string(),
@@ -167,7 +166,8 @@ pub fn build_where_property_methods_for_class(
         let method = MethodInfo {
             parameters: vec![value_param.clone()],
             description: Some(format!("Find models where `{col}` equals the given value.",)),
-            ..MethodInfo::virtual_method(&method_name, Some(&return_type))
+            return_type: Some(return_type.clone()),
+            ..MethodInfo::virtual_method(&method_name, None)
         };
 
         methods.push(method);

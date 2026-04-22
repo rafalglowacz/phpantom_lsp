@@ -823,3 +823,102 @@ class LoggedConnection extends BaseConnector {
         names
     );
 }
+
+/// Nested array access assignments like `$b['a']['b'] = 'x'` should
+/// produce a nested array shape `array{a: array{b: string}}`.
+#[test]
+fn resolve_var_shape_from_nested_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $b['a']['a'] = 'a';
+    $b['x']
+}
+"#;
+    let cursor_offset = content.find("$b['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$b",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $b to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("a: array{a: string}"),
+        "Shape should contain nested 'a: array{{a: string}}', got: {ts}"
+    );
+}
+
+/// Deeply nested key assignments like `$c['a']['b']['c'] = 42` should
+/// produce `array{a: array{b: array{c: int}}}`.
+#[test]
+fn resolve_var_shape_from_deeply_nested_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $config['db']['host']['primary'] = 'localhost';
+    $config['x']
+}
+"#;
+    let cursor_offset = content.find("$config['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$config",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $config to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("db: array{host: array{primary: string}}"),
+        "Shape should contain deeply nested keys, got: {ts}"
+    );
+}
+
+/// Mixed single-level and nested key assignments should merge correctly.
+#[test]
+fn resolve_var_shape_mixed_single_and_nested_keys() {
+    let content = r#"<?php
+function test() {
+    $data['name'] = 'John';
+    $data['address']['city'] = 'NYC';
+    $data['address']['zip'] = '10001';
+    $data['x']
+}
+"#;
+    let cursor_offset = content.find("$data['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$data",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $data to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("name: string"),
+        "Shape should contain 'name: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("city: string"),
+        "Shape should contain nested 'city: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("zip: string"),
+        "Shape should contain nested 'zip: string', got: {ts}"
+    );
+}

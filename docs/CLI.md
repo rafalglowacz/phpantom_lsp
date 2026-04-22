@@ -10,12 +10,60 @@ and what CI reports.
 | Command                  | Purpose                                              |
 | ------------------------ | ---------------------------------------------------- |
 | `phpantom_lsp`           | Start the LSP server over stdin/stdout (the default) |
+| `phpantom_lsp --tcp 9257`| Start the LSP server listening on a TCP port         |
 | `phpantom_lsp analyze`   | Report diagnostics across the project                |
 | `phpantom_lsp fix`       | Apply automated code fixes across the project        |
 | `phpantom_lsp init`      | Generate a default `.phpantom.toml` config file      |
 
 Running with no subcommand starts the language server. Editors launch
 this automatically.
+
+---
+
+## TCP Transport
+
+By default PHPantom communicates over stdin/stdout, which is what most
+editors expect. The `--tcp` flag switches to TCP transport instead,
+which is useful when you want to attach a debugger to the server
+process, connect from an IDE plugin that prefers a network socket, or
+just poke at the JSON-RPC stream with `nc` or `socat`.
+
+The server binds to the given address, accepts a single client
+connection, serves it, and exits when the client disconnects.
+
+```sh
+phpantom_lsp --tcp 9257                  # listen on 127.0.0.1:9257
+phpantom_lsp --tcp 127.0.0.1:9257       # same, explicit host
+phpantom_lsp --tcp 0.0.0.0:9257         # listen on all interfaces
+phpantom_lsp --tcp 0                    # OS picks a free port
+```
+
+When the server starts it prints the bound address to stderr:
+
+```
+PHPantom LSP listening on tcp://127.0.0.1:9257
+```
+
+This is especially handy with port `0`: the OS assigns an available
+port and the server tells you which one it picked.
+
+### Connecting
+
+Any LSP client that supports TCP can connect. For quick manual testing:
+
+```sh
+# In one terminal, start the server:
+phpantom_lsp --tcp 9257
+
+# In another terminal, connect and send JSON-RPC:
+nc 127.0.0.1 9257
+```
+
+### Options
+
+| Flag              | Description                                                              |
+| ----------------- | ------------------------------------------------------------------------ |
+| `--tcp <ADDR>`    | Address to listen on. Full `HOST:PORT` or just `PORT` (defaults to `127.0.0.1`). |
 
 ---
 

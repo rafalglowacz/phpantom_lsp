@@ -301,12 +301,25 @@ fn resolve_named_type(
             // Apply generic substitution if the type hint carried
             // generic arguments and the class has template parameters.
             if !generic_args.is_empty() && !cls.template_params.is_empty() {
+                let generic_arg_strings: Vec<String> =
+                    generic_args.iter().map(|a| a.to_string()).collect();
                 let resolved = if let Some(cache) = virtual_members::active_resolved_class_cache() {
-                    virtual_members::resolve_class_fully_cached(&cls, class_loader, cache)
+                    virtual_members::resolve_class_fully_with_generics(
+                        &cls,
+                        class_loader,
+                        Some(cache),
+                        &generic_arg_strings,
+                        generic_args,
+                    )
                 } else {
-                    virtual_members::resolve_class_fully(&cls, class_loader)
+                    let base = virtual_members::resolve_class_fully(&cls, class_loader);
+                    if !base.template_params.is_empty() {
+                        std::sync::Arc::new(apply_generic_args(&base, generic_args))
+                    } else {
+                        base
+                    }
                 };
-                let mut result = apply_generic_args(&resolved, generic_args);
+                let mut result = std::sync::Arc::unwrap_or_clone(resolved);
 
                 // ── Template-param mixin resolution ────────────────
                 // When a class declares `@mixin TParam` where `TParam`
@@ -369,7 +382,7 @@ fn resolve_named_type(
             };
 
             if let Some(owner) = owning
-                && owner.template_params.contains(&short.to_string())
+                && owner.template_params.iter().any(|p| p == short)
                 && let Some(bound) = owner.template_param_bounds.get(short)
             {
                 return type_hint_to_classes_typed_depth(

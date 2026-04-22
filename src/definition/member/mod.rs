@@ -755,10 +755,7 @@ impl Backend {
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     ) -> Option<(ClassInfo, String, String)> {
         // Only applies to the Eloquent Builder class.
-        let raw_fqn = match &raw_class.file_namespace {
-            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, raw_class.name),
-            _ => raw_class.name.clone(),
-        };
+        let raw_fqn = raw_class.fqn();
         if raw_fqn != ELOQUENT_BUILDER_FQN {
             return None;
         }

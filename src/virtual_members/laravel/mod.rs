@@ -106,6 +106,7 @@ pub use scopes::build_scope_methods_for_builder;
 use scopes::{build_scope_methods, is_scope_method};
 use where_property::{build_where_property_methods_for_class, lowercase_method_names};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use builder::build_builder_forwarded_methods;
@@ -123,6 +124,21 @@ pub(crate) const ELOQUENT_MODEL_FQN: &str = "Illuminate\\Database\\Eloquent\\Mod
 
 /// The fully-qualified name of the Eloquent Builder class.
 pub const ELOQUENT_BUILDER_FQN: &str = "Illuminate\\Database\\Eloquent\\Builder";
+
+/// Build a substitution map that replaces `static`, `$this`, and `self`
+/// with the given type.
+///
+/// This is used across multiple Laravel virtual member providers
+/// (builder forwarding, model virtual methods, scope methods) to
+/// resolve self-referencing return types to concrete model or builder
+/// types.
+pub(super) fn self_ref_subs(ty: PhpType) -> HashMap<String, PhpType> {
+    HashMap::from([
+        ("static".to_owned(), ty.clone()),
+        ("$this".to_owned(), ty.clone()),
+        ("self".to_owned(), ty),
+    ])
+}
 
 // ─── Type-resolution helpers ────────────────────────────────────────────────
 //
@@ -161,17 +177,21 @@ pub(crate) fn try_swap_custom_collection(
     }
 
     // The last generic arg is typically the model type.
-    let model_arg = generic_args.last().unwrap().to_string();
-    let model_class = find_class_in(all_classes, &model_arg)
+    let model_name = match generic_args.last().unwrap().base_name() {
+        Some(name) => name.to_string(),
+        None => return cls,
+    };
+    let model_class = find_class_in(all_classes, &model_name)
         .cloned()
-        .or_else(|| class_loader(&model_arg).map(Arc::unwrap_or_clone));
+        .or_else(|| class_loader(&model_name).map(Arc::unwrap_or_clone));
 
     if let Some(ref mc) = model_class
-        && let Some(coll_name) = mc.laravel().and_then(|l| l.custom_collection.as_ref())
+        && let Some(coll_type) = mc.laravel().and_then(|l| l.custom_collection.as_ref())
     {
-        find_class_in(all_classes, coll_name)
+        let coll_name = coll_type.to_string();
+        find_class_in(all_classes, &coll_name)
             .cloned()
-            .or_else(|| class_loader(coll_name).map(Arc::unwrap_or_clone))
+            .or_else(|| class_loader(&coll_name).map(Arc::unwrap_or_clone))
             .unwrap_or(cls)
     } else {
         cls
@@ -209,9 +229,12 @@ pub(crate) fn try_inject_builder_scopes(
     }
 
     // The first (or only) generic arg is the model type.
-    let model_arg = generic_args.first().unwrap().to_string();
+    let model_name = match generic_args.first().unwrap().base_name() {
+        Some(name) => name,
+        None => return,
+    };
 
-    inject_scopes_and_model_methods(result, &model_arg, class_loader);
+    inject_scopes_and_model_methods(result, model_name, class_loader);
 }
 
 /// Inject scope methods and model virtual methods onto a class that has
@@ -340,10 +363,7 @@ fn find_builder_mixin_model(
         // Verify it's actually the Eloquent Builder (not some other
         // class named Builder).  If we can't load it, trust the FQN.
         if let Some(ref mixin_cls) = class_loader(mixin_name) {
-            let fqn = match mixin_cls.file_namespace.as_deref() {
-                Some(ns) => format!("{ns}\\{}", mixin_cls.name),
-                None => mixin_cls.name.clone(),
-            };
+            let fqn = mixin_cls.fqn();
             if fqn != ELOQUENT_BUILDER_FQN && mixin_cls.name != ELOQUENT_BUILDER_FQN {
                 continue;
             }
@@ -362,11 +382,10 @@ fn find_builder_mixin_model(
             && let Some(first_arg) = args.first()
         {
             let resolved = first_arg.substitute(active_subs);
-            let model_name = resolved.to_string();
-            // Only inject if we resolved to a concrete type
-            // (not still a template parameter name).
-            if !model_name.is_empty() && !root_cls.template_params.contains(&model_name) {
-                return Some(model_name);
+            if let Some(name) = resolved.base_name()
+                && !root_cls.template_params.iter().any(|p| p == name)
+            {
+                return Some(name.to_string());
             }
         }
     }
@@ -437,8 +456,6 @@ fn inject_model_virtual_methods(
     model_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) {
-    use std::collections::HashMap;
-
     use crate::php_type::PhpType;
 
     let model_class = match class_loader(model_name) {
@@ -465,12 +482,8 @@ fn inject_model_virtual_methods(
     // `Builder<static>`), so substituting `static` → model name
     // produces `Builder<Customer>`.  Using `Builder<Model>` here
     // would double-wrap to `Builder<Builder<Customer>>`.
-    let model_fqn = model_name.to_string();
-    let model_type = PhpType::Named(model_fqn.clone());
-    let mut subs = HashMap::new();
-    subs.insert("static".to_string(), model_type.clone());
-    subs.insert("$this".to_string(), model_type.clone());
-    subs.insert("self".to_string(), model_type);
+    let model_type = PhpType::Named(model_name.to_owned());
+    let subs = self_ref_subs(model_type);
 
     for method in &resolved_model.methods {
         // Only inject virtual methods (from @method tags).  Real
@@ -510,13 +523,9 @@ fn inject_model_virtual_methods(
 /// 3. The FQN constructed from `file_namespace + name` (PSR-4 loaded classes
 ///    where `name` is the short name only).
 fn is_eloquent_builder_fqn(base_fqn: &str, cls: &ClassInfo) -> bool {
-    let fqn_from_ns = cls
-        .file_namespace
-        .as_ref()
-        .map(|ns| format!("{ns}\\{}", cls.name));
     base_fqn == ELOQUENT_BUILDER_FQN
         || cls.name == ELOQUENT_BUILDER_FQN
-        || fqn_from_ns.as_deref() == Some(ELOQUENT_BUILDER_FQN)
+        || cls.fqn() == ELOQUENT_BUILDER_FQN
 }
 
 /// Find a class in a slice by name (short or FQN).
@@ -551,6 +560,11 @@ fn find_class_in<'a>(all_classes: &'a [Arc<ClassInfo>], name: &str) -> Option<&'
 /// produces a virtual property `$posts` with type
 /// `\Illuminate\Database\Eloquent\Collection<Post>`.
 pub struct LaravelModelProvider;
+
+/// Pre-built `Carbon\Carbon` type used for date-related virtual properties.
+fn carbon_type() -> PhpType {
+    PhpType::Named("Carbon\\Carbon".to_owned())
+}
 
 impl VirtualMemberProvider for LaravelModelProvider {
     /// Returns `true` if the class extends `Illuminate\Database\Eloquent\Model`.
@@ -596,18 +610,18 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 }
                 properties.push(PropertyInfo::virtual_property_typed(
                     column,
-                    Some(&PhpType::Named("Carbon\\Carbon".to_string())),
+                    Some(&carbon_type()),
                 ));
             }
 
             // ── Attribute default properties (fallback) ─────────────
             // Only add properties for columns not already covered by $casts
             // or $dates.
-            for (column, php_type_str) in &laravel.attributes_definitions {
+            for (column, php_type) in &laravel.attributes_definitions {
                 if !seen_props.insert(column.clone()) {
                     continue;
                 }
-                properties.push(PropertyInfo::virtual_property(column, Some(php_type_str)));
+                properties.push(PropertyInfo::virtual_property_typed(column, Some(php_type)));
             }
 
             // ── Column name properties (last-resort fallback) ───────
@@ -645,7 +659,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                     if seen_props.insert(col.to_string()) {
                         properties.push(PropertyInfo::virtual_property_typed(
                             col,
-                            Some(&PhpType::Named("Carbon\\Carbon".to_string())),
+                            Some(&carbon_type()),
                         ));
                     }
                 }
@@ -712,7 +726,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                         related_class
                             .laravel
                             .as_ref()
-                            .and_then(|l| l.custom_collection.clone())
+                            .and_then(|l| l.custom_collection.as_ref().map(|c| c.to_string()))
                     })
             } else {
                 None

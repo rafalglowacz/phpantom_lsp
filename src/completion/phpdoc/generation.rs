@@ -51,7 +51,7 @@ use crate::completion::resolver::FunctionLoaderFn;
 use crate::completion::source::comment_position::position_to_byte_offset;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
-use crate::php_type::{PhpType, is_keyword_type};
+use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::{byte_offset_to_utf16_col, utf16_col_to_byte_offset};
 
@@ -82,7 +82,13 @@ pub fn try_generate_docblock(
         return None;
     }
 
-    let sym = parse_declaration_info(&remaining);
+    let mut sym = parse_declaration_info(&remaining);
+
+    // For untyped properties, try to fill in the type from the parsed
+    // class data (e.g. constructor-inferred `$this->prop = new Foo()`).
+    if matches!(context, DocblockContext::Property) && sym.type_hint.is_none() {
+        enrich_property_type_from_class(&mut sym, content, position, local_classes);
+    }
 
     let snippet = build_docblock_snippet(
         &context,
@@ -176,7 +182,13 @@ pub fn try_generate_docblock_on_enter(
         return None;
     }
 
-    let sym = parse_declaration_info(&after_block);
+    let mut sym = parse_declaration_info(&after_block);
+
+    // For untyped properties, try to fill in the type from the parsed
+    // class data (e.g. constructor-inferred `$this->prop = new Foo()`).
+    if matches!(context, DocblockContext::Property) && sym.type_hint.is_none() {
+        enrich_property_type_from_class(&mut sym, content, position, local_classes);
+    }
 
     // Build the docblock as plain text (no snippet tab stops).
     let plain = build_docblock_plain(
@@ -846,6 +858,54 @@ fn extract_return_type_from_decl(after_close: &str) -> Option<PhpType> {
 }
 
 /// Extract the type hint from a property or constant declaration.
+/// Enrich an untyped property's [`SymbolInfo::type_hint`] by looking up
+/// the property in the file's parsed class data.
+///
+/// When a property has no native type hint or docblock, the constructor-
+/// inference pass in `extract_class_like_members` may have filled in a
+/// type from `$this->prop = new ClassName()` or a promoted parameter
+/// default.  This function finds that inferred type and copies it into
+/// `sym` so that the generated `@var` tag uses the concrete class name
+/// instead of `mixed`.
+///
+/// The type is shortened (leading namespace segments stripped) for
+/// readability in the generated docblock.
+fn enrich_property_type_from_class(
+    sym: &mut SymbolInfo,
+    content: &str,
+    position: Position,
+    local_classes: &[Arc<ClassInfo>],
+) {
+    // Extract the bare property name (strip the `$` prefix).
+    let prop_name = sym
+        .variable_name
+        .as_ref()
+        .and_then(|v| v.strip_prefix('$'))
+        .unwrap_or("");
+    if prop_name.is_empty() {
+        return;
+    }
+
+    // Find the enclosing class by byte offset.
+    let cursor_offset = position_to_byte_offset(content, position) as u32;
+    let enclosing = local_classes
+        .iter()
+        .find(|cls| cls.start_offset <= cursor_offset && cursor_offset <= cls.end_offset);
+    let Some(cls) = enclosing else {
+        return;
+    };
+
+    // Look up the property.  Only use the type when it was inferred
+    // (the native_type_hint is None — if it were set, the source-text
+    // parser would already have extracted it).
+    if let Some(prop) = cls.properties.iter().find(|p| p.name == prop_name)
+        && prop.native_type_hint.is_none()
+        && let Some(ref inferred) = prop.type_hint
+    {
+        sym.type_hint = Some(inferred.shorten());
+    }
+}
+
 fn extract_property_type(decl: &str) -> Option<PhpType> {
     // Strip modifiers.
     let modifiers = [
@@ -1042,51 +1102,60 @@ pub(crate) fn enrichment_snippet(
     None
 }
 
-/// Plain-text version of `enrichment_snippet` (no tab stops).
+/// Structured version of [`enrichment_plain`] returning a [`PhpType`]
+/// instead of a display string.
 ///
-/// Also used by tag completion (`build_phpdoc_completions`) to enrich
-/// `@param`, `@return`, and `@var` type hints with template parameters.
-pub(crate) fn enrichment_plain(
+/// Use this when the enriched type needs to be compared structurally
+/// (via [`PhpType::equivalent`]) rather than by string equality. The
+/// plain-text callers that only need a display string should keep using
+/// [`enrichment_plain`].
+pub(crate) fn enrichment_plain_typed(
     type_hint: Option<&PhpType>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let pt = match type_hint {
-        None => return Some(PhpType::mixed().to_string()),
+        None => return Some(PhpType::mixed()),
         Some(t) => t,
     };
 
     if is_bare_array(pt) {
-        return Some(PhpType::generic_array_val(PhpType::mixed()).to_string());
+        return Some(PhpType::generic_array_val(PhpType::mixed()));
     }
 
     if is_callable_keyword(pt) {
-        let name = callable_display_name(pt);
-        return Some(format!("({}(): mixed)", name));
+        let kind = callable_display_name(pt).to_string();
+        return Some(PhpType::Callable {
+            kind,
+            params: vec![],
+            return_type: Some(Box::new(PhpType::mixed())),
+        });
     }
 
     // Union types — enrich individual callable / array parts.
-    // Use union_members to correctly handle generic nesting
-    // (e.g. `Collection<int|string, User>|null` must not be split on the inner `|`).
     let members = pt.union_members();
     if members.len() > 1 {
         let needs = members
             .iter()
             .any(|member| is_bare_array(member) || is_callable_keyword(member));
         if needs {
-            let enriched_parts: Vec<String> = members
+            let enriched: Vec<PhpType> = members
                 .iter()
                 .map(|member| {
                     if is_callable_keyword(member) {
-                        let name = callable_display_name(member);
-                        format!("({}(): mixed)", name)
+                        let kind = callable_display_name(member).to_string();
+                        PhpType::Callable {
+                            kind,
+                            params: vec![],
+                            return_type: Some(Box::new(PhpType::mixed())),
+                        }
                     } else if is_bare_array(member) {
-                        PhpType::generic_array_val(PhpType::mixed()).to_string()
+                        PhpType::generic_array_val(PhpType::mixed())
                     } else {
-                        member.to_string()
+                        (*member).clone()
                     }
                 })
                 .collect();
-            return Some(enriched_parts.join("|"));
+            return Some(PhpType::Union(enriched));
         }
         return None;
     }
@@ -1105,11 +1174,50 @@ pub(crate) fn enrichment_plain(
         && let Some(cls) = class_loader(name)
         && !cls.template_params.is_empty()
     {
-        let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
-        return Some(format!("{}<{}>", name, parts.join(", ")));
+        let args: Vec<PhpType> = cls
+            .template_params
+            .iter()
+            .map(|s| PhpType::Named(s.clone()))
+            .collect();
+        return Some(PhpType::Generic(name.to_string(), args));
     }
 
     None
+}
+
+/// Plain-text version of `enrichment_snippet` (no tab stops).
+///
+/// Also used by tag completion (`build_phpdoc_completions`) to enrich
+/// `@param`, `@return`, and `@var` type hints with template parameters.
+///
+/// Callable types are wrapped in parentheses for PHPDoc notation:
+/// `(Closure(): mixed)`, `(callable(): mixed)`.
+pub(crate) fn enrichment_plain(
+    type_hint: Option<&PhpType>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<String> {
+    let typed = enrichment_plain_typed(type_hint, class_loader)?;
+
+    // Callable types need parentheses in PHPDoc notation, which
+    // PhpType::Display does not add.
+    Some(enrichment_type_to_plain(&typed))
+}
+
+/// Format an enriched `PhpType` as a plain-text PHPDoc type string.
+///
+/// Callable types are wrapped in parentheses (`(Closure(): mixed)`)
+/// to match PHPDoc inline callable notation. Union members are
+/// formatted individually and joined with `|`.
+fn enrichment_type_to_plain(ty: &PhpType) -> String {
+    match ty {
+        PhpType::Callable { .. } => format!("({})", ty),
+        PhpType::Union(members) => members
+            .iter()
+            .map(enrichment_type_to_plain)
+            .collect::<Vec<_>>()
+            .join("|"),
+        _ => ty.to_string(),
+    }
 }
 
 // ─── Snippet / Plain Builder ────────────────────────────────────────────────
@@ -1208,8 +1316,8 @@ fn build_function_snippet(
     _indent: &str,
     content: &str,
     position: Position,
-    _use_map: &HashMap<String, String>,
-    _file_namespace: &Option<String>,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
@@ -1217,6 +1325,8 @@ fn build_function_snippet(
     let throws_ctx = ThrowsContext {
         class_loader,
         function_loader,
+        use_map,
+        file_namespace,
     };
     let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
         content,
@@ -1304,7 +1414,9 @@ fn build_function_snippet(
             lines.push(" *".to_string());
         }
         for exc in &uncaught {
-            lines.push(format!(" * @throws {}", exc));
+            let exc_str = exc.to_string();
+            let display = crate::util::short_name(&exc_str);
+            lines.push(format!(" * @throws {}", display));
         }
     }
 
@@ -1329,8 +1441,8 @@ fn build_function_plain(
     indent: &str,
     content: &str,
     position: Position,
-    _use_map: &HashMap<String, String>,
-    _file_namespace: &Option<String>,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
@@ -1338,6 +1450,8 @@ fn build_function_plain(
     let throws_ctx = ThrowsContext {
         class_loader,
         function_loader,
+        use_map,
+        file_namespace,
     };
     let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
         content,
@@ -1412,7 +1526,9 @@ fn build_function_plain(
             lines.push(format!("{} *", indent));
         }
         for exc in &uncaught {
-            lines.push(format!("{} * @throws {}", indent, exc));
+            let exc_str = exc.to_string();
+            let display = crate::util::short_name(&exc_str).to_string();
+            lines.push(format!("{} * @throws {}", indent, display));
         }
     }
 
@@ -1691,18 +1807,14 @@ fn property_var_type_snippet(
         }
         Some(th) => {
             let shortened = th.shorten();
-            let clean = shortened.to_string();
             // Callable types get a signature placeholder.
             if th.is_callable() {
-                let s = format!("(${{{}:{}()}})", *tab_stop, &clean);
+                let s = format!("(${{{}:{}()}})", *tab_stop, shortened);
                 *tab_stop += 1;
                 return s;
             }
-            if !matches!(
-                th,
-                PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
-            ) && !is_keyword_type(&clean)
-                && let Some(cls) = class_loader(&clean)
+            if let Some(name) = shortened.base_name()
+                && let Some(cls) = class_loader(name)
                 && !cls.template_params.is_empty()
             {
                 let mut parts = Vec::new();
@@ -1710,9 +1822,9 @@ fn property_var_type_snippet(
                     parts.push(format!("${{{}:{}}}", *tab_stop, tp));
                     *tab_stop += 1;
                 }
-                return format!("{}<{}>", &clean, parts.join(", "));
+                return format!("{}<{}>", name, parts.join(", "));
             }
-            clean
+            shortened.to_string()
         }
     }
 }
@@ -1727,21 +1839,17 @@ fn property_var_type_plain(
         Some(th) if th.is_bare_array() => "array".to_string(),
         Some(th) => {
             let shortened = th.shorten();
-            let clean = shortened.to_string();
             if th.is_callable() {
-                return format!("({}())", &clean);
+                return format!("({}())", shortened);
             }
-            if !matches!(
-                th,
-                PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
-            ) && !is_keyword_type(&clean)
-                && let Some(cls) = class_loader(&clean)
+            if let Some(name) = shortened.base_name()
+                && let Some(cls) = class_loader(name)
                 && !cls.template_params.is_empty()
             {
                 let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
-                return format!("{}<{}>", &clean, parts.join(", "));
+                return format!("{}<{}>", name, parts.join(", "));
             }
-            clean
+            shortened.to_string()
         }
     }
 }
@@ -1766,6 +1874,8 @@ fn build_throws_import_edits(
     let throws_ctx = ThrowsContext {
         class_loader,
         function_loader,
+        use_map,
+        file_namespace,
     };
     let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
         content,
@@ -1780,8 +1890,10 @@ fn build_throws_import_edits(
     let mut edits = Vec::new();
 
     for exc in &uncaught {
-        if let Some(fqn) = throws_analysis::resolve_exception_fqn(exc, use_map, file_namespace)
-            && !throws_analysis::has_use_import(content, &fqn)
+        // Exception types are already resolved to FQNs by
+        // `find_uncaught_throw_types_with_context` — do not re-resolve.
+        let fqn = exc.to_string();
+        if !throws_analysis::has_use_import(content, &fqn)
             && let Some(edit) = build_use_edit(&fqn, &use_block, file_namespace)
         {
             edits.extend(edit);

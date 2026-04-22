@@ -327,42 +327,6 @@ $one->  // should see Foo members
 
 ---
 
-## T12. Intersection types flattened to unions by `type_strings_joined`
-**Impact: Low-Medium · Effort: Low**
-
-`ResolvedType::type_strings_joined` joins all resolved type entries
-with `|`. When a variable has an intersection type (`A&B`), the
-resolution pipeline produces separate `ResolvedType` entries for each
-part, and the join produces `A|B` instead of `A&B`.
-
-This affects any consumer that reads the joined type string, including
-hover display, extract function parameter types, and docblock
-generation on extracted methods.
-
-**Example:**
-
-```php
-function measure(Countable&Serializable $thing): void {
-    // Select and extract:
-    echo $thing->count();
-}
-// Extracted method gets `Countable|Serializable $thing` instead of
-// `Countable&Serializable $thing`.
-```
-
-**Remaining work.** `PhpType::Intersection` already exists and
-`ResolvedType::types_joined()` returns a structured `PhpType`, but
-the resolution pipeline still produces separate `ResolvedType` entries
-for each part of an intersection. The fix is to make the pipeline emit
-a single `ResolvedType` with `PhpType::Intersection` when the source
-type is an intersection.
-
-**After fixing:** verify that extract function docblock generation
-preserves intersection types in both the native hint and the `@param`
-tag.
-
----
-
 ## T13. Closure variables lose callable signature detail
 **Impact: Low-Medium · Effort: Medium**
 
@@ -447,8 +411,9 @@ NonEmptyCountable.
 `Psalm/Storage/Assertion/`. PHPStan's `TypeSpecifier` returns
 `SpecifiedTypes` with dual sure/sureNot maps.
 
-**Depends on:** T19 (structured types make reconciliation much
-simpler, but basic reconciliation can work with strings too).
+**Depends on:** The structured type representation (`PhpType`) has
+landed, which makes reconciliation much simpler than working with
+raw strings.
 
 ---
 
@@ -555,8 +520,8 @@ This eliminates the depth limit entirely and makes the resolution
 cost proportional to the number of statements before the cursor,
 not the depth of the assignment chain.
 
-**Depends on:** T19 (structured type representation) should land
-first so the scope map stores `PhpType` values instead of strings.
+**Note:** The structured type representation (`PhpType`) has landed,
+so the scope map can store `PhpType` values directly.
 
 **Migration path:** Start with a parallel implementation behind a
 feature flag. The existing backward-scanning resolver stays as a
@@ -568,5 +533,7 @@ hover, diagnostics) once the forward walker covers enough cases.
 statement analyzers. Both converge on the same architecture: the
 scope is the single source of truth, populated eagerly as the walk
 progresses.
+
+
 
 

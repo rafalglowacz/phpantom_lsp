@@ -221,7 +221,7 @@ fn extract_class_docblock<'a>(
         .collect();
     let template_param_defaults: HashMap<String, PhpType> = params_full
         .into_iter()
-        .filter_map(|(name, _, _, default)| default.map(|d| (name, PhpType::parse(&d))))
+        .filter_map(|(name, _, _, default)| default.map(|d| (name, d)))
         .collect();
 
     let mixin_data = docblock::extract_mixin_tags_from_info(&info);
@@ -293,17 +293,17 @@ fn extract_custom_collection(
     use_generics: &[(String, Vec<PhpType>)],
     methods: &[MethodInfo],
     content: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     // 1. Try the #[CollectedBy] attribute first.
     if let Some(name) = extract_collected_by_attribute(attribute_lists, content) {
-        return Some(name);
+        return Some(PhpType::Named(name));
     }
 
     // 2. Fall back to @use HasCollection<X>.
     for (trait_name, args) in use_generics {
         let short = trait_name.rsplit('\\').next().unwrap_or(trait_name);
         if short == "HasCollection" && !args.is_empty() {
-            return Some(args[0].to_string());
+            return Some(args[0].clone());
         }
     }
 
@@ -322,7 +322,7 @@ fn extract_custom_collection(
 /// Returns `None` if no `newCollection` method exists, if it has no
 /// return type, or if the return type is the standard Eloquent
 /// Collection.
-fn extract_custom_collection_from_new_collection(methods: &[MethodInfo]) -> Option<String> {
+fn extract_custom_collection_from_new_collection(methods: &[MethodInfo]) -> Option<PhpType> {
     let method = methods.iter().find(|m| m.name == "newCollection")?;
     let return_type = method.return_type.as_ref()?;
 
@@ -340,16 +340,7 @@ fn extract_custom_collection_from_new_collection(methods: &[MethodInfo]) -> Opti
         return None;
     }
 
-    // For Named types, use the full string representation which preserves
-    // the leading `\` for FQNs so that `resolve_name` can distinguish
-    // FQN from short names.
-    // For Generic types (e.g. `TaskCollection<int, static>`), use just
-    // the base name since the generic parameters aren't needed for
-    // collection class resolution.
-    match return_type {
-        PhpType::Named(_) => Some(return_type.to_string()),
-        _ => Some(base.to_string()),
-    }
+    Some(return_type.clone())
 }
 
 /// Extract Eloquent cast definitions from a class's members.
@@ -524,7 +515,7 @@ fn extract_string_literal(text: &str) -> Option<String> {
 fn extract_attributes_definitions<'a>(
     members: impl Iterator<Item = &'a ClassLikeMember<'a>>,
     content: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(String, PhpType)> {
     for member in members {
         if let ClassLikeMember::Property(Property::Plain(plain)) = member {
             for item in plain.items.iter() {
@@ -555,7 +546,7 @@ fn extract_attributes_definitions<'a>(
 /// float, or string).
 ///
 /// Returns a list of `(column_name, php_type)` pairs.
-fn parse_attributes_array(text: &str) -> Vec<(String, String)> {
+fn parse_attributes_array(text: &str) -> Vec<(String, PhpType)> {
     let mut results = Vec::new();
     let trimmed = text.trim();
 
@@ -586,7 +577,7 @@ fn parse_attributes_array(text: &str) -> Vec<(String, String)> {
         }
 
         if let Some(php_type) = crate::util::infer_type_from_literal(value_part) {
-            results.push((key, php_type.to_string()));
+            results.push((key, php_type));
         }
     }
 
@@ -1165,7 +1156,7 @@ impl Backend {
 
                     let doc_info = extract_class_docblock(enum_def, doc_ctx);
 
-                    let interfaces: Vec<String> = enum_def
+                    let mut interfaces: Vec<String> = enum_def
                         .implements
                         .as_ref()
                         .map(|imp| {
@@ -1175,6 +1166,16 @@ impl Backend {
                                 .collect()
                         })
                         .unwrap_or_default();
+
+                    // Also add the implicit interface to the interfaces
+                    // list so that hierarchy checks (`is_subtype_of`)
+                    // recognise backed enums as subtypes of `BackedEnum`
+                    // and all enums as subtypes of `UnitEnum`.
+                    if !interfaces.iter().any(|i| {
+                        i.trim_start_matches('\\') == implicit_interface.trim_start_matches('\\')
+                    }) {
+                        interfaces.push(implicit_interface.to_string());
+                    }
 
                     let keyword_offset = enum_def.r#enum.span.start.offset;
                     let start_offset = enum_def.left_brace.start.offset;
@@ -1744,6 +1745,35 @@ impl Backend {
         doc_ctx: Option<&DocblockCtx<'a>>,
         class_template_params: &[String],
     ) -> ExtractedMembers {
+        /// Resolve a short class name to its FQN using the file's use-map
+        /// and namespace from [`DocblockCtx`].  When no context is
+        /// available the name is returned as-is.
+        fn resolve_name_via_ctx(name: &str, doc_ctx: Option<&DocblockCtx<'_>>) -> String {
+            // Already fully-qualified — strip the leading `\`.
+            if let Some(stripped) = name.strip_prefix('\\') {
+                return stripped.to_string();
+            }
+            let Some(ctx) = doc_ctx else {
+                return name.to_string();
+            };
+            // Check use-map (handles both unqualified and qualified names).
+            if let Some(pos) = name.find('\\') {
+                let first = &name[..pos];
+                let rest = &name[pos..];
+                if let Some(fqn) = ctx.use_map.get(first) {
+                    return format!("{fqn}{rest}");
+                }
+            } else if let Some(fqn) = ctx.use_map.get(name) {
+                return fqn.clone();
+            }
+            // Prepend current namespace if available.
+            if let Some(ref ns) = ctx.namespace {
+                format!("{ns}\\{name}")
+            } else {
+                name.to_string()
+            }
+        }
+
         let mut methods = Vec::new();
         let mut properties = Vec::new();
         let mut constants = Vec::new();
@@ -1751,6 +1781,7 @@ impl Backend {
         let mut trait_precedences = Vec::new();
         let mut trait_aliases = Vec::new();
         let mut inline_use_generics: Vec<(String, Vec<PhpType>)> = Vec::new();
+        let mut constructor_body: Option<&MethodBody<'_>> = None;
 
         for member in members {
             match member {
@@ -1792,10 +1823,9 @@ impl Backend {
                     // native type hint with the version-appropriate string.
                     let native_return_type = if let Some(ctx) = doc_ctx
                         && let Some(ver) = ctx.php_version
-                        && let Some(override_type) =
-                            super::extract_language_level_type(&method.attribute_lists, ctx, ver)
                     {
-                        Some(PhpType::parse(&override_type))
+                        super::extract_language_level_type(&method.attribute_lists, ctx, ver)
+                            .or(raw_native_return_type)
                     } else {
                         raw_native_return_type
                     };
@@ -1940,6 +1970,7 @@ impl Backend {
                     // (e.g. `@param list<User> $users` vs native `array $users`).
                     // We apply `resolve_effective_type()` to pick the winner.
                     if name == "__construct" {
+                        constructor_body = Some(&method.body);
                         for param in method.parameter_list.parameters.iter() {
                             if param.is_promoted_property() {
                                 let raw_name = param.variable.name.to_string();
@@ -1979,6 +2010,22 @@ impl Backend {
                                 } else {
                                     saved_native_hint.clone()
                                 };
+
+                                // When no type hint is available, infer from `new ClassName()`
+                                // default values (PHP 8.1+: `private $repo = new Repo()`).
+                                // Resolve to FQN eagerly so downstream code does not
+                                // need short-name resolution logic.
+                                let type_hint = type_hint.or_else(|| {
+                                    let dv = param.default_value.as_ref()?;
+                                    if let Expression::Instantiation(inst) = dv.value
+                                        && let Expression::Identifier(ident) = inst.class
+                                    {
+                                        let raw = ident.value().to_string();
+                                        let fqn = resolve_name_via_ctx(&raw, doc_ctx);
+                                        return Some(PhpType::Named(fqn));
+                                    }
+                                    None
+                                });
 
                                 let prop_name_offset = param.variable.span.start.offset;
                                 properties.push(PropertyInfo {
@@ -2159,8 +2206,8 @@ impl Backend {
                             super::extract_language_level_type(attr_lists, ctx, ver)
                     {
                         for prop in &mut prop_infos {
-                            prop.type_hint = Some(PhpType::parse(&override_type));
-                            prop.native_type_hint = Some(PhpType::parse(&override_type));
+                            prop.type_hint = Some(override_type.clone());
+                            prop.native_type_hint = Some(override_type.clone());
                         }
                     }
 
@@ -2401,6 +2448,35 @@ impl Backend {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Infer types for untyped properties from constructor assignments.
+        // Scans the constructor body for `$this->prop = new ClassName()`
+        // and fills in the type_hint when not set by declaration or docblock.
+        // Only applies when neither native type hint nor docblock type is present.
+        // Resolves to FQN eagerly so downstream code does not need
+        // short-name resolution logic.
+        if let Some(MethodBody::Concrete(concrete)) = constructor_body {
+            for stmt in concrete.statements.iter() {
+                if let Statement::Expression(expr_stmt) = stmt
+                    && let Expression::Assignment(assign) = expr_stmt.expression
+                    && let Expression::Access(Access::Property(pa)) = assign.lhs
+                    && let Expression::Variable(Variable::Direct(dv)) = pa.object
+                    && dv.name == "$this"
+                    && let ClassLikeMemberSelector::Identifier(ident) = &pa.property
+                    && let Expression::Instantiation(inst) = assign.rhs
+                    && let Expression::Identifier(class_ident) = inst.class
+                {
+                    let prop_name = ident.value.to_string();
+                    if let Some(prop) = properties.iter_mut().find(|p| {
+                        p.name == prop_name && p.type_hint.is_none() && p.native_type_hint.is_none()
+                    }) {
+                        let raw = class_ident.value().to_string();
+                        let fqn = resolve_name_via_ctx(&raw, doc_ctx);
+                        prop.type_hint = Some(PhpType::Named(fqn));
                     }
                 }
             }

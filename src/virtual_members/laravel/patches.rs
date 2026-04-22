@@ -125,7 +125,7 @@ fn patch_eloquent_builder_call_return_type(class: &mut ClassInfo) {
 /// returns void and the method returns the receiver) and preserves
 /// chain continuation.
 fn patch_conditionable_when_unless(class: &mut ClassInfo) {
-    let this_type = PhpType::Named("$this".to_string());
+    let this_type = PhpType::this();
     for method in class.methods.make_mut().iter_mut() {
         if method.name != "when" && method.name != "unless" {
             continue;
@@ -169,30 +169,8 @@ fn is_likely_template_param(ty: &PhpType) -> bool {
         _ => return false,
     };
 
-    // Self-like types are not template params.
-    if matches!(name, "static" | "self" | "$this") {
-        return false;
-    }
-
-    // PHP built-in / keyword types.
-    if matches!(
-        name,
-        "null"
-            | "void"
-            | "never"
-            | "mixed"
-            | "int"
-            | "float"
-            | "string"
-            | "bool"
-            | "true"
-            | "false"
-            | "array"
-            | "object"
-            | "callable"
-            | "iterable"
-            | "resource"
-    ) {
+    // PHP built-in / keyword types (includes self, static, $this, parent).
+    if crate::php_type::is_keyword_type(name) {
         return false;
     }
 
@@ -230,11 +208,9 @@ fn is_likely_template_param(ty: &PhpType) -> bool {
 /// `selectOne`).  Patching this here lets property access on query
 /// results resolve correctly across the codebase.
 fn patch_db_select_return_types(class: &mut ClassInfo) {
-    let array_of_std = PhpType::Generic(
-        "array".to_string(),
-        vec![PhpType::int(), PhpType::Named("stdClass".to_string())],
-    );
-    let std_or_null = PhpType::Nullable(Box::new(PhpType::Named("stdClass".to_string())));
+    let std_class = PhpType::Named("stdClass".to_owned());
+    let array_of_std = PhpType::generic_array(PhpType::int(), std_class.clone());
+    let std_or_null = PhpType::Nullable(Box::new(std_class));
 
     for method in class.methods.make_mut().iter_mut() {
         match method.name.as_str() {

@@ -19,17 +19,10 @@
 namespace Demo {
 
 use Attribute;
-use Bug10298\PropAttr;
-use Bug5607\Cl;
 use Closure;
 use Demo\ValidationException;
 use Demo\NotFoundException;
 use Exception;
-use Override;
-use PHPStan\DependencyInjection\GenerateFactory;
-use PHPStan\Reflection\ClassReflection;
-use ReadonlyPropertyAssignPhpDoc\C;
-use Stringable;
 use Demo\UserProfile as Profile;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -147,7 +140,7 @@ class VarDocblockDemo
     {
         /** @var Pencil $inlineHinted */
         $inlineHinted = getUnknownValue();
-        $inlineHinted->sketch();                  // with explicit variable name
+        $inlineHinted->sketch();
 
         /** @var Pen */
         $hinted = getUnknownValue();
@@ -2549,6 +2542,9 @@ class HoverOriginsDemo extends Model implements Renderable
 // Place cursor on `MutateArrayInsertSpec` and press Ctrl+. (or Cmd+. on Mac)
 // to see "Import `Couchbase\MutateArrayInsertSpec`" in the quick-fix menu.
 // Accepting inserts a `use Couchbase\MutateArrayInsertSpec;` at the top.
+//
+// Because this file has two unresolved names, the quick-fix menu also shows
+// "Import all missing classes" which imports both at once.
 
 class ImportClassDemo
 {
@@ -2723,6 +2719,45 @@ class ArgumentCountDemo
     }
 }
 
+class TypeErrorDemo
+{
+    public function demo(): void
+    {
+        $user = new User('Alice', 'alice@test.com');
+
+        // Correct — no diagnostic:
+        $user->setName('Bob');
+        $user->setStatus(Status::Active);
+
+        // Type error — string passed to int parameter:
+        $this->requiresInt("not a number");
+
+        // Type error — null passed to non-nullable parameter:
+        $this->requiresString(null);
+
+        // Type error — wrong class type:
+        $pen = new Pen('blue');
+        $this->requiresUser($pen);
+
+        // No diagnostic — subclass is compatible:
+        $admin = new AdminUser('Admin', 'admin@test.com', ['manage']);
+        $this->requiresUser($admin);
+
+        // No diagnostic — null is valid for nullable parameter:
+        $this->acceptsNullable(null);
+        $this->acceptsNullable("hello");
+
+        // No diagnostic — int widens to float:
+        $this->requiresFloat(42);
+    }
+
+    private function requiresInt(int $value): void {}
+    private function requiresString(string $text): void {}
+    private function requiresUser(User $user): void {}
+    private function acceptsNullable(?string $text): void {}
+    private function requiresFloat(float $value): void {}
+}
+
 
 // ── Implement Missing Methods (Code Action) ─────────────────────────────────
 // Uncomment the class below, place the cursor inside it, and trigger
@@ -2863,6 +2898,23 @@ class PassByReferenceDemo
         // acquires that type after the call.
         initPen($pen);
         $pen->write();                    // $pen is now Pen
+
+        // Static method calls with by-ref parameters:
+        PenFactory::create($staticPen);
+        $staticPen->write();              // $staticPen is now Pen
+
+        // Constructor calls with by-ref parameters:
+        new PenBuilder($ctorPen);
+        $ctorPen->write();                // $ctorPen is now Pen
+
+        // Instance method calls ($this->method) with by-ref parameters:
+        $this->init($thisPen);
+        $thisPen->write();                // $thisPen is now Pen
+    }
+
+    private function init(?Pen &$pen): void
+    {
+        $pen = new Pen();
     }
 }
 
@@ -2974,7 +3026,7 @@ class InlayHintsDemo
     public function demo(): void
     {
         // Parameter name hints appear before each argument:
-        $user = createUser('Alice', 25);          // name:, age:
+        $user = createUser('Alice', 'test@example.com');          // name:, email:
 
         // By-reference parameters show & before the name:
         $arr = [1, 2, 3];
@@ -3315,7 +3367,71 @@ class ConditionalLoopShapeDemo
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ── Invalid Class-Like Kind Diagnostics ─────────────────────────────────────
+// PHPantom flags class-like names used in positions where their kind is
+// guaranteed to fail at runtime.  Open demo() and look for Error/Warning
+// squiggles on the class names.
+
+class InvalidClassKindDemo
+{
+    public function demo(): void
+    {
+        // Error: cannot instantiate abstract class
+        $a = new ScaffoldingAbstractShape();
+
+        // Error: cannot instantiate enum
+        $b = new Status();
+
+        // Warning: instanceof with a trait always evaluates to false
+        $x = new Pen('test');
+        $result = $x instanceof JsonSerializer;
+
+        // Warning: trait in a type hint will always fail type checking
+        $this->acceptTrait(new Pen('test'));
+    }
+
+    private function acceptTrait(JsonSerializer $x): JsonSerializer
+    {
+        return $x;
+    }
+
+    // These also produce diagnostics but would crash at class-load time,
+    // so they are commented out.  See the AGENTS.md hoisting pitfall note.
+}
+
+
+// ── Untyped Property Inference ──────────────────────────────────────────────
+// Properties without type declarations have their types inferred from
+// constructor assignments (`$this->prop = new Foo()`) and promoted
+// parameter defaults (`private $prop = new Foo()`). Trigger completion
+// after `->` on the property to see methods from the inferred type.
+
+class UntypedPropertyInferenceDemo
+{
+    private $repository;
+    private $logger;
+
+    public function __construct(
+        private $defaultRepo = new ScaffoldingUntypedRepo(),
+    ) {
+        $this->repository = new ScaffoldingUntypedRepo();
+        $this->logger = new ScaffoldingUntypedLogger();
+    }
+
+    public function demo(): void
+    {
+        // Constructor body assignment: $this->repository = new ScaffoldingUntypedRepo()
+        $this->repository->findById(1);       // resolves ScaffoldingUntypedRepo::findById()
+
+        // Constructor body assignment: $this->logger = new ScaffoldingUntypedLogger()
+        $this->logger->info('hello');         // resolves ScaffoldingUntypedLogger::info()
+
+        // Promoted parameter default: private $defaultRepo = new ScaffoldingUntypedRepo()
+        $this->defaultRepo->findById(42);     // resolves ScaffoldingUntypedRepo::findById()
+    }
+}
+
+
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 // ┃  SCAFFOLDING — Supporting definitions below this line.              ┃
 
@@ -3383,6 +3499,20 @@ class TreeMapperImpl
 // known PHP limitation (php-src#7873), not a bug that will be fixed.
 // The same applies to `interface Foo extends \Stringable`.
 
+
+// ── Untyped Property Inference Scaffolding ──────────────────────────────────
+
+class ScaffoldingUntypedRepo
+{
+    public function findById(int $id): Pen { return new Pen('found'); }
+    public function save(Pen $pen): void {}
+}
+
+class ScaffoldingUntypedLogger
+{
+    public function info(string $msg): void {}
+    public function error(string $msg): void {}
+}
 
 // ── Demo-Specific Scaffolding ───────────────────────────────────────────────
 
@@ -3739,7 +3869,7 @@ class ScaffoldingEventBus
     {
         $params = (new \ReflectionFunction($callback))->getParameters();
         $type = $params[0]->getType();
-        $class = $type ? $type->getName() : 'stdClass';
+        $class = $type instanceof \ReflectionNamedType ? $type->getName() : 'stdClass';
         return (new \ReflectionClass($class))->newInstanceWithoutConstructor();
     }
 }
@@ -3755,7 +3885,7 @@ class ScaffoldingBatchProcessor
     {
         $params = (new \ReflectionFunction($handler))->getParameters();
         $type = $params[1]->getType();
-        $class = $type ? $type->getName() : 'stdClass';
+        $class = $type instanceof \ReflectionNamedType ? $type->getName() : 'stdClass';
         return (new \ReflectionClass($class))->newInstanceWithoutConstructor();
     }
 }
@@ -4778,6 +4908,22 @@ function createPenFromString(string $input): Pen
 function initPen(?Pen &$pen): void
 {
     $pen = new Pen();
+}
+
+class PenFactory
+{
+    public static function create(?Pen &$pen): void
+    {
+        $pen = new Pen();
+    }
+}
+
+class PenBuilder
+{
+    public function __construct(?Pen &$pen)
+    {
+        $pen = new Pen();
+    }
 }
 
 interface ScaffoldingEntityFinder
@@ -5846,6 +5992,14 @@ function runDemoAssertions(): void
     initPen($refPen);
     assert($refPen instanceof Pen, 'initPen(&$pen) must give $pen type Pen');
 
+    $staticPen = null;
+    PenFactory::create($staticPen);
+    assert($staticPen instanceof Pen, 'PenFactory::create(&$pen) must give $pen type Pen');
+
+    $ctorPen = null;
+    new PenBuilder($ctorPen);
+    assert($ctorPen instanceof Pen, 'new PenBuilder(&$pen) must give $pen type Pen');
+
     // ── Interface template inheritance (class-string<T>) ────────────────
     $locator = new ScaffoldingEntityLocator();
     $locatorResult = $locator->find(Pen::class);
@@ -6013,6 +6167,14 @@ function runDemoAssertions(): void
     foreach ($shapeGrouped as $shapeEntry) {
         assert($shapeEntry['tool'] instanceof Pen, 'Shape key from conditional loop must resolve to Pen');
     }
+
+    // ── Untyped property inference from constructor ─────────────────────
+    $untypedDemo = new UntypedPropertyInferenceDemo();
+    // The scaffolding repo's findById() returns Pen, so we can verify
+    // that the inferred type propagates through the property chain.
+    $repoRef = new ScaffoldingUntypedRepo();
+    $found = $repoRef->findById(1);
+    assert($found instanceof Pen, 'ScaffoldingUntypedRepo::findById() must return Pen');
 
     echo "All assertions passed.\n";
 }

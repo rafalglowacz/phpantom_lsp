@@ -1344,7 +1344,7 @@ fn resolve_closure_params_with_inferred(
                                 resolved_classes.iter().any(|explicit_cls| {
                                     crate::util::is_subtype_of_names(
                                         &inferred_cls.fqn(),
-                                        &explicit_cls.name,
+                                        &explicit_cls.fqn(),
                                         ctx.class_loader,
                                     )
                                 })
@@ -1357,7 +1357,8 @@ fn resolve_closure_params_with_inferred(
                             break;
                         }
                     }
-                    *results = ResolvedType::from_classes(resolved_classes);
+                    *results =
+                        ResolvedType::from_classes_with_hint(resolved_classes, hint_type.clone());
                     break;
                 }
 
@@ -1500,10 +1501,8 @@ fn infer_callable_params_from_function(
         // concrete element type (`PurchaseFileProduct`).
         if !params.is_empty() && !fi.template_params.is_empty() && !fi.template_bindings.is_empty()
         {
-            let text_args = extract_argument_texts(arguments, ctx.content);
-            let text_args_joined = text_args.join(", ");
-            let subs =
-                super::rhs_resolution::build_function_template_subs(&fi, &text_args_joined, &rctx);
+            let arg_texts = extract_argument_texts(arguments, ctx.content);
+            let subs = super::rhs_resolution::build_function_template_subs(&fi, &arg_texts, &rctx);
             if !subs.is_empty() {
                 params = params.into_iter().map(|p| p.substitute(&subs)).collect();
             }

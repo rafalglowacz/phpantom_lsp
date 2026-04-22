@@ -50,7 +50,7 @@ impl Backend {
                     self.highlight_variable(symbol_map, content, name, span.start)
                 }
             }
-            SymbolKind::ClassReference { name, is_fqn } => {
+            SymbolKind::ClassReference { name, is_fqn, .. } => {
                 let ctx = self.file_context(uri);
                 let fqn = if *is_fqn {
                     name.clone()
@@ -200,7 +200,7 @@ impl Backend {
 
         for span in &symbol_map.spans {
             let fqn = match &span.kind {
-                SymbolKind::ClassReference { name, is_fqn } => {
+                SymbolKind::ClassReference { name, is_fqn, .. } => {
                     if *is_fqn {
                         name.clone()
                     } else {

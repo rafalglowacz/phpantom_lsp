@@ -6,5 +6,5 @@
 /// - **narrowing**: instanceof / assert / custom type guard narrowing
 /// - **conditional**: PHPStan conditional return type resolution at call sites
 pub mod conditional;
-pub(crate) mod narrowing;
-pub(crate) mod resolution;
+pub mod narrowing;
+pub mod resolution;

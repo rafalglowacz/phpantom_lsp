@@ -804,10 +804,10 @@ so this fast-path would apply to the majority of checks.
    flowing through `mago-names` / `mago-syntax` are already atoms.
    Using `Atom` or `Arc<str>` for class names in PHPantom's own
    data structures would reduce memory and make the subtype cache
-   keys cheaper to hash and compare. This becomes a natural
-   consequence of T19 (structured type representation) since each
-   type node would store an interned name rather than an owned
-   `String`.
+   keys cheaper to hash and compare. Now that `PhpType` is the
+   structured type representation throughout the codebase, interning
+   the name strings inside each `PhpType` node (replacing owned
+   `String` with `Atom` or `Arc<str>`) is a natural next step.
 
 ---
 

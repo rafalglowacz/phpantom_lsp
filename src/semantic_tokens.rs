@@ -161,7 +161,7 @@ impl Backend {
             }
 
             let (token_type, modifiers) = match &span.kind {
-                SymbolKind::ClassReference { name, is_fqn } => {
+                SymbolKind::ClassReference { name, is_fqn, .. } => {
                     // Check if this class reference is actually a
                     // template parameter name (e.g. `T` from `@template T`).
                     if self.is_template_param(name, span.start, symbol_map) {

@@ -30,7 +30,7 @@ impl Backend {
         let span = self.lookup_symbol_map(uri, offset)?;
 
         let fqn = match &span.kind {
-            MapSymbolKind::ClassReference { name, is_fqn } => {
+            MapSymbolKind::ClassReference { name, is_fqn, .. } => {
                 if *is_fqn {
                     name.trim_start_matches('\\').to_string()
                 } else {

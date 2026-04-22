@@ -184,7 +184,7 @@ impl Backend {
         offset: u32,
     ) -> Option<String> {
         match kind {
-            SymbolKind::ClassReference { name, is_fqn } => {
+            SymbolKind::ClassReference { name, is_fqn, .. } => {
                 let ctx = self.file_context(uri);
                 let fqn = if *is_fqn {
                     name.clone()

@@ -17,11 +17,12 @@
 ///   arguments were provided (or none were preserved); walks the
 ///   conditional tree taking the "null default" branch at each level.
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use mago_syntax::ast::*;
 
 use crate::php_type::PhpType;
-use crate::types::ParameterInfo;
+use crate::types::{ClassInfo, ParameterInfo};
 
 /// Callback that resolves a variable name (e.g. `"$requestType"`) to the
 /// class names it holds as class-string values (e.g. from match expression
@@ -80,6 +81,7 @@ pub(crate) fn resolve_conditional_with_text_args(
     text_args: &str,
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
     resolve_conditional_with_text_args_and_defaults(
         conditional,
@@ -88,6 +90,7 @@ pub(crate) fn resolve_conditional_with_text_args(
         var_resolver,
         calling_class_name,
         None,
+        class_loader,
     )
 }
 
@@ -104,6 +107,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
     template_defaults: Option<&HashMap<String, PhpType>>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
@@ -166,6 +170,10 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         }
                     }
                     if !class_names.is_empty() {
+                        let class_names: Vec<String> = class_names
+                            .into_iter()
+                            .map(|n| crate::util::resolve_name_via_loader(&n, class_loader))
+                            .collect();
                         let ty = if class_names.len() == 1 {
                             PhpType::Named(class_names.into_iter().next().unwrap())
                         } else {
@@ -180,6 +188,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     );
                 }
 
@@ -189,7 +198,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                 {
                     let class_name =
                         resolve_self_keyword(&class_name, calling_class_name).unwrap_or(class_name);
-                    return Some(PhpType::Named(class_name));
+                    let resolved = crate::util::resolve_name_via_loader(&class_name, class_loader);
+                    return Some(PhpType::Named(resolved));
                 }
                 // Check if the argument is a variable holding class-string
                 // value(s) (e.g. from a match expression).
@@ -200,6 +210,10 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                 {
                     let names = resolver(trimmed);
                     if !names.is_empty() {
+                        let names: Vec<String> = names
+                            .into_iter()
+                            .map(|n| crate::util::resolve_name_via_loader(&n, class_loader))
+                            .collect();
                         let ty = if names.len() == 1 {
                             PhpType::Named(names.into_iter().next().unwrap())
                         } else {
@@ -216,6 +230,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     var_resolver,
                     calling_class_name,
                     template_defaults,
+                    class_loader,
                 )
             } else if condition.as_ref().is_null() {
                 if arg_text.is_none() || arg_text == Some("") || arg_text == Some("null") {
@@ -227,6 +242,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     )
                 } else {
                     // Argument was provided → not null
@@ -237,6 +253,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     )
                 }
             } else if let PhpType::Literal(s) = condition.as_ref() {
@@ -262,6 +279,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                             var_resolver,
                             calling_class_name,
                             template_defaults,
+                            class_loader,
                         );
                     }
                 }
@@ -273,6 +291,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     var_resolver,
                     calling_class_name,
                     template_defaults,
+                    class_loader,
                 )
             } else {
                 // IsType equivalent: can't statically determine most
@@ -290,6 +309,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     );
                 }
                 // Can't statically determine; fall through to else.
@@ -300,6 +320,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     var_resolver,
                     calling_class_name,
                     template_defaults,
+                    class_loader,
                 )
             }
         }
@@ -330,15 +351,39 @@ fn condition_includes_array(condition: &PhpType) -> bool {
 
 /// Split a textual argument list by commas, respecting nested parentheses
 /// so that `"foo(a, b), c"` splits into `["foo(a, b)", "c"]`.
-pub(crate) fn split_text_args(text: &str) -> Vec<&str> {
+pub fn split_text_args(text: &str) -> Vec<&str> {
     let mut result = Vec::new();
     let mut depth = 0u32;
     let mut start = 0;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut prev_was_backslash = false;
+
     for (i, ch) in text.char_indices() {
+        if prev_was_backslash {
+            prev_was_backslash = false;
+            continue;
+        }
         match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+            '\\' => {
+                // Only treat as escape if inside a quote
+                if in_single_quote || in_double_quote {
+                    prev_was_backslash = true;
+                }
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            '(' | '[' if !in_single_quote && !in_double_quote => {
+                depth += 1;
+            }
+            ')' | ']' if !in_single_quote && !in_double_quote => {
+                depth = depth.saturating_sub(1);
+            }
+            ',' if depth == 0 && !in_single_quote && !in_double_quote => {
                 result.push(&text[start..i]);
                 start = i + 1; // skip the comma
             }
@@ -403,6 +448,7 @@ pub(crate) fn resolve_conditional_with_args<'b>(
     argument_list: &ArgumentList<'b>,
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
     resolve_conditional_with_args_and_defaults(
         conditional,
@@ -411,6 +457,7 @@ pub(crate) fn resolve_conditional_with_args<'b>(
         var_resolver,
         calling_class_name,
         None,
+        class_loader,
     )
 }
 
@@ -423,6 +470,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
     template_defaults: Option<&HashMap<String, PhpType>>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
@@ -476,7 +524,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                 if let Some(class_name) = arg_expr.and_then(extract_class_string_from_expr) {
                     let class_name =
                         resolve_self_keyword(&class_name, calling_class_name).unwrap_or(class_name);
-                    return Some(PhpType::Named(class_name));
+                    let resolved = crate::util::resolve_name_via_loader(&class_name, class_loader);
+                    return Some(PhpType::Named(resolved));
                 }
                 // Check if the argument is a variable holding class-string
                 // value(s) (e.g. from a match expression).
@@ -485,6 +534,10 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                 {
                     let names = resolver(dv.name);
                     if !names.is_empty() {
+                        let names: Vec<String> = names
+                            .into_iter()
+                            .map(|n| crate::util::resolve_name_via_loader(&n, class_loader))
+                            .collect();
                         let ty = if names.len() == 1 {
                             PhpType::Named(names.into_iter().next().unwrap())
                         } else {
@@ -501,6 +554,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     var_resolver,
                     calling_class_name,
                     template_defaults,
+                    class_loader,
                 )
             } else if condition.as_ref().is_null() {
                 if arg_expr.is_none() {
@@ -512,6 +566,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     )
                 } else {
                     // Argument was provided → not null
@@ -522,6 +577,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     )
                 }
             } else if let PhpType::Literal(s) = condition.as_ref() {
@@ -551,6 +607,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     )
                 } else {
                     resolve_conditional_with_args_and_defaults(
@@ -560,6 +617,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     )
                 }
             } else {
@@ -576,6 +634,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         var_resolver,
                         calling_class_name,
                         template_defaults,
+                        class_loader,
                     );
                 }
                 // We can't statically determine the type of an
@@ -587,6 +646,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     var_resolver,
                     calling_class_name,
                     template_defaults,
+                    class_loader,
                 )
             }
         }
@@ -705,11 +765,9 @@ fn try_resolve_with_template_default(
     } else if condition.is_bool() {
         default_value.is_true() || default_value.is_false()
     } else if condition.is_string_type() {
-        matches!(default_value, PhpType::Literal(s) if
-            (s.starts_with('\'') && s.ends_with('\''))
-            || (s.starts_with('"') && s.ends_with('"')))
+        default_value.is_string_literal()
     } else if condition.is_int() {
-        matches!(default_value, PhpType::Literal(s) if s.parse::<i64>().is_ok())
+        default_value.is_int_literal()
     } else if let PhpType::Literal(s) = condition {
         let expected = crate::util::unquote_php_string(s).unwrap_or(s);
         match default_value {

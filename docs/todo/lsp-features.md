@@ -240,35 +240,6 @@ index (X4), the lookup becomes a simple index query.
 Consider implementing after X4 (full background indexing) ships, or
 accept the same scan-based latency that Find References currently has.
 
-## F6. Machine-readable CLI output formats
-
-**Impact: Medium · Effort: Low**
-
-Add a `--format` flag to `analyze` and `fix` that controls the output
-format. The default remains the current human-readable table.
-
-### Formats
-
-- **`github`** — Emit
-  [workflow commands](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-a-warning-message)
-  (`::warning file=...::message`) so diagnostics appear as inline
-  annotations on pull request diffs. This is the highest-priority
-  format because GitHub Actions is the most common CI environment for
-  PHP projects.
-- **`json`** — One JSON object per diagnostic (or a top-level array).
-  Enables integration with custom dashboards, editor plugins, and
-  other tooling that wants to consume PHPantom output programmatically.
-
-### Implementation
-
-The output logic in `analyse.rs` and `fix.rs` currently writes
-directly to stderr/stdout with ANSI formatting. Extract the rendering
-behind a trait or enum so each format can be selected at the call
-site. The `--no-colour` flag becomes redundant for non-table formats
-but should continue to work for the default table output.
-
----
-
 ## F7. Evaluatable expression support (DAP integration)
 
 **Impact: Low-Medium · Effort: Low**
@@ -440,66 +411,6 @@ PHPantom should eventually support both directions:
    the corresponding directory. If a mapping exists, include
    `RenameFile` resource operations in the `WorkspaceEdit` to move
    the directory (and all files beneath it) to the new path.
-
----
-
-## F10. Linked editing ranges
-
-**Impact: Medium · Effort: Low**
-
-Implement the `textDocument/linkedEditingRange` LSP request so that
-renaming one occurrence of a paired token simultaneously updates the
-other. The primary use case in PHP is matching opening and closing
-tags in HTML-embedded PHP, but the most immediately useful case for
-pure PHP is variable renaming within a scope.
-
-### Use cases
-
-1. **Variables within a scope.** Place the cursor on `$userName` and
-   every other occurrence of `$userName` in the same function or
-   method body enters linked editing mode. Typing a new name updates
-   all occurrences simultaneously without triggering a full rename
-   request. This is faster and more fluid than `textDocument/rename`
-   for local renames.
-
-2. **Matching PHP open/close tags.** When editing `<?php ... ?>` in
-   mixed HTML/PHP files, linked editing could pair the tags. Lower
-   priority since most PHP files use only an opening tag.
-
-### Implementation
-
-1. **Register the capability.** Advertise
-   `linkedEditingRangeProvider: true` in the server capabilities
-   during `initialize`.
-
-2. **Handle the request.** When the client sends
-   `textDocument/linkedEditingRange`, determine what the cursor is
-   on:
-   - **Variable name:** use the scope collector to find all
-     occurrences of that variable in the enclosing scope. Return
-     their ranges. Set `wordPattern` to `\$[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*`
-     so the editor knows to include the `$` prefix in the linked
-     edit region.
-   - If the cursor is not on a supported token, return `null`.
-
-3. **Leverage existing infrastructure.** The scope collector
-   (`scope_collector/mod.rs`) already tracks variable definition and
-   read sites with byte offsets. The document highlight handler
-   (`highlight/mod.rs`) already finds all occurrences of a variable
-   in a scope and returns their ranges. The linked editing handler
-   is essentially the same logic but returning a
-   `LinkedEditingRanges` response instead of `DocumentHighlight[]`.
-
-### Constraints
-
-- All returned ranges must be on the same line or the client may
-  reject them (some clients impose this restriction, though the spec
-  does not). In practice, variable occurrences span multiple lines,
-  and modern clients (VS Code, Zed) handle multi-line linked editing
-  correctly.
-- The response must not include ranges that overlap or that would
-  produce invalid syntax when edited together. Since all ranges are
-  the same variable name, this is naturally satisfied.
 
 ---
 

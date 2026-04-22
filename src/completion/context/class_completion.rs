@@ -1334,6 +1334,12 @@ impl Backend {
             return None;
         }
 
+        // If preceded by `<?`, this is the PHP open tag (`<?php`), not
+        // a class/function name — suppress completion entirely.
+        if i >= 2 && chars[i - 2] == '<' && chars[i - 1] == '?' {
+            return None;
+        }
+
         let partial: String = chars[i..col].iter().collect();
         if partial.is_empty() {
             return None;

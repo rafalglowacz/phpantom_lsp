@@ -651,9 +651,10 @@ impl Backend {
                 .collect();
 
             // Resolve custom collection class name to FQN
-            if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.as_ref()) {
-                let resolved = Self::resolve_name(coll, use_map, namespace);
-                class.laravel_mut().custom_collection = Some(resolved);
+            if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.clone()) {
+                let resolver =
+                    |name: &str| -> String { Self::resolve_name(name, use_map, namespace) };
+                class.laravel_mut().custom_collection = Some(coll.resolve_names(&resolver));
             }
 
             // Resolve cast class names to FQN so that custom cast

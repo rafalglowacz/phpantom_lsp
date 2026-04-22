@@ -31,7 +31,10 @@ use tower_lsp::lsp_types::Position;
 use super::comment_position::position_to_byte_offset;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader};
-use crate::util::short_name;
+
+/// Optional reference to a class-loader closure, used by nested
+/// helper functions in throws analysis.
+type OptClassLoader<'a> = Option<&'a dyn Fn(&str) -> Option<Arc<ClassInfo>>>;
 
 /// Bundles the loaders needed for cross-file throws resolution.
 ///
@@ -52,16 +55,21 @@ pub(crate) struct ThrowsContext<'a> {
     pub class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     /// Resolves a function name to its [`FunctionInfo`].
     pub function_loader: FunctionLoader<'a>,
+    /// Use-statement map for the current file (short name → FQN).
+    /// Used to resolve short exception names to fully-qualified names.
+    pub use_map: &'a HashMap<String, String>,
+    /// The namespace of the current file, if any.
+    pub file_namespace: &'a Option<String>,
 }
 
 /// Information about a `throw` statement (or throw-expression) found in
 /// a block of PHP source code.
 #[derive(Debug)]
 pub(crate) struct ThrowInfo {
-    /// The exception type name as written in source (e.g.
-    /// `"InvalidArgumentException"`, `"\\RuntimeException"`,
-    /// `"Exceptions\\Custom"`).
-    pub type_name: String,
+    /// The exception type as written in source (e.g.
+    /// `PhpType::Named("InvalidArgumentException")`,
+    /// `PhpType::Named("RuntimeException")`).
+    pub type_name: PhpType,
     /// Byte offset of this throw statement relative to the start of the
     /// scanned block.
     pub offset: usize,
@@ -117,7 +125,7 @@ pub(crate) fn find_throw_statements(body: &str) -> Vec<ThrowInfo> {
                     let type_name = &after_new[..type_end];
                     if !type_name.is_empty() {
                         results.push(ThrowInfo {
-                            type_name: type_name.to_string(),
+                            type_name: PhpType::Named(type_name.to_string()),
                             offset: pos,
                         });
                     }
@@ -402,7 +410,7 @@ pub(crate) fn find_inline_throws_annotations(body: &str) -> Vec<ThrowInfo> {
                                 .trim_end_matches('/');
                             if !clean.is_empty() && !clean.starts_with('$') {
                                 results.push(ThrowInfo {
-                                    type_name: clean.to_string(),
+                                    type_name: PhpType::Named(clean.to_string()),
                                     offset: doc_start,
                                 });
                             }
@@ -431,7 +439,7 @@ pub(crate) fn find_inline_throws_annotations(body: &str) -> Vec<ThrowInfo> {
 ///
 /// Returns the short type name (last segment after `\`), or `None` if
 /// the method is not found or has no resolvable return type.
-pub(crate) fn find_method_return_type(file_content: &str, method_name: &str) -> Option<String> {
+pub(crate) fn find_method_return_type(file_content: &str, method_name: &str) -> Option<PhpType> {
     let search = format!("function {}", method_name);
 
     let mut search_start = 0;
@@ -462,7 +470,7 @@ pub(crate) fn find_method_return_type(file_content: &str, method_name: &str) -> 
                     let parsed = PhpType::parse(type_str);
                     let non_null = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
                     if let Some(name) = non_null.base_name() {
-                        return Some(name.to_string());
+                        return Some(PhpType::Named(name.to_string()));
                     }
                 }
             }
@@ -486,7 +494,7 @@ pub(crate) fn find_method_return_type(file_content: &str, method_name: &str) -> 
                             && !parsed.is_mixed()
                             && !parsed.is_self_like()
                         {
-                            return Some(name.to_string());
+                            return Some(PhpType::Named(name.to_string()));
                         }
                     }
                 }
@@ -505,7 +513,7 @@ pub(crate) fn find_method_return_type(file_content: &str, method_name: &str) -> 
 /// `function` keyword.
 ///
 /// Returns the short type names declared in `@throws` tags.
-pub(crate) fn find_method_throws_tags(file_content: &str, method_name: &str) -> Vec<String> {
+pub(crate) fn find_method_throws_tags(file_content: &str, method_name: &str) -> Vec<PhpType> {
     let mut throws = Vec::new();
     let search = format!("function {}", method_name);
 
@@ -538,9 +546,8 @@ pub(crate) fn find_method_throws_tags(file_content: &str, method_name: &str) -> 
                             .trim_end_matches('/')
                             .trim_end_matches('*')
                             .trim_start_matches('\\');
-                        let short = short_name(clean);
-                        if !short.is_empty() {
-                            throws.push(short.to_string());
+                        if !clean.is_empty() {
+                            throws.push(PhpType::Named(clean.to_string()));
                         }
                     }
                 }
@@ -794,7 +801,7 @@ pub(crate) fn extract_function_body(content: &str, position: Position) -> Option
 #[derive(Debug)]
 struct CatchInfo {
     /// The caught exception type names (multi-catch produces multiple).
-    type_names: Vec<String>,
+    type_names: Vec<PhpType>,
     /// The variable name from the catch clause (e.g. `"$e"`), if present.
     var_name: Option<String>,
     /// Byte offset of the start of the `try` block this catch belongs to.
@@ -947,7 +954,7 @@ fn find_catch_blocks(body: &str) -> Vec<CatchInfo> {
 ///
 /// Handles multi-catch: `ExceptionA | ExceptionB $e`
 /// → `(["ExceptionA", "ExceptionB"], Some("$e"))`.
-fn parse_catch_types(paren_content: &str) -> (Vec<String>, Option<String>) {
+fn parse_catch_types(paren_content: &str) -> (Vec<PhpType>, Option<String>) {
     let mut types = Vec::new();
 
     // Extract the variable name (starts with `$`)
@@ -976,9 +983,7 @@ fn parse_catch_types(paren_content: &str) -> (Vec<String>, Option<String>) {
     for part in without_var.split('|') {
         let t = part.trim().trim_start_matches('\\');
         if !t.is_empty() {
-            // Take only the short name (last segment after `\`)
-            let short = short_name(t);
-            types.push(short.to_string());
+            types.push(PhpType::Named(t.to_string()));
         }
     }
 
@@ -1003,7 +1008,7 @@ fn parse_catch_types(paren_content: &str) -> (Vec<String>, Option<String>) {
 /// This variant does **not** perform cross-file resolution.
 /// Use [`find_uncaught_throw_types_with_context`] with a [`ThrowsContext`]
 /// to enable it.
-pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Vec<String> {
+pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Vec<PhpType> {
     find_uncaught_throw_types_with_context(content, position, None)
 }
 
@@ -1026,7 +1031,7 @@ pub(crate) fn find_uncaught_throw_types_with_context(
     content: &str,
     position: Position,
     ctx: Option<&ThrowsContext<'_>>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let body = match extract_function_body(content, position) {
         Some(b) => b,
         None => return Vec::new(),
@@ -1046,80 +1051,201 @@ pub(crate) fn find_uncaught_throw_types_with_context(
         Vec::new()
     };
 
-    let mut uncaught: Vec<String> = Vec::new();
+    let mut uncaught: Vec<PhpType> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
     /// Check whether a throw at `offset` in the function body is caught
-    /// by one of the `catches`, given the short exception type name.
-    fn is_caught_by(catches: &[CatchInfo], offset: usize, exc_name: &str) -> bool {
+    /// by one of the `catches`, given the exception type.
+    fn is_caught_by(
+        catches: &[CatchInfo],
+        offset: usize,
+        exc_type: &PhpType,
+        use_map: &HashMap<String, String>,
+        file_namespace: &Option<String>,
+        class_loader: OptClassLoader<'_>,
+    ) -> bool {
+        let exc_name = exc_type.base_name().unwrap_or("");
+        // Resolve exception type to FQN via class loader if available.
+        let exc_fqn = if let Some(loader) = class_loader {
+            loader(exc_name)
+                .map(|cls| cls.fqn())
+                .unwrap_or_else(|| exc_name.to_string())
+        } else {
+            exc_name.to_string()
+        };
         catches.iter().any(|c| {
             offset > c.try_start
                 && offset < c.try_end
                 && c.type_names.iter().any(|ct| {
-                    let ct_short = short_name(ct);
-                    ct_short.eq_ignore_ascii_case(exc_name)
-                        || ct_short == "Throwable"
-                        || ct_short == "Exception"
+                    let ct_name = ct.base_name().unwrap_or("");
+                    // Resolve the catch type to FQN
+                    let resolved_ct = crate::util::resolve_to_fqn(ct_name, use_map, file_namespace);
+                    // Also try through the class loader for root-namespace classes.
+                    let resolved_ct = if let Some(loader) = class_loader {
+                        loader(&resolved_ct)
+                            .or_else(|| loader(ct_name))
+                            .map(|cls| cls.fqn())
+                            .unwrap_or(resolved_ct)
+                    } else {
+                        resolved_ct
+                    };
+                    // Check for Throwable/Exception (catches everything).
+                    let resolved_lower = resolved_ct.to_ascii_lowercase();
+                    if resolved_lower == "throwable" || resolved_lower == "exception" {
+                        return true;
+                    }
+                    // Exact FQN comparison (case-insensitive)
+                    resolved_ct.eq_ignore_ascii_case(&exc_fqn)
                 })
         })
     }
 
+    /// Normalize a ThrowInfo's type_name into a PhpType::Named,
+    /// resolving short names to FQN when use_map/namespace are available.
+    fn normalize_throw_type(
+        ty: &PhpType,
+        use_map: &HashMap<String, String>,
+        file_namespace: &Option<String>,
+        class_loader: OptClassLoader<'_>,
+    ) -> Option<PhpType> {
+        let raw = ty.to_string();
+        let trimmed = raw.trim_start_matches('\\');
+        if trimmed.is_empty() {
+            None
+        } else {
+            let resolved = crate::util::resolve_to_fqn(trimmed, use_map, file_namespace);
+            // Try the class loader for a canonical FQN.
+            let fqn = if let Some(loader) = class_loader {
+                loader(&resolved)
+                    .or_else(|| loader(trimmed))
+                    .map(|cls| cls.fqn())
+                    .unwrap_or(resolved)
+            } else {
+                resolved
+            };
+            Some(PhpType::Named(fqn))
+        }
+    }
+
+    // Determine name-resolution context: use the ThrowsContext fields
+    // when available, fall back to empty defaults.
+    let empty_use_map = HashMap::new();
+    let empty_ns = None;
+    let (use_map, file_namespace) = if let Some(throws_ctx) = ctx {
+        (throws_ctx.use_map, throws_ctx.file_namespace)
+    } else {
+        (&empty_use_map, &empty_ns)
+    };
+
+    let class_loader: OptClassLoader<'_> =
+        ctx.map(|c| c.class_loader as &dyn Fn(&str) -> Option<Arc<ClassInfo>>);
+
     // 1. Direct `throw new Type(…)` statements
     for throw in &throws {
-        let short_name = throw
-            .type_name
-            .trim_start_matches('\\')
-            .rsplit('\\')
-            .next()
-            .unwrap_or(&throw.type_name);
-
-        if !is_caught_by(&catches, throw.offset, short_name) && seen.insert(short_name.to_string())
+        if let Some(exc_type) =
+            normalize_throw_type(&throw.type_name, use_map, file_namespace, class_loader)
+            && !is_caught_by(
+                &catches,
+                throw.offset,
+                &exc_type,
+                use_map,
+                file_namespace,
+                class_loader,
+            )
+            && seen.insert(exc_type.to_string())
         {
-            uncaught.push(short_name.to_string());
+            uncaught.push(exc_type);
         }
     }
 
     // 2. `throw $this->method()` -- return type of method is the thrown type
     for te in &throw_expr_types {
-        let sn = short_name(te.type_name.trim_start_matches('\\'));
-        if !sn.is_empty() && !is_caught_by(&catches, te.offset, sn) && seen.insert(sn.to_string()) {
-            uncaught.push(sn.to_string());
+        if let Some(exc_type) =
+            normalize_throw_type(&te.type_name, use_map, file_namespace, class_loader)
+            && !is_caught_by(
+                &catches,
+                te.offset,
+                &exc_type,
+                use_map,
+                file_namespace,
+                class_loader,
+            )
+            && seen.insert(exc_type.to_string())
+        {
+            uncaught.push(exc_type);
         }
     }
 
     // 3. Propagated @throws from called methods (same-file text search)
     for prop in &propagated {
-        let sn = short_name(prop.type_name.trim_start_matches('\\'));
-        if !sn.is_empty() && !is_caught_by(&catches, prop.offset, sn) && seen.insert(sn.to_string())
+        if let Some(exc_type) =
+            normalize_throw_type(&prop.type_name, use_map, file_namespace, class_loader)
+            && !is_caught_by(
+                &catches,
+                prop.offset,
+                &exc_type,
+                use_map,
+                file_namespace,
+                class_loader,
+            )
+            && seen.insert(exc_type.to_string())
         {
-            uncaught.push(sn.to_string());
+            uncaught.push(exc_type);
         }
     }
 
     // 4. Inline `/** @throws ExceptionType */` annotations in the body
     let inline = find_inline_throws_annotations(&body);
     for info in &inline {
-        let sn = short_name(info.type_name.trim_start_matches('\\'));
-        if !sn.is_empty() && !is_caught_by(&catches, info.offset, sn) && seen.insert(sn.to_string())
+        if let Some(exc_type) =
+            normalize_throw_type(&info.type_name, use_map, file_namespace, class_loader)
+            && !is_caught_by(
+                &catches,
+                info.offset,
+                &exc_type,
+                use_map,
+                file_namespace,
+                class_loader,
+            )
+            && seen.insert(exc_type.to_string())
         {
-            uncaught.push(sn.to_string());
+            uncaught.push(exc_type);
         }
     }
 
     // 5. `throw $variable` — resolved from catch clause variable type
     for tv in &throw_vars {
-        let sn = short_name(tv.type_name.trim_start_matches('\\'));
-        if !sn.is_empty() && !is_caught_by(&catches, tv.offset, sn) && seen.insert(sn.to_string()) {
-            uncaught.push(sn.to_string());
+        if let Some(exc_type) =
+            normalize_throw_type(&tv.type_name, use_map, file_namespace, class_loader)
+            && !is_caught_by(
+                &catches,
+                tv.offset,
+                &exc_type,
+                use_map,
+                file_namespace,
+                class_loader,
+            )
+            && seen.insert(exc_type.to_string())
+        {
+            uncaught.push(exc_type);
         }
     }
 
     // 6. Cross-file propagated @throws from all call patterns
     for prop in &cross_file_propagated {
-        let sn = short_name(prop.type_name.trim_start_matches('\\'));
-        if !sn.is_empty() && !is_caught_by(&catches, prop.offset, sn) && seen.insert(sn.to_string())
+        if let Some(exc_type) =
+            normalize_throw_type(&prop.type_name, use_map, file_namespace, class_loader)
+            && !is_caught_by(
+                &catches,
+                prop.offset,
+                &exc_type,
+                use_map,
+                file_namespace,
+                class_loader,
+            )
+            && seen.insert(exc_type.to_string())
         {
-            uncaught.push(sn.to_string());
+            uncaught.push(exc_type);
         }
     }
 
@@ -1161,7 +1287,7 @@ fn extract_function_signature(content: &str, position: Position) -> String {
 ///
 /// Given a signature like `"handle(BusinessCentralService $service, int $count): void"`,
 /// returns `[("$service", "BusinessCentralService"), ("$count", "int")]`.
-fn parse_param_type_map(signature: &str) -> Vec<(String, String)> {
+fn parse_param_type_map(signature: &str) -> Vec<(String, PhpType)> {
     let mut result = Vec::new();
 
     // Extract the text inside the outermost parentheses.
@@ -1246,12 +1372,15 @@ fn parse_param_type_map(signature: &str) -> Vec<(String, String)> {
         let parsed = PhpType::parse(type_token);
         let non_null = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
         if let Some(name) = non_null.base_name() {
-            result.push((var_name.to_string(), name.to_string()));
+            result.push((var_name.to_string(), PhpType::Named(name.to_string())));
         } else {
             // Fallback for scalars and other non-class types.
             let cleaned_type = type_token.trim_start_matches('?').trim_start_matches('\\');
             if !cleaned_type.is_empty() {
-                result.push((var_name.to_string(), cleaned_type.to_string()));
+                result.push((
+                    var_name.to_string(),
+                    PhpType::Named(cleaned_type.to_string()),
+                ));
             }
         }
     }
@@ -1273,8 +1402,26 @@ fn find_cross_file_propagated_throws(
     file_content: &str,
     ctx: &ThrowsContext<'_>,
 ) -> Vec<ThrowInfo> {
-    let param_map = parse_param_type_map(signature);
+    let raw_param_map = parse_param_type_map(signature);
     let class_loader = ctx.class_loader;
+
+    // Resolve short param type names to FQN so that class_loader lookups
+    // succeed even when the signature uses unqualified class names.
+    let param_map: Vec<(String, PhpType)> = raw_param_map
+        .into_iter()
+        .map(|(name, ty)| {
+            let resolved = if let Some(base) = ty.base_name() {
+                PhpType::Named(crate::util::resolve_to_fqn(
+                    base,
+                    ctx.use_map,
+                    ctx.file_namespace,
+                ))
+            } else {
+                ty
+            };
+            (name, resolved)
+        })
+        .collect();
 
     let mut results = Vec::new();
     let mut seen_calls = std::collections::HashSet::new();
@@ -1317,15 +1464,18 @@ fn find_cross_file_propagated_throws(
                 let after_name = after_new[name_end..].trim_start();
                 if !class_name.is_empty() && after_name.starts_with('(') {
                     let clean = class_name.trim_start_matches('\\');
-                    let call_key = format!("new:{}", clean);
+                    // Resolve short class name to FQN before loading.
+                    let resolved_class =
+                        crate::util::resolve_to_fqn(clean, ctx.use_map, ctx.file_namespace);
+                    let call_key = format!("new:{}", resolved_class);
                     if seen_calls.insert(call_key)
-                        && let Some(class_info) = class_loader(clean)
+                        && let Some(class_info) = class_loader(&resolved_class)
                         && let Some(ctor) =
                             class_info.methods.iter().find(|m| m.name == "__construct")
                     {
                         for exc_type in &ctor.throws {
                             results.push(ThrowInfo {
-                                type_name: exc_type.to_string(),
+                                type_name: exc_type.clone(),
                                 offset: call_start,
                             });
                         }
@@ -1385,7 +1535,7 @@ fn find_cross_file_propagated_throws(
 
             // Look up the variable's type from the parameter map.
             let class_name = match param_map.iter().find(|(name, _)| name == var_name) {
-                Some((_, type_name)) => type_name.as_str(),
+                Some((_, type_name)) => type_name.base_name().unwrap_or(""),
                 None => continue,
             };
 
@@ -1428,11 +1578,17 @@ fn find_cross_file_propagated_throws(
                     let ident_lower = ident.to_lowercase();
                     if ident_lower != "self" && ident_lower != "static" && ident_lower != "parent" {
                         let clean_class = ident.trim_start_matches('\\');
-                        let call_key = format!("{}::{}", clean_class, method_name);
+                        // Resolve short class name to FQN before loading.
+                        let resolved_class = crate::util::resolve_to_fqn(
+                            clean_class,
+                            ctx.use_map,
+                            ctx.file_namespace,
+                        );
+                        let call_key = format!("{}::{}", resolved_class, method_name);
                         if seen_calls.insert(call_key) {
                             collect_method_throws(
                                 class_loader,
-                                clean_class,
+                                &resolved_class,
                                 method_name,
                                 ident_start,
                                 &mut results,
@@ -1459,7 +1615,7 @@ fn find_cross_file_propagated_throws(
                         {
                             for exc_type in &func_info.throws {
                                 results.push(ThrowInfo {
-                                    type_name: exc_type.to_string(),
+                                    type_name: exc_type.clone(),
                                     offset: ident_start,
                                 });
                             }
@@ -1499,7 +1655,7 @@ fn collect_method_throws(
     {
         for exc_type in &method_info.throws {
             results.push(ThrowInfo {
-                type_name: exc_type.to_string(),
+                type_name: exc_type.clone(),
                 offset,
             });
         }
@@ -1548,30 +1704,6 @@ fn is_php_keyword(ident: &str) -> bool {
 }
 
 // ─── Import Helpers ─────────────────────────────────────────────────────────
-
-/// Resolve a short exception type name to its fully-qualified name using
-/// the file's `use` map and namespace.
-///
-/// Returns the FQN (without leading `\`) if found, or `None` if the type
-/// is already unqualified and in the global namespace.
-pub(in crate::completion) fn resolve_exception_fqn(
-    short_name: &str,
-    use_map: &HashMap<String, String>,
-    file_namespace: &Option<String>,
-) -> Option<String> {
-    // Check the use map first
-    if let Some(fqn) = use_map.get(short_name) {
-        return Some(fqn.clone());
-    }
-
-    // If there's a namespace, the type might be in the current namespace
-    if let Some(ns) = file_namespace {
-        return Some(format!("{}\\{}", ns, short_name));
-    }
-
-    // Global namespace, no FQN to resolve to
-    None
-}
 
 /// Check whether a `use` statement for the given FQN already exists in
 /// the file content.

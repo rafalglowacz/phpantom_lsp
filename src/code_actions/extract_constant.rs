@@ -21,6 +21,7 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::code_actions::cursor_context::{CursorContext, MemberContext, find_cursor_context};
 use crate::code_actions::{CodeActionData, make_code_action_data};
+use crate::php_type::PhpType;
 use crate::types::PhpVersion;
 use crate::util::infer_type_from_literal;
 use crate::util::{find_identical_occurrences, offset_to_position, position_to_byte_offset};
@@ -261,7 +262,7 @@ fn generate_constant_name(value: &str) -> String {
 /// `Some("bool")` for the corresponding literal kinds.  Returns `None`
 /// for values that don't have a clean single type (e.g. concat
 /// expressions, `null`).
-fn literal_type_name(value: &str) -> Option<&'static str> {
+fn literal_type_name(value: &str) -> Option<PhpType> {
     let t = value.trim();
     if t.is_empty() {
         return None;
@@ -278,10 +279,10 @@ fn literal_type_name(value: &str) -> Option<&'static str> {
         let abs = stripped.trim_start();
         if let Some(ty) = infer_type_from_literal(abs) {
             if ty.is_int() {
-                return Some("int");
+                return Some(PhpType::int());
             }
             if ty.is_float() {
-                return Some("float");
+                return Some(PhpType::float());
             }
         }
         return None;
@@ -293,16 +294,16 @@ fn literal_type_name(value: &str) -> Option<&'static str> {
     // concatenation operator.
     if let Some(ty) = infer_type_from_literal(t) {
         if ty.is_int() {
-            return Some("int");
+            return Some(PhpType::int());
         }
         if ty.is_float() {
-            return Some("float");
+            return Some(PhpType::float());
         }
         if ty.is_bool() {
-            return Some("bool");
+            return Some(PhpType::bool());
         }
         if ty.is_string_type() {
-            return Some("string");
+            return Some(PhpType::string());
         }
     }
 
@@ -310,7 +311,7 @@ fn literal_type_name(value: &str) -> Option<&'static str> {
     // Checked after the shared util so that floats like `3.14` are
     // not misclassified as concatenation (`3 . 14`).
     if is_concat_expression(t) {
-        return Some("string");
+        return Some(PhpType::string());
     }
 
     None
@@ -905,52 +906,52 @@ mod tests {
 
     #[test]
     fn type_string_literal() {
-        assert_eq!(literal_type_name("'hello'"), Some("string"));
+        assert_eq!(literal_type_name("'hello'"), Some(PhpType::string()));
     }
 
     #[test]
     fn type_double_quoted_string() {
-        assert_eq!(literal_type_name("\"hello\""), Some("string"));
+        assert_eq!(literal_type_name("\"hello\""), Some(PhpType::string()));
     }
 
     #[test]
     fn type_integer() {
-        assert_eq!(literal_type_name("42"), Some("int"));
+        assert_eq!(literal_type_name("42"), Some(PhpType::int()));
     }
 
     #[test]
     fn type_hex() {
-        assert_eq!(literal_type_name("0xFF"), Some("int"));
+        assert_eq!(literal_type_name("0xFF"), Some(PhpType::int()));
     }
 
     #[test]
     fn type_float() {
-        assert_eq!(literal_type_name("3.14"), Some("float"));
+        assert_eq!(literal_type_name("3.14"), Some(PhpType::float()));
     }
 
     #[test]
     fn type_float_exponent() {
-        assert_eq!(literal_type_name("1e10"), Some("float"));
+        assert_eq!(literal_type_name("1e10"), Some(PhpType::float()));
     }
 
     #[test]
     fn type_negative_int() {
-        assert_eq!(literal_type_name("-42"), Some("int"));
+        assert_eq!(literal_type_name("-42"), Some(PhpType::int()));
     }
 
     #[test]
     fn type_negative_float() {
-        assert_eq!(literal_type_name("-3.14"), Some("float"));
+        assert_eq!(literal_type_name("-3.14"), Some(PhpType::float()));
     }
 
     #[test]
     fn type_true() {
-        assert_eq!(literal_type_name("true"), Some("bool"));
+        assert_eq!(literal_type_name("true"), Some(PhpType::bool()));
     }
 
     #[test]
     fn type_false() {
-        assert_eq!(literal_type_name("false"), Some("bool"));
+        assert_eq!(literal_type_name("false"), Some(PhpType::bool()));
     }
 
     #[test]
@@ -960,7 +961,7 @@ mod tests {
 
     #[test]
     fn type_concat_is_string() {
-        assert_eq!(literal_type_name("'a' . 'b'"), Some("string"));
+        assert_eq!(literal_type_name("'a' . 'b'"), Some(PhpType::string()));
     }
 
     // ── is_extractable_literal ──────────────────────────────────────

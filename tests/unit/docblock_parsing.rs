@@ -1690,7 +1690,7 @@ fn template_default_simple_bool() {
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "TAsync");
     assert_eq!(*bound, Some(PhpType::parse("bool")));
-    assert_eq!(default.as_deref(), Some("false"));
+    assert_eq!(*default, Some(PhpType::parse("false")));
 }
 
 #[test]
@@ -1701,7 +1701,7 @@ fn template_default_true() {
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "TSync");
     assert_eq!(*bound, Some(PhpType::parse("bool")));
-    assert_eq!(default.as_deref(), Some("true"));
+    assert_eq!(*default, Some(PhpType::parse("true")));
 }
 
 #[test]
@@ -1712,7 +1712,7 @@ fn template_default_null() {
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "TValue");
     assert_eq!(*bound, Some(PhpType::parse("mixed")));
-    assert_eq!(default.as_deref(), Some("null"));
+    assert_eq!(*default, Some(PhpType::parse("null")));
 }
 
 #[test]
@@ -1757,12 +1757,12 @@ fn template_multiple_with_defaults() {
     let (name1, bound1, _, default1) = &result[1];
     assert_eq!(name1, "TAsync");
     assert_eq!(*bound1, Some(PhpType::parse("bool")));
-    assert_eq!(default1.as_deref(), Some("false"));
+    assert_eq!(*default1, Some(PhpType::parse("false")));
 
     let (name2, bound2, _, default2) = &result[2];
     assert_eq!(name2, "TValue");
     assert_eq!(*bound2, Some(PhpType::parse("string")));
-    assert_eq!(default2.as_deref(), Some("null"));
+    assert_eq!(*default2, Some(PhpType::parse("null")));
 }
 
 #[test]
