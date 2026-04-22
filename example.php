@@ -3072,7 +3072,7 @@ class InlayHintsDemo
         $doubled = $this->transformItems([1, 2, 3], fn($x) => $x * 2);
 
         // Method call context — filter shows "Order " before $o, ": bool" after.
-        $big = $this->filterOrders(fn($o) => $o->total > 100);
+        $big = $this->filterOrders(fn($o) => $o->isAdmin);
     }
 
     /** @param array<int> &$data */
@@ -3094,7 +3094,7 @@ class InlayHintsDemo
     /** @param callable(int, int): int $fn */
     public function reduce(callable $fn): int { return 0; }
 
-    /** @param callable(Order): bool $fn */
+    /** @param callable(User): bool $fn */
     public function filterOrders(callable $fn): array { return []; }
 }
 

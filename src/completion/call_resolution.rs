@@ -494,8 +494,7 @@ impl Backend {
             && !ctor.template_bindings.is_empty()
         {
             let split_args = crate::completion::types::conditional::split_text_args(at);
-            let subs =
-                Self::build_method_template_subs(&merged, "__construct", &split_args, rctx);
+            let subs = Self::build_method_template_subs(&merged, "__construct", &split_args, rctx);
             if !subs.is_empty() {
                 let mut result_ctor = ctor;
                 crate::inheritance::apply_substitution_to_method(&mut result_ctor, &subs);

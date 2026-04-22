@@ -3507,9 +3507,8 @@ fn resolve_rhs_with_scope<'b>(
             let resolved_name = name.strip_prefix('\\').unwrap_or(&name);
             // Resolve the class so we can store a proper ResolvedType
             // with class_info.  This allows `new $var` to work.
-            let class_string_type = PhpType::ClassString(Some(Box::new(PhpType::Named(
-                resolved_name.to_string(),
-            ))));
+            let class_string_type =
+                PhpType::ClassString(Some(Box::new(PhpType::Named(resolved_name.to_string()))));
             let classes = crate::completion::type_resolution::type_hint_to_classes_typed(
                 &PhpType::Named(resolved_name.to_string()),
                 &ctx.current_class.name,

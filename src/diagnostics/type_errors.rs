@@ -60,8 +60,6 @@ fn is_bare_array(ty: &PhpType) -> bool {
     matches!(ty, PhpType::Named(n) if n.eq_ignore_ascii_case("array"))
 }
 
-
-
 /// Check if an argument type is compatible with a parameter type.
 ///
 /// Returns `true` if the argument type can be passed to the parameter

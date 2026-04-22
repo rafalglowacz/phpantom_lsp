@@ -3482,3 +3482,70 @@ class Context {
         "Should not flag Gift passed to unresolved @template T param in constructor, got: {diags:?}"
     );
 }
+
+// ─── No false positive: closure passed to nullable callable parameter ────────
+
+#[test]
+fn no_false_positive_array_filter_closure_callback() {
+    let php = r#"<?php
+function array_filter(array $array, ?callable $callback = null, int $mode = 0): array {}
+
+class Pen {
+    public function color(): string { return 'blue'; }
+}
+
+function test(): void {
+    /** @var list<Pen> $pens */
+    $pens = [];
+    $filtered = array_filter($pens, fn(Pen $p) => $p->color() === 'blue');
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Should not flag array_filter callback as wrong type, got: {msgs:?}"
+    );
+}
+
+// ─── No false positive: FQN-resolved Closure vs callable ────────────────────
+
+/// When argument types are FQN-resolved (e.g. `\Closure` instead of
+/// `Closure`), the subtype check `\Closure <: callable` must still hold.
+#[test]
+fn no_false_positive_fqn_closure_subtype_of_callable() {
+    let php = r#"<?php
+function takes_callable(callable $fn): void {}
+
+function test(): void {
+    takes_callable(fn() => 42);
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Should not flag arrow function passed to callable param, got: {msgs:?}"
+    );
+}
+
+/// Closure passed to `callable|null` union (docblock-style nullable).
+#[test]
+fn no_false_positive_closure_to_callable_or_null_union() {
+    let php = r#"<?php
+/**
+ * @param callable|null $callback
+ */
+function maybe_call(callable|null $callback = null): void {}
+
+function test(): void {
+    maybe_call(fn() => true);
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Should not flag closure passed to callable|null param, got: {msgs:?}"
+    );
+}

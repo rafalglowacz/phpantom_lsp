@@ -664,19 +664,24 @@ impl Backend {
         let pull_mode = self.supports_pull_diagnostics.load(Ordering::Acquire);
 
         // ── Phase 1: push fast diagnostics immediately ──────────────
-        // Merge fresh fast with cached slow + PHPStan so the editor
-        // never shows a gap where those diagnostics vanish then
-        // reappear.
+        // In push mode, merge fresh fast with cached slow + PHPStan so
+        // the editor never shows a gap where those diagnostics vanish
+        // then reappear.
         //
-        // Even in pull mode we push Phase 1 via publish_diagnostics so
-        // users see syntax errors and unused-import warnings instantly,
-        // without waiting for a pull round-trip. Phase 2 (slow) results
+        // In pull mode, push ONLY fast diagnostics.  Slow diagnostics
         // are delivered via pull after workspace/diagnostic/refresh.
-        // This is intentional — do not remove the push here.
+        // Merging cached slow here would duplicate them: the editor
+        // shows both the pushed set and the pulled set additively.
         let mut fast_diagnostics = Vec::new();
         self.collect_fast_diagnostics(uri_str, content, &mut fast_diagnostics);
 
-        let phase1 = self.merge_fast_with_cached(uri_str, &fast_diagnostics);
+        let phase1 = if pull_mode {
+            let mut p = fast_diagnostics.clone();
+            deduplicate_diagnostics(&mut p);
+            p
+        } else {
+            self.merge_fast_with_cached(uri_str, &fast_diagnostics)
+        };
 
         // Filter out any diagnostics that were eagerly suppressed by
         // a `codeAction/resolve` handler (e.g. unused-import removal).

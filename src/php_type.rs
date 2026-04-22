@@ -2866,8 +2866,10 @@ fn is_self_ref_name(name: &str) -> bool {
 /// - `list <: array`, `non-empty-list <: array`, `non-empty-array <: array`
 /// - `callable <: object` is NOT true (callables can be strings/arrays)
 fn is_named_subtype(sub: &str, sup: &str) -> bool {
-    let sub_l = sub.to_ascii_lowercase();
-    let sup_l = sup.to_ascii_lowercase();
+    let sub_raw = sub.strip_prefix('\\').unwrap_or(sub);
+    let sup_raw = sup.strip_prefix('\\').unwrap_or(sup);
+    let sub_l = sub_raw.to_ascii_lowercase();
+    let sup_l = sup_raw.to_ascii_lowercase();
 
     if sub_l == sup_l {
         return true;
@@ -6011,6 +6013,17 @@ mod tests {
         #[test]
         fn closure_is_subtype_of_callable() {
             assert!(PhpType::Named("Closure".into()).is_subtype_of(&PhpType::callable()));
+        }
+
+        #[test]
+        fn fqn_closure_is_subtype_of_callable() {
+            assert!(PhpType::Named("\\Closure".into()).is_subtype_of(&PhpType::callable()));
+        }
+
+        #[test]
+        fn fqn_closure_is_subtype_of_callable_union_null() {
+            let callable_or_null = PhpType::Union(vec![PhpType::callable(), PhpType::null()]);
+            assert!(PhpType::Named("\\Closure".into()).is_subtype_of(&callable_or_null));
         }
 
         // ── Scalar / numeric / array-key supertypes ─────────────────────

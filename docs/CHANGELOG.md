@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Duplicate diagnostics in editors with pull-diagnostic support.** Editors that support the LSP pull-diagnostics protocol (e.g. Zed) showed every slow diagnostic twice: once from the pushed Phase 1 set (which merged cached slow results) and again from the pulled Phase 2 set. Phase 1 now pushes only fast diagnostics in pull mode.
+- **False positive type error for closures passed to callable parameters.** Fully-qualified class names (e.g. `\Closure`) were not recognised as subtypes of `callable` in argument type checking, causing spurious "expects int, got string" errors on functions like `array_filter` where the closure argument was matched against the wrong parameter.
 - **Infinite loop on array key reassignment patterns.** Files containing `$arr['key'] = f($arr['key'])` or similar read-then-write patterns on the same array key no longer hang the analyzer. The root cause was `resolve_arg_raw_type` bypassing the scope resolver and re-entering the forward walker; it now reads from the in-progress scope instead.
 - **`analyze` stack overflow on large codebases.** Diagnostic worker threads in the `analyze` command no longer need inflated 32 MB stacks. With depth guards and re-entry cycles eliminated, the default stack size suffices.
 - **Analysis crash on large files.** Files with hundreds of class definitions (e.g. single-file playgrounds) no longer crash with a stack overflow during analysis.
