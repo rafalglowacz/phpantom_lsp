@@ -1391,7 +1391,7 @@ async fn test_parse_php_class_property_tags() {
     assert_eq!(
         id_prop.type_hint_str().as_deref(),
         Some("null|int"),
-        "null|int should be preserved (not stripped by clean_type)"
+        "null|int should be preserved in the type hint"
     );
     assert!(!id_prop.is_static, "@property should not be static");
 

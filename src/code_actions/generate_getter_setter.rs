@@ -30,7 +30,8 @@ use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
 use super::detect_indent_from_members;
 use crate::Backend;
 use crate::docblock::{extract_var_type, get_docblock_text_for_node};
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
+use crate::php_type::PhpType;
 use crate::util::offset_to_position;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -39,8 +40,8 @@ use crate::util::offset_to_position;
 struct AccessorProperty {
     /// Property name without the `$` prefix.
     name: String,
-    /// Type hint string, if available (native or docblock).
-    type_hint: Option<String>,
+    /// Structured type hint, if available (native or docblock).
+    type_hint: Option<PhpType>,
     /// Whether the type hint came from a docblock rather than a native
     /// type declaration.  When `true`, generated methods use `@return` /
     /// `@param` tags instead of native type hints.
@@ -113,7 +114,7 @@ impl Backend {
         // Determine available accessors for each property.
         let mut available: Vec<AvailableAccessors> = Vec::new();
         for prop in props {
-            let getter_name = getter_method_name(&prop.name, prop.type_hint.as_deref());
+            let getter_name = getter_method_name(&prop.name, prop.type_hint.as_ref());
             let setter_name = setter_method_name(&prop.name);
 
             let has_getter = existing_methods
@@ -124,7 +125,7 @@ impl Backend {
                 .any(|m| m.eq_ignore_ascii_case(&setter_name));
 
             // For bool properties, also check the `isX` variant.
-            let has_is = if is_bool_type(prop.type_hint.as_deref()) {
+            let has_is = if is_bool_type(prop.type_hint.as_ref()) {
                 let is_name = is_method_name(&prop.name);
                 existing_methods
                     .iter()
@@ -290,7 +291,7 @@ fn collect_accessor_properties<'a>(
             let is_static = has_static(plain.modifiers.iter());
 
             // Extract the native type hint for the property.
-            let native_hint = plain.hint.as_ref().map(|h| extract_hint_string(h));
+            let native_hint = plain.hint.as_ref().map(|h| extract_hint_type(h));
 
             // Try to get a docblock @var type if there's no native hint.
             let docblock_type =
@@ -381,7 +382,7 @@ fn to_pascal_case(name: &str) -> String {
 ///
 /// Uses `get` + PascalCase. For `bool` properties, uses `is` + PascalCase
 /// instead.
-fn getter_method_name(prop_name: &str, type_hint: Option<&str>) -> String {
+fn getter_method_name(prop_name: &str, type_hint: Option<&PhpType>) -> String {
     let pascal = to_pascal_case(prop_name);
     if is_bool_type(type_hint) {
         format!("is{pascal}")
@@ -403,12 +404,11 @@ fn setter_method_name(prop_name: &str) -> String {
 }
 
 /// Check whether a type hint represents a boolean type.
-fn is_bool_type(type_hint: Option<&str>) -> bool {
+///
+/// Handles bare `bool`, `boolean`, and nullable `?bool` / `?boolean`.
+fn is_bool_type(type_hint: Option<&PhpType>) -> bool {
     match type_hint {
-        Some(t) => {
-            let t = t.trim();
-            t.eq_ignore_ascii_case("bool") || t.eq_ignore_ascii_case("boolean")
-        }
+        Some(t) => t.is_bool(),
         None => false,
     }
 }
@@ -416,7 +416,7 @@ fn is_bool_type(type_hint: Option<&str>) -> bool {
 /// Build the getter method source text for a property.
 fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
     let mut result = String::new();
-    let method_name = getter_method_name(&prop.name, prop.type_hint.as_deref());
+    let method_name = getter_method_name(&prop.name, prop.type_hint.as_ref());
 
     result.push('\n');
 
@@ -424,11 +424,12 @@ fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
     if prop.type_from_docblock
         && let Some(ref hint) = prop.type_hint
     {
+        let hint_str = hint.to_string();
         result.push_str(indent);
         result.push_str("/**\n");
         result.push_str(indent);
         result.push_str(" * @return ");
-        result.push_str(hint);
+        result.push_str(&hint_str);
         result.push('\n');
         result.push_str(indent);
         result.push_str(" */\n");
@@ -449,7 +450,7 @@ fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
         && let Some(ref hint) = prop.type_hint
     {
         result.push_str(": ");
-        result.push_str(hint);
+        result.push_str(&hint.to_string());
     }
 
     result.push('\n');
@@ -487,11 +488,12 @@ fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
     if prop.type_from_docblock
         && let Some(ref hint) = prop.type_hint
     {
+        let hint_str = hint.to_string();
         result.push_str(indent);
         result.push_str("/**\n");
         result.push_str(indent);
         result.push_str(" * @param ");
-        result.push_str(hint);
+        result.push_str(&hint_str);
         result.push_str(" $");
         result.push_str(&prop.name);
         result.push('\n');
@@ -512,7 +514,7 @@ fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
     if !prop.type_from_docblock
         && let Some(ref hint) = prop.type_hint
     {
-        result.push_str(hint);
+        result.push_str(&hint.to_string());
         result.push(' ');
     }
     result.push('$');
@@ -646,17 +648,20 @@ mod tests {
 
     #[test]
     fn getter_name_for_string() {
-        assert_eq!(getter_method_name("name", Some("string")), "getName");
+        let ty = PhpType::parse("string");
+        assert_eq!(getter_method_name("name", Some(&ty)), "getName");
     }
 
     #[test]
     fn getter_name_for_bool() {
-        assert_eq!(getter_method_name("active", Some("bool")), "isActive");
+        let ty = PhpType::parse("bool");
+        assert_eq!(getter_method_name("active", Some(&ty)), "isActive");
     }
 
     #[test]
     fn getter_name_for_boolean() {
-        assert_eq!(getter_method_name("active", Some("boolean")), "isActive");
+        let ty = PhpType::parse("boolean");
+        assert_eq!(getter_method_name("active", Some(&ty)), "isActive");
     }
 
     #[test]
@@ -678,17 +683,22 @@ mod tests {
 
     #[test]
     fn bool_type_recognized() {
-        assert!(is_bool_type(Some("bool")));
-        assert!(is_bool_type(Some("boolean")));
-        assert!(is_bool_type(Some("Bool")));
+        assert!(is_bool_type(Some(&PhpType::parse("bool"))));
+        assert!(is_bool_type(Some(&PhpType::parse("boolean"))));
+        assert!(is_bool_type(Some(&PhpType::parse("Bool"))));
     }
 
     #[test]
     fn non_bool_type_not_recognized() {
-        assert!(!is_bool_type(Some("string")));
-        assert!(!is_bool_type(Some("int")));
+        assert!(!is_bool_type(Some(&PhpType::parse("string"))));
+        assert!(!is_bool_type(Some(&PhpType::parse("int"))));
         assert!(!is_bool_type(None));
-        assert!(!is_bool_type(Some("?bool")));
+    }
+
+    #[test]
+    fn nullable_bool_type_recognized() {
+        assert!(is_bool_type(Some(&PhpType::parse("?bool"))));
+        assert!(is_bool_type(Some(&PhpType::parse("?boolean"))));
     }
 
     // ── build_getter ────────────────────────────────────────────────────
@@ -702,7 +712,7 @@ mod tests {
     ) -> AccessorProperty {
         AccessorProperty {
             name: name.to_string(),
-            type_hint: type_hint.map(|s| s.to_string()),
+            type_hint: type_hint.map(PhpType::parse),
             type_from_docblock,
             is_readonly,
             is_static,
@@ -945,7 +955,14 @@ mod tests {
         let props = parse_and_collect(php);
         assert_eq!(props.len(), 1);
         assert_eq!(props[0].name, "name");
-        assert_eq!(props[0].type_hint.as_deref(), Some("string"));
+        assert_eq!(
+            props[0]
+                .type_hint
+                .as_ref()
+                .map(|t| t.to_string())
+                .as_deref(),
+            Some("string")
+        );
         assert!(!props[0].type_from_docblock);
         assert!(!props[0].is_readonly);
         assert!(!props[0].is_static);
@@ -974,7 +991,14 @@ mod tests {
         let php = "<?php\nclass Foo {\n    private ?string $label;\n}";
         let props = parse_and_collect(php);
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].type_hint.as_deref(), Some("?string"));
+        assert_eq!(
+            props[0]
+                .type_hint
+                .as_ref()
+                .map(|t| t.to_string())
+                .as_deref(),
+            Some("?string")
+        );
     }
 
     #[test]
@@ -982,7 +1006,14 @@ mod tests {
         let php = "<?php\nclass Foo {\n    protected int|string $id;\n}";
         let props = parse_and_collect(php);
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].type_hint.as_deref(), Some("int|string"));
+        assert_eq!(
+            props[0]
+                .type_hint
+                .as_ref()
+                .map(|t| t.to_string())
+                .as_deref(),
+            Some("int|string")
+        );
     }
 
     #[test]
@@ -990,7 +1021,14 @@ mod tests {
         let php = "<?php\nclass Foo {\n    /** @var Collection<User> */\n    public $items;\n}";
         let props = parse_and_collect(php);
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].type_hint.as_deref(), Some("Collection<User>"));
+        assert_eq!(
+            props[0]
+                .type_hint
+                .as_ref()
+                .map(|t| t.to_string())
+                .as_deref(),
+            Some("Collection<User>")
+        );
         assert!(props[0].type_from_docblock);
     }
 
@@ -999,7 +1037,14 @@ mod tests {
         let php = "<?php\nclass Foo {\n    /** @var array<string> */\n    public array $items;\n}";
         let props = parse_and_collect(php);
         assert_eq!(props.len(), 1);
-        assert_eq!(props[0].type_hint.as_deref(), Some("array"));
+        assert_eq!(
+            props[0]
+                .type_hint
+                .as_ref()
+                .map(|t| t.to_string())
+                .as_deref(),
+            Some("array")
+        );
         assert!(!props[0].type_from_docblock);
     }
 

@@ -29,6 +29,8 @@ pub struct Config {
     pub formatting: FormattingConfig,
     /// PHPStan proxy settings.
     pub phpstan: PhpStanConfig,
+    /// PHPCS (PHP_CodeSniffer) proxy settings.
+    pub phpcs: PhpcsConfig,
 }
 
 /// `[php]` section — PHP version override.
@@ -169,6 +171,47 @@ impl PhpStanConfig {
     }
 
     /// Whether PHPStan is explicitly disabled (command set to empty
+    /// string).
+    pub fn is_disabled(&self) -> bool {
+        self.command.as_deref() == Some("")
+    }
+}
+
+/// `[phpcs]` section — PHP_CodeSniffer proxy settings.
+///
+/// When `command` is unset (`None`), PHPantom auto-detects via
+/// `vendor/bin/phpcs` then `$PATH`.  Set to `""` (empty string)
+/// to explicitly disable PHPCS integration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct PhpcsConfig {
+    /// Command (path or name) to run PHPCS.
+    ///
+    /// - `None` (default) — auto-detect `vendor/bin/phpcs`,
+    ///   then `phpcs` on `$PATH`.
+    /// - `""` — disable PHPCS.
+    /// - Any other value — use as the command (e.g.
+    ///   `"vendor/bin/phpcs"` or `"phpcs"`).
+    pub command: Option<String>,
+    /// Coding standard to enforce (e.g. `"PSR12"`).
+    ///
+    /// When unset, PHPCS uses its own default detection
+    /// (`phpcs.xml` / `phpcs.xml.dist` in the project root,
+    /// then its built-in default).
+    pub standard: Option<String>,
+    /// Maximum runtime in milliseconds before PHPCS is killed.
+    /// Defaults to 30 000 ms (30 seconds).
+    pub timeout: Option<u64>,
+}
+
+impl PhpcsConfig {
+    /// Return the configured timeout in milliseconds, falling back to
+    /// 30 000 ms when unset.
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout.unwrap_or(30_000)
+    }
+
+    /// Whether PHPCS is explicitly disabled (command set to empty
     /// string).
     pub fn is_disabled(&self) -> bool {
         self.command.as_deref() == Some("")
@@ -435,6 +478,10 @@ mod tests {
         assert!(config.phpstan.memory_limit.is_none());
         assert!(config.phpstan.timeout.is_none());
         assert_eq!(config.phpstan.timeout_ms(), 60_000);
+        assert!(config.phpcs.command.is_none());
+        assert!(config.phpcs.standard.is_none());
+        assert!(config.phpcs.timeout.is_none());
+        assert_eq!(config.phpcs.timeout_ms(), 30_000);
     }
 
     #[test]
@@ -448,6 +495,7 @@ mod tests {
         assert!(config.formatting.php_cs_fixer.is_none());
         assert!(config.formatting.phpcbf.is_none());
         assert!(config.phpstan.command.is_none());
+        assert!(config.phpcs.command.is_none());
     }
 
     #[test]
@@ -463,6 +511,7 @@ mod tests {
         assert!(config.formatting.php_cs_fixer.is_none());
         assert!(config.formatting.phpcbf.is_none());
         assert!(config.phpstan.command.is_none());
+        assert!(config.phpcs.command.is_none());
     }
 
     #[test]
@@ -621,6 +670,11 @@ timeout = 5000
 command = "/usr/local/bin/phpstan"
 memory-limit = "2G"
 timeout = 30000
+
+[phpcs]
+command = "/usr/local/bin/phpcs"
+standard = "PSR12"
+timeout = 15000
 "#,
         )
         .unwrap();
@@ -641,6 +695,12 @@ timeout = 30000
         );
         assert_eq!(config.phpstan.memory_limit.as_deref(), Some("2G"));
         assert_eq!(config.phpstan.timeout_ms(), 30_000);
+        assert_eq!(
+            config.phpcs.command.as_deref(),
+            Some("/usr/local/bin/phpcs")
+        );
+        assert_eq!(config.phpcs.standard.as_deref(), Some("PSR12"));
+        assert_eq!(config.phpcs.timeout_ms(), 15_000);
     }
 
     #[test]
@@ -763,6 +823,53 @@ timeout = 30000
         assert!(config.formatting.timeout.is_none());
         assert_eq!(config.formatting.timeout_ms(), 10_000);
         assert!(!config.formatting.is_disabled());
+    }
+
+    #[test]
+    fn parses_phpcs_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "[phpcs]\ncommand = \"vendor/bin/phpcs\"\n").unwrap();
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.phpcs.command.as_deref(), Some("vendor/bin/phpcs"));
+    }
+
+    #[test]
+    fn parses_phpcs_standard() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "[phpcs]\nstandard = \"PSR1\"\n").unwrap();
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.phpcs.standard.as_deref(), Some("PSR1"));
+    }
+
+    #[test]
+    fn parses_phpcs_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "[phpcs]\ntimeout = 20000\n").unwrap();
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.phpcs.timeout_ms(), 20_000);
+    }
+
+    #[test]
+    fn phpcs_empty_string_disables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        std::fs::write(&path, "[phpcs]\ncommand = \"\"\n").unwrap();
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.phpcs.command.as_deref(), Some(""));
+        assert!(config.phpcs.is_disabled());
+    }
+
+    #[test]
+    fn phpcs_defaults() {
+        let config = Config::default();
+        assert!(config.phpcs.command.is_none());
+        assert!(config.phpcs.standard.is_none());
+        assert!(config.phpcs.timeout.is_none());
+        assert_eq!(config.phpcs.timeout_ms(), 30_000);
+        assert!(!config.phpcs.is_disabled());
     }
 
     #[test]

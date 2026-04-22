@@ -1,4 +1,5 @@
 use crate::common::create_test_backend;
+use phpantom_lsp::php_type::PhpType;
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -1112,148 +1113,155 @@ async fn test_array_shape_insert_text_no_quote() {
 
 #[test]
 fn test_parse_array_shape_basic() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{name: string, age: int}").unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse("array{name: string, age: int}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "name");
-    assert_eq!(entries[0].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some("name"));
+    assert_eq!(entries[0].value_type.to_string(), "string");
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "age");
-    assert_eq!(entries[1].value_type, "int");
+    assert_eq!(entries[1].key.as_deref(), Some("age"));
+    assert_eq!(entries[1].value_type.to_string(), "int");
     assert!(!entries[1].optional);
 }
 
 #[test]
 fn test_parse_array_shape_optional_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{name: string, age?: int, email?: string}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        "array{name: string, age?: int, email?: string}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0].key, "name");
+    assert_eq!(entries[0].key.as_deref(), Some("name"));
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "age");
+    assert_eq!(entries[1].key.as_deref(), Some("age"));
     assert!(entries[1].optional);
-    assert_eq!(entries[2].key, "email");
+    assert_eq!(entries[2].key.as_deref(), Some("email"));
     assert!(entries[2].optional);
 }
 
 #[test]
 fn test_parse_array_shape_positional() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{string, int, bool}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{string, int, bool}")).unwrap();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0].key, "0");
-    assert_eq!(entries[0].value_type, "string");
-    assert_eq!(entries[1].key, "1");
-    assert_eq!(entries[1].value_type, "int");
-    assert_eq!(entries[2].key, "2");
-    assert_eq!(entries[2].value_type, "bool");
+    assert_eq!(entries[0].key.as_deref(), Some("0"));
+    assert_eq!(entries[0].value_type.to_string(), "string");
+    assert_eq!(entries[1].key.as_deref(), Some("1"));
+    assert_eq!(entries[1].value_type.to_string(), "int");
+    assert_eq!(entries[2].key.as_deref(), Some("2"));
+    assert_eq!(entries[2].value_type.to_string(), "bool");
 }
 
 #[test]
 fn test_parse_array_shape_numeric_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{0: User, 1: Address}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{0: User, 1: Address}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "0");
-    assert_eq!(entries[0].value_type, "User");
-    assert_eq!(entries[1].key, "1");
-    assert_eq!(entries[1].value_type, "Address");
+    assert_eq!(entries[0].key.as_deref(), Some("0"));
+    assert_eq!(entries[0].value_type.to_string(), "User");
+    assert_eq!(entries[1].key.as_deref(), Some("1"));
+    assert_eq!(entries[1].value_type.to_string(), "Address");
 }
 
 #[test]
 fn test_parse_array_shape_nested_generics() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries =
-        parse_array_shape("array{users: list<User>, meta: array<string, mixed>}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        "array{users: list<User>, meta: array<string, mixed>}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "users");
-    assert_eq!(entries[0].value_type, "list<User>");
-    assert_eq!(entries[1].key, "meta");
-    assert_eq!(entries[1].value_type, "array<string, mixed>");
+    assert_eq!(entries[0].key.as_deref(), Some("users"));
+    assert_eq!(entries[0].value_type.to_string(), "list<User>");
+    assert_eq!(entries[1].key.as_deref(), Some("meta"));
+    assert_eq!(entries[1].value_type.to_string(), "array<string, mixed>");
 }
 
 #[test]
 fn test_parse_array_shape_empty() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{}")).unwrap();
     assert!(entries.is_empty());
 }
 
 #[test]
 fn test_parse_array_shape_not_a_shape() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    assert!(parse_array_shape("array<int, User>").is_none());
-    assert!(parse_array_shape("list<User>").is_none());
-    assert!(parse_array_shape("string").is_none());
-    assert!(parse_array_shape("User").is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("array<int, User>")).is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("list<User>")).is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("string")).is_none());
+    assert!(parse_array_shape_typed(&PhpType::parse("User")).is_none());
 }
 
 #[test]
 fn test_parse_array_shape_nullable() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("?array{name: string}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("?array{name: string}")).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].key, "name");
+    assert_eq!(entries[0].key.as_deref(), Some("name"));
 }
 
 #[test]
 fn test_extract_array_shape_value_type() {
-    use phpantom_lsp::docblock::extract_array_shape_value_type;
+    use phpantom_lsp::docblock::extract_array_shape_value_type_typed;
 
     assert_eq!(
-        extract_array_shape_value_type("array{name: string, user: User}", "user"),
+        extract_array_shape_value_type_typed(
+            &PhpType::parse("array{name: string, user: User}"),
+            "user"
+        )
+        .map(|t| t.to_string()),
         Some("User".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type("array{name: string, user: User}", "name"),
+        extract_array_shape_value_type_typed(
+            &PhpType::parse("array{name: string, user: User}"),
+            "name"
+        )
+        .map(|t| t.to_string()),
         Some("string".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type("array{name: string, user: User}", "missing"),
+        extract_array_shape_value_type_typed(
+            &PhpType::parse("array{name: string, user: User}"),
+            "missing"
+        )
+        .map(|t| t.to_string()),
         None
     );
     assert_eq!(
-        extract_array_shape_value_type("list<User>", "anything"),
+        extract_array_shape_value_type_typed(&PhpType::parse("list<User>"), "anything")
+            .map(|t| t.to_string()),
         None
     );
 }
 
 #[test]
 fn test_parse_array_shape_nested_shapes() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries =
-        parse_array_shape("array{user: array{name: string, age: int}, active: bool}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        "array{user: array{name: string, age: int}, active: bool}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "user");
-    assert_eq!(entries[0].value_type, "array{name: string, age: int}");
-    assert_eq!(entries[1].key, "active");
-    assert_eq!(entries[1].value_type, "bool");
-}
-
-// ─── split_type_token and clean_type with array shapes ──────────────────────
-
-#[test]
-fn test_clean_type_preserves_array_shape() {
-    use phpantom_lsp::docblock::clean_type;
-
+    assert_eq!(entries[0].key.as_deref(), Some("user"));
     assert_eq!(
-        clean_type("array{name: string, age: int}"),
+        entries[0].value_type.to_string(),
         "array{name: string, age: int}"
     );
-    assert_eq!(
-        clean_type("array{name: string, age: int}|null"),
-        "array{name: string, age: int}|null"
-    );
-    assert_eq!(clean_type("\\array{name: string}"), "\\array{name: string}");
+    assert_eq!(entries[1].key.as_deref(), Some("active"));
+    assert_eq!(entries[1].value_type.to_string(), "bool");
 }
 
 // ─── Array Shape Key Completion in Class Method Context ─────────────────────
@@ -2994,197 +3002,212 @@ async fn test_array_shape_list_element_member_access() {
 
 #[test]
 fn test_parse_array_shape_single_quoted_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{'foo': int, 'bar': string}").unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse("array{'foo': int, 'bar': string}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
     assert!(!entries[1].optional);
 }
 
 #[test]
 fn test_parse_array_shape_double_quoted_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape(r#"array{"foo": int, "bar": string}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"foo": int, "bar": string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
 }
 
 #[test]
 fn test_parse_array_shape_mixed_quoted_and_unquoted_keys() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape(r#"array{'foo': int, "bar"?: string, baz: bool}"#).unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        r#"array{'foo': int, "bar"?: string, baz: bool}"#,
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
     assert!(entries[1].optional);
-    assert_eq!(entries[2].key, "baz");
-    assert_eq!(entries[2].value_type, "bool");
+    assert_eq!(entries[2].key.as_deref(), Some("baz"));
+    assert_eq!(entries[2].value_type.to_string(), "bool");
     assert!(!entries[2].optional);
 }
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_spaces() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
-    let entries = parse_array_shape("array{'po rt': int, 'my key': string}").unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse("array{'po rt': int, 'my key': string}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "po rt");
-    assert_eq!(entries[0].value_type, "int");
-    assert_eq!(entries[1].key, "my key");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some("po rt"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
+    assert_eq!(entries[1].key.as_deref(), Some("my key"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
 }
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_special_chars() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Key contains comma, colon, braces, question mark — all should be
     // treated as literal characters inside quotes.
-    let entries = parse_array_shape(
+    let entries = parse_array_shape_typed(&PhpType::parse(
         r#"array{",host?:}"?: string, 'po rt': int, credentials: User|AdminUser}"#,
-    )
+    ))
     .unwrap();
     assert_eq!(entries.len(), 3, "entries: {:?}", entries);
-    assert_eq!(entries[0].key, ",host?:}");
-    assert_eq!(entries[0].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some(",host?:}"));
+    assert_eq!(entries[0].value_type.to_string(), "string");
     assert!(entries[0].optional);
-    assert_eq!(entries[1].key, "po rt");
-    assert_eq!(entries[1].value_type, "int");
+    assert_eq!(entries[1].key.as_deref(), Some("po rt"));
+    assert_eq!(entries[1].value_type.to_string(), "int");
     assert!(!entries[1].optional);
-    assert_eq!(entries[2].key, "credentials");
-    assert_eq!(entries[2].value_type, "User|AdminUser");
+    assert_eq!(entries[2].key.as_deref(), Some("credentials"));
+    assert_eq!(entries[2].value_type.to_string(), "User|AdminUser");
     assert!(!entries[2].optional);
 }
 
 #[test]
 fn test_parse_array_shape_optional_quoted_key() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Optional marker `?` after closing quote: `"bar"?: string`
-    let entries = parse_array_shape(r#"array{"bar"?: string, 'baz'?: int}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"bar"?: string, 'baz'?: int}"#)).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "bar");
+    assert_eq!(entries[0].key.as_deref(), Some("bar"));
     assert!(entries[0].optional);
-    assert_eq!(entries[0].value_type, "string");
-    assert_eq!(entries[1].key, "baz");
+    assert_eq!(entries[0].value_type.to_string(), "string");
+    assert_eq!(entries[1].key.as_deref(), Some("baz"));
     assert!(entries[1].optional);
-    assert_eq!(entries[1].value_type, "int");
+    assert_eq!(entries[1].value_type.to_string(), "int");
 }
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_colon() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Colon inside a quoted key must not be treated as the key:value separator.
-    let entries = parse_array_shape(r#"array{"host:port": string, name: string}"#).unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse(
+        r#"array{"host:port": string, name: string}"#,
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "host:port");
-    assert_eq!(entries[0].value_type, "string");
-    assert_eq!(entries[1].key, "name");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some("host:port"));
+    assert_eq!(entries[0].value_type.to_string(), "string");
+    assert_eq!(entries[1].key.as_deref(), Some("name"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
 }
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_comma() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Comma inside a quoted key must not split entries.
-    let entries = parse_array_shape(r#"array{"first,last": string, age: int}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"first,last": string, age: int}"#))
+            .unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "first,last");
-    assert_eq!(entries[0].value_type, "string");
-    assert_eq!(entries[1].key, "age");
-    assert_eq!(entries[1].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("first,last"));
+    assert_eq!(entries[0].value_type.to_string(), "string");
+    assert_eq!(entries[1].key.as_deref(), Some("age"));
+    assert_eq!(entries[1].value_type.to_string(), "int");
 }
 
 #[test]
 fn test_parse_array_shape_quoted_key_with_braces() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // Braces inside a quoted key must not break brace matching.
-    let entries = parse_array_shape(r#"array{"{key}": string, normal: int}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{"{key}": string, normal: int}"#)).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "{key}");
-    assert_eq!(entries[0].value_type, "string");
-    assert_eq!(entries[1].key, "normal");
-    assert_eq!(entries[1].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("{key}"));
+    assert_eq!(entries[0].value_type.to_string(), "string");
+    assert_eq!(entries[1].key.as_deref(), Some("normal"));
+    assert_eq!(entries[1].value_type.to_string(), "int");
 }
 
 #[test]
 fn test_extract_array_shape_value_type_quoted_key() {
-    use phpantom_lsp::docblock::extract_array_shape_value_type;
+    use phpantom_lsp::docblock::extract_array_shape_value_type_typed;
 
     // Lookup by unquoted key name should match a quoted key in the shape.
-    let t = r#"array{"host": string, 'port': int, ssl: bool}"#;
+    let t = PhpType::parse(r#"array{"host": string, 'port': int, ssl: bool}"#);
     assert_eq!(
-        extract_array_shape_value_type(t, "host"),
+        extract_array_shape_value_type_typed(&t, "host").map(|t| t.to_string()),
         Some("string".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type(t, "port"),
+        extract_array_shape_value_type_typed(&t, "port").map(|t| t.to_string()),
         Some("int".to_string())
     );
     assert_eq!(
-        extract_array_shape_value_type(t, "ssl"),
+        extract_array_shape_value_type_typed(&t, "ssl").map(|t| t.to_string()),
         Some("bool".to_string())
     );
 }
 
 #[test]
 fn test_parse_array_shape_phpstan_spec_examples() {
-    use phpantom_lsp::docblock::parse_array_shape;
+    use phpantom_lsp::docblock::parse_array_shape_typed;
 
     // From the PHPStan documentation:
     // array{'foo': int, "bar": string}
-    let entries = parse_array_shape(r#"array{'foo': int, "bar": string}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{'foo': int, "bar": string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
 
     // array{'foo': int, "bar"?: string}
-    let entries = parse_array_shape(r#"array{'foo': int, "bar"?: string}"#).unwrap();
+    let entries =
+        parse_array_shape_typed(&PhpType::parse(r#"array{'foo': int, "bar"?: string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "bar");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
     assert!(entries[1].optional);
 
     // array{int, int} (tuple)
-    let entries = parse_array_shape("array{int, int}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{int, int}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "0");
-    assert_eq!(entries[0].value_type, "int");
-    assert_eq!(entries[1].key, "1");
-    assert_eq!(entries[1].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("0"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
+    assert_eq!(entries[1].key.as_deref(), Some("1"));
+    assert_eq!(entries[1].value_type.to_string(), "int");
 
     // array{0: int, 1?: int}
-    let entries = parse_array_shape("array{0: int, 1?: int}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{0: int, 1?: int}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "0");
+    assert_eq!(entries[0].key.as_deref(), Some("0"));
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "1");
+    assert_eq!(entries[1].key.as_deref(), Some("1"));
     assert!(entries[1].optional);
 
     // array{foo: int, bar: string}
-    let entries = parse_array_shape("array{foo: int, bar: string}").unwrap();
+    let entries = parse_array_shape_typed(&PhpType::parse("array{foo: int, bar: string}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[1].key, "bar");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
 }
 
 #[tokio::test]
@@ -5259,6 +5282,374 @@ async fn test_push_style_with_initial_positional_array() {
             assert!(
                 method_names.contains(&"grantPermission"),
                 "Should suggest AdminUser::grantPermission() from push, got {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+// ─── Variable-key array assignment: `$arr[$id] = $value` ────────────────────
+
+/// `$arr = []; $arr[$id] = new User();` should track the value type so that
+/// `$arr[0]->` resolves User members — same as push-style `$arr[] = new User()`.
+#[tokio::test]
+async fn test_variable_key_assignment_tracks_value_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///varkey_single.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class OrderLine {\n",
+        "    public string $sku;\n",
+        "    public function getQuantity(): int { return 0; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    /** @param list<OrderLine> $lines */\n",
+        "    public function run(array $lines): void {\n",
+        "        $grouped = [];\n",
+        "        foreach ($lines as $line) {\n",
+        "            $key = $line->sku;\n",
+        "            $grouped[$key] = $line;\n",
+        "        }\n",
+        "        foreach ($grouped as $item) {\n",
+        "            $item->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 19,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for variable-key array assignment"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                method_names.contains(&"getQuantity"),
+                "Should include OrderLine::getQuantity() from variable-key assignment, got: {:?}",
+                method_names
+            );
+            let prop_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::PROPERTY))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                prop_names.contains(&"sku"),
+                "Should include OrderLine::$sku from variable-key assignment, got: {:?}",
+                prop_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Multiple variable-key assignments with different types should union:
+/// `$arr[$a] = new User(); $arr[$b] = new Admin();` → `list<User|Admin>`.
+#[tokio::test]
+async fn test_variable_key_assignment_union_types() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///varkey_union.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class User {\n",
+        "    public string $name;\n",
+        "    public function getEmail(): string {}\n",
+        "}\n",
+        "class AdminUser {\n",
+        "    public function grantPermission(string $perm): void {}\n",
+        "}\n",
+        "$arr = [];\n",
+        "$arr[$idx1] = new User();\n",
+        "$arr[$idx2] = new AdminUser();\n",
+        "$arr[0]->\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 11,
+                character: 12,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for union of variable-key assignments"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                method_names.contains(&"getEmail"),
+                "Should include User::getEmail() from first variable-key assignment, got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"grantPermission"),
+                "Should include AdminUser::grantPermission() from second variable-key assignment, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Variable-key assignment followed by bracket access: `$arr[$key]->` should
+/// resolve element members.
+#[tokio::test]
+async fn test_variable_key_assignment_bracket_access() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///varkey_bracket.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Product {\n",
+        "    public string $title;\n",
+        "    public function getPrice(): float { return 0.0; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    /** @param list<Product> $products */\n",
+        "    public function run(array $products): void {\n",
+        "        $indexed = [];\n",
+        "        foreach ($products as $p) {\n",
+        "            $indexed[$p->title] = $p;\n",
+        "        }\n",
+        "        $indexed['some_key']->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 31,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for bracket access after variable-key assignment"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                method_names.contains(&"getPrice"),
+                "Should include Product::getPrice() from variable-key assignment, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Null-coalescing on variable-key array: `$arr[$key] ?? null` should resolve
+/// to the value type unioned with null.  After a guard clause, the null is
+/// stripped and only the value type remains.
+#[tokio::test]
+async fn test_variable_key_assignment_null_coalesce_guard() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///varkey_coalesce.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class OrderLine {\n",
+        "    public string $sku;\n",
+        "    public function getTotal(): float { return 0.0; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    /** @param list<OrderLine> $lines */\n",
+        "    public function run(array $lines): void {\n",
+        "        $byKey = [];\n",
+        "        foreach ($lines as $ol) {\n",
+        "            $byKey[$ol->sku] = $ol;\n",
+        "        }\n",
+        "        $found = $byKey['abc'] ?? null;\n",
+        "        if ($found === null) { return; }\n",
+        "        $found->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 16,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions after null-coalesce + guard on variable-key array"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                method_names.contains(&"getTotal"),
+                "Should include OrderLine::getTotal() after null guard, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Pure variable-key assignment (no loop): `$arr = []; $arr[$x] = new Foo();`
+/// should track element type even without a surrounding loop.
+#[tokio::test]
+async fn test_variable_key_assignment_no_loop() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///varkey_no_loop.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Widget {\n",
+        "    public function render(): string { return ''; }\n",
+        "}\n",
+        "$widgets = [];\n",
+        "$widgets[$someId] = new Widget();\n",
+        "$widgets[$otherId] = new Widget();\n",
+        "$widgets[0]->\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 7,
+                character: 15,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Should return completions for variable-key assignment without loop"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+            assert!(
+                method_names.contains(&"render"),
+                "Should include Widget::render() from variable-key assignment, got: {:?}",
                 method_names
             );
         }

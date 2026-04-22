@@ -31,6 +31,7 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::code_actions::CodeActionData;
 use crate::code_actions::make_code_action_data;
+use crate::php_type::PhpType;
 use crate::util::ranges_overlap;
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -52,9 +53,9 @@ const ACTION_KIND: &str = "phpstan.addIterableType";
 /// - Messages may also mention `iterable`, `Traversable`, `Generator`,
 ///   `Collection`, or any other iterable class/interface.
 ///
-/// Returns `None` if the message does not refer to a return type or
-/// does not match the expected pattern.
-fn extract_iterable_return_type(message: &str) -> Option<&str> {
+/// Returns the parsed `PhpType`, or `None` if the message does not
+/// refer to a return type or does not match the expected pattern.
+fn extract_iterable_return_type(message: &str) -> Option<PhpType> {
     // Only handle the "return type" variant.
     if !message.contains("return type") {
         return None;
@@ -72,16 +73,16 @@ fn extract_iterable_return_type(message: &str) -> Option<&str> {
         return None;
     }
 
-    Some(type_name)
+    Some(PhpType::parse(type_name))
 }
 
-/// Build the `@return` type string from the iterable type name and
-/// an inferred element type.
+/// Build the `@return` type from the iterable type name and a vector
+/// of inferred element type arguments.
 ///
 /// Uses PHPStan's generic syntax: `array<string>`, `iterable<User>`,
-/// `Traversable<mixed>`, etc.
-fn build_return_type(iterable_type: &str, element_type: &str) -> String {
-    format!("{}<{}>", iterable_type, element_type)
+/// `Traversable<mixed>`, `array<int, string>`, etc.
+fn build_return_type(iterable_type: &str, args: Vec<PhpType>) -> PhpType {
+    PhpType::Generic(iterable_type.to_owned(), args)
 }
 
 // ── Docblock helpers ────────────────────────────────────────────────────────
@@ -292,10 +293,11 @@ impl Backend {
             }
 
             // Only handle the "return type" variant.
-            let iterable_type = match extract_iterable_return_type(&diag.message) {
+            let iterable_type_parsed = match extract_iterable_return_type(&diag.message) {
                 Some(t) => t,
                 None => continue,
             };
+            let iterable_type = iterable_type_parsed.to_string();
 
             let diag_line = diag.range.start.line as usize;
 
@@ -330,7 +332,7 @@ impl Backend {
                 && let Some(ret_line) = docblock.return_tag_line
             {
                 let ret_text = lines[ret_line];
-                if ret_text.contains('<') || ret_text.contains("[]") {
+                if docblock_return_line_has_type_structure(ret_text) {
                     continue;
                 }
             }
@@ -340,7 +342,7 @@ impl Backend {
 
             let extra = serde_json::json!({
                 "diagnostic_line": diag_line,
-                "iterable_type": iterable_type,
+                "iterable_type": &iterable_type,
                 "func_line": func_line,
             });
 
@@ -376,11 +378,11 @@ impl Backend {
         let func_line = data.extra.get("func_line")?.as_u64()? as usize;
 
         // Infer the element type from the function body.
-        let element_type = self
+        let element_args = self
             .infer_iterable_element_type(&data.uri, content, func_line, iterable_type)
-            .unwrap_or_else(|| "mixed".to_string());
+            .unwrap_or_else(|| vec![PhpType::mixed()]);
 
-        let return_type = build_return_type(iterable_type, &element_type);
+        let return_type = build_return_type(iterable_type, element_args).to_string();
 
         let lines: Vec<&str> = content.lines().collect();
         if func_line >= lines.len() {
@@ -526,37 +528,38 @@ impl Backend {
     /// Delegates to [`infer_return_type_for_function`](Self::infer_return_type_for_function)
     /// in `fix_return_type.rs` to get the effective return type.
     /// When the inferred type is a generic iterable (e.g. `list<string>`,
-    /// `array<int, User>`), the inner type parameter(s) are extracted.
+    /// `array<int, User>`), the inner type parameter(s) are extracted
+    /// and returned as a `Vec<PhpType>`.
     /// When it's a bare `array` or `mixed`, returns `None` so the caller
-    /// falls back to `<mixed>`.
+    /// falls back to `vec![PhpType::mixed()]`.
     fn infer_iterable_element_type(
         &self,
         uri: &str,
         content: &str,
         func_line: usize,
         iterable_type: &str,
-    ) -> Option<String> {
+    ) -> Option<Vec<PhpType>> {
         let inferred = self.infer_return_type_for_function(uri, content, func_line)?;
 
         // Prefer the effective type (richer, e.g. `list<string>`),
         // falling back to the native type.
-        let type_str = inferred.effective.as_deref().unwrap_or(&inferred.native);
+        let parsed = inferred
+            .effective
+            .as_ref()
+            .unwrap_or(&inferred.native)
+            .clone();
 
         // If the inferred type is just `array`, `mixed`, or the bare
         // iterable type, we can't determine element types.
-        let lower = type_str.to_lowercase();
-        if lower == "array" || lower == "mixed" || lower == iterable_type.to_lowercase() {
+        if parsed.is_bare_array() || parsed.is_mixed() || parsed.is_named_ci(iterable_type) {
             return None;
         }
 
         // Try to extract the generic parameter(s) from the inferred type.
-        // e.g. `list<string>` → `string`, `array<int, User>` → `int, User`
-        if let Some(open) = type_str.find('<') {
-            if let Some(close) = type_str.rfind('>') {
-                let inner = type_str[open + 1..close].trim();
-                if !inner.is_empty() && inner != "mixed" {
-                    return Some(inner.to_string());
-                }
+        // e.g. `list<string>` → [string], `array<int, User>` → [int, User]
+        if let PhpType::Generic(_, args) = &parsed {
+            if !args.is_empty() && args.iter().all(|a| !a.is_mixed()) {
+                return Some(args.clone());
             }
             return None;
         }
@@ -565,8 +568,8 @@ impl Backend {
         // `string` when the function returns `['a', 'b']` and the
         // resolver collapsed it).  This shouldn't normally happen for
         // an iterable return, but use it as the element type.
-        if !lower.is_empty() && lower != "void" && lower != "null" {
-            return Some(type_str.to_string());
+        if !parsed.is_void() && !parsed.is_null() {
+            return Some(vec![parsed]);
         }
 
         None
@@ -625,12 +628,37 @@ pub(crate) fn is_add_iterable_type_stale(content: &str, diag_line: usize, messag
     // Check if the @return tag has a generic type.
     if let Some(ret_line_idx) = docblock.return_tag_line {
         let ret_text = lines[ret_line_idx];
-        if ret_text.contains('<') || ret_text.contains("[]") {
+        if docblock_return_line_has_type_structure(ret_text) {
             return true;
         }
     }
 
     false
+}
+
+/// Check whether a `@return` docblock line already contains a type with
+/// generic parameters, array slice syntax, or other type structure.
+///
+/// Extracts the type token from the line and uses `PhpType::parse()` +
+/// `has_type_structure()` for a structured check instead of a raw
+/// `.contains('<')` heuristic.
+fn docblock_return_line_has_type_structure(line: &str) -> bool {
+    // Strip the leading ` * @return ` (or similar) prefix to get the type text.
+    let trimmed = line.trim_start().trim_start_matches('*').trim_start();
+    let rest = if let Some(after) = trimmed.strip_prefix("@return") {
+        after.trim_start()
+    } else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    let (type_token, _) = crate::docblock::type_strings::split_type_token(rest);
+    if type_token.is_empty() {
+        return false;
+    }
+    let parsed = crate::php_type::PhpType::parse(type_token);
+    parsed.has_type_structure()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -645,39 +673,57 @@ mod tests {
     fn extracts_array_from_method_message() {
         let msg =
             "Method Foo::bar() return type has no value type specified in iterable type array.";
-        assert_eq!(extract_iterable_return_type(msg), Some("array"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("array"))
+        );
     }
 
     #[test]
     fn extracts_array_from_function_message() {
         let msg = "Function foo() return type has no value type specified in iterable type array.";
-        assert_eq!(extract_iterable_return_type(msg), Some("array"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("array"))
+        );
     }
 
     #[test]
     fn extracts_iterable_type() {
         let msg =
             "Method Foo::bar() return type has no value type specified in iterable type iterable.";
-        assert_eq!(extract_iterable_return_type(msg), Some("iterable"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("iterable"))
+        );
     }
 
     #[test]
     fn extracts_traversable_type() {
         let msg = "Method Foo::bar() return type has no value type specified in iterable type Traversable.";
-        assert_eq!(extract_iterable_return_type(msg), Some("Traversable"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("Traversable"))
+        );
     }
 
     #[test]
     fn extracts_generator_type() {
         let msg =
             "Function gen() return type has no value type specified in iterable type Generator.";
-        assert_eq!(extract_iterable_return_type(msg), Some("Generator"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("Generator"))
+        );
     }
 
     #[test]
     fn extracts_collection_type() {
         let msg = "Method Foo::bar() return type has no value type specified in iterable type Collection.";
-        assert_eq!(extract_iterable_return_type(msg), Some("Collection"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("Collection"))
+        );
     }
 
     #[test]
@@ -702,18 +748,24 @@ mod tests {
 
     #[test]
     fn builds_array_with_element_type() {
-        assert_eq!(build_return_type("array", "string"), "array<string>");
+        assert_eq!(
+            build_return_type("array", vec![PhpType::parse("string")]).to_string(),
+            "array<string>"
+        );
     }
 
     #[test]
     fn builds_iterable_mixed() {
-        assert_eq!(build_return_type("iterable", "mixed"), "iterable<mixed>");
+        assert_eq!(
+            build_return_type("iterable", vec![PhpType::parse("mixed")]).to_string(),
+            "iterable<mixed>"
+        );
     }
 
     #[test]
     fn builds_traversable_with_element() {
         assert_eq!(
-            build_return_type("Traversable", "User"),
+            build_return_type("Traversable", vec![PhpType::parse("User")]).to_string(),
             "Traversable<User>"
         );
     }
@@ -721,7 +773,11 @@ mod tests {
     #[test]
     fn builds_array_with_key_value() {
         assert_eq!(
-            build_return_type("array", "int, string"),
+            build_return_type(
+                "array",
+                vec![PhpType::parse("int"), PhpType::parse("string")]
+            )
+            .to_string(),
             "array<int, string>"
         );
     }

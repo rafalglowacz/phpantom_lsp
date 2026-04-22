@@ -13,10 +13,9 @@
 //!
 //! Methods whose name starts with `__` (magic methods) are skipped.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::inheritance::{apply_substitution, apply_substitution_to_conditional};
+use crate::inheritance::apply_substitution_to_conditional;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, ELOQUENT_COLLECTION_FQN, MethodInfo, Visibility};
 use crate::virtual_members::ResolvedClassCache;
@@ -24,10 +23,9 @@ use crate::virtual_members::ResolvedClassCache;
 use super::ELOQUENT_BUILDER_FQN;
 
 /// Replace `\Illuminate\Database\Eloquent\Collection` with a custom
-/// collection class in a type string, preserving generic parameters.
-pub(super) fn replace_eloquent_collection(type_str: &str, custom_collection: &str) -> String {
-    let parsed = PhpType::parse(type_str);
-    replace_collection_in_type(&parsed, custom_collection).to_string()
+/// collection class in a [`PhpType`], preserving generic parameters.
+pub(super) fn replace_eloquent_collection_typed(ty: &PhpType, custom_collection: &str) -> PhpType {
+    replace_collection_in_type(ty, custom_collection)
 }
 
 /// Recursively walk a `PhpType` tree and replace any `Generic` whose
@@ -125,15 +123,11 @@ pub(super) fn build_builder_forwarded_methods(
     let builder_self_type = PhpType::Generic(
         ELOQUENT_BUILDER_FQN.to_string(),
         vec![PhpType::Named(class.name.clone())],
-    )
-    .to_string();
-    let mut subs = HashMap::new();
+    );
+    let mut subs = super::self_ref_subs(builder_self_type);
     for param in &builder_class.template_params {
         subs.insert(param.clone(), PhpType::Named(class.name.clone()));
     }
-    subs.insert("static".to_string(), PhpType::parse(&builder_self_type));
-    subs.insert("$this".to_string(), PhpType::parse(&builder_self_type));
-    subs.insert("self".to_string(), PhpType::parse(&builder_self_type));
 
     let mut methods = Vec::new();
 
@@ -163,28 +157,24 @@ pub(super) fn build_builder_forwarded_methods(
         // Apply template and self-type substitutions.
         if !subs.is_empty() {
             if let Some(ref mut ret) = forwarded.return_type {
-                let ret_str = ret.to_string();
-                let substituted = apply_substitution(&ret_str, &subs);
-                *ret = PhpType::parse(&substituted);
+                *ret = ret.substitute(&subs);
             }
             if let Some(ref mut cond) = forwarded.conditional_return {
                 apply_substitution_to_conditional(cond, &subs);
             }
             for param in &mut forwarded.parameters {
                 if let Some(ref mut hint) = param.type_hint {
-                    let hint_str = hint.to_string();
-                    let substituted = apply_substitution(&hint_str, &subs);
-                    *hint = PhpType::parse(&substituted);
+                    *hint = hint.substitute(&subs);
                 }
             }
         }
 
         // Replace Eloquent Collection with custom collection class.
         if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.as_ref())
+            && let Some(coll_name) = coll.base_name()
             && let Some(ref mut ret) = forwarded.return_type
         {
-            let ret_str = ret.to_string();
-            *ret = PhpType::parse(&replace_eloquent_collection(&ret_str, coll));
+            *ret = replace_eloquent_collection_typed(ret, coll_name);
         }
 
         methods.push(forwarded);

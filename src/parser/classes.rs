@@ -151,7 +151,7 @@ use crate::types::*;
 use crate::virtual_members::laravel::infer_relationship_from_body;
 
 use super::{
-    DeprecationInfo, DocblockCtx, extract_hint_string, extract_parameters, extract_property_info,
+    DeprecationInfo, DocblockCtx, extract_hint_type, extract_parameters, extract_property_info,
     extract_visibility, is_available_for_version, is_removed_for_version, merge_deprecation_info,
 };
 
@@ -169,7 +169,7 @@ struct ClassDocblockInfo {
     /// Upper bounds for template parameters (`@template T of Bound`).
     template_param_bounds: HashMap<String, PhpType>,
     /// Default values for template parameters (`@template T of bool = false`).
-    template_param_defaults: HashMap<String, String>,
+    template_param_defaults: HashMap<String, PhpType>,
     /// Generic arguments from `@extends` / `@phpstan-extends`.
     extends_generics: Vec<(String, Vec<PhpType>)>,
     /// Generic arguments from `@implements` / `@phpstan-implements`.
@@ -217,9 +217,9 @@ fn extract_class_docblock<'a>(
     let template_params: Vec<String> = params_full.iter().map(|(n, _, _, _)| n.clone()).collect();
     let template_param_bounds: HashMap<String, PhpType> = params_full
         .iter()
-        .filter_map(|(name, bound, _, _)| bound.as_ref().map(|b| (name.clone(), PhpType::parse(b))))
+        .filter_map(|(name, bound, _, _)| bound.as_ref().map(|b| (name.clone(), b.clone())))
         .collect();
-    let template_param_defaults: HashMap<String, String> = params_full
+    let template_param_defaults: HashMap<String, PhpType> = params_full
         .into_iter()
         .filter_map(|(name, _, _, default)| default.map(|d| (name, d)))
         .collect();
@@ -229,7 +229,6 @@ fn extract_class_docblock<'a>(
     let mixin_generics: Vec<(String, Vec<PhpType>)> = mixin_data
         .into_iter()
         .filter(|(_, args)| !args.is_empty())
-        .map(|(name, args)| (name, args.into_iter().map(|a| PhpType::parse(&a)).collect()))
         .collect();
 
     ClassDocblockInfo {
@@ -237,18 +236,9 @@ fn extract_class_docblock<'a>(
         template_params,
         template_param_bounds,
         template_param_defaults,
-        extends_generics: docblock::extract_generics_tag_from_info(&info, "@extends")
-            .into_iter()
-            .map(|(name, args)| (name, args.into_iter().map(|a| PhpType::parse(&a)).collect()))
-            .collect(),
-        implements_generics: docblock::extract_generics_tag_from_info(&info, "@implements")
-            .into_iter()
-            .map(|(name, args)| (name, args.into_iter().map(|a| PhpType::parse(&a)).collect()))
-            .collect(),
-        use_generics: docblock::extract_generics_tag_from_info(&info, "@use")
-            .into_iter()
-            .map(|(name, args)| (name, args.into_iter().map(|a| PhpType::parse(&a)).collect()))
-            .collect(),
+        extends_generics: docblock::extract_generics_tag_from_info(&info, "@extends"),
+        implements_generics: docblock::extract_generics_tag_from_info(&info, "@implements"),
+        use_generics: docblock::extract_generics_tag_from_info(&info, "@use"),
         type_aliases: docblock::extract_type_aliases_from_info(&info),
         mixins,
         mixin_generics,
@@ -303,17 +293,17 @@ fn extract_custom_collection(
     use_generics: &[(String, Vec<PhpType>)],
     methods: &[MethodInfo],
     content: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     // 1. Try the #[CollectedBy] attribute first.
     if let Some(name) = extract_collected_by_attribute(attribute_lists, content) {
-        return Some(name);
+        return Some(PhpType::Named(name));
     }
 
     // 2. Fall back to @use HasCollection<X>.
     for (trait_name, args) in use_generics {
         let short = trait_name.rsplit('\\').next().unwrap_or(trait_name);
         if short == "HasCollection" && !args.is_empty() {
-            return Some(args[0].to_string());
+            return Some(args[0].clone());
         }
     }
 
@@ -332,31 +322,25 @@ fn extract_custom_collection(
 /// Returns `None` if no `newCollection` method exists, if it has no
 /// return type, or if the return type is the standard Eloquent
 /// Collection.
-fn extract_custom_collection_from_new_collection(methods: &[MethodInfo]) -> Option<String> {
+fn extract_custom_collection_from_new_collection(methods: &[MethodInfo]) -> Option<PhpType> {
     let method = methods.iter().find(|m| m.name == "newCollection")?;
     let return_type = method.return_type.as_ref()?;
-    let return_type_str = return_type.to_string();
 
-    // Strip generic parameters (e.g. `TaskCollection<int, static>` → `TaskCollection`).
-    let base = return_type.base_name().unwrap_or(return_type_str.as_str());
-
-    // Compare without leading backslash for the standard Collection check,
-    // but preserve the original form so that `resolve_name` in
-    // `resolve_parent_class_names` can correctly handle both FQN
-    // (`\App\Collections\X`) and short names (`X`) via the use map.
-    let stripped = strip_fqn_prefix(base);
+    // `base_name()` strips leading `\` and generic parameters, giving a
+    // clean class name suitable for comparison.
+    let base = return_type.base_name()?;
 
     // Ignore the standard Eloquent Collection — that's the default, not
     // a custom override.
-    if stripped == "Illuminate\\Database\\Eloquent\\Collection" || stripped == "Collection" {
+    if base == "Illuminate\\Database\\Eloquent\\Collection" || base == "Collection" {
         return None;
     }
 
-    if stripped.is_empty() {
+    if base.is_empty() {
         return None;
     }
 
-    Some(base.to_string())
+    Some(return_type.clone())
 }
 
 /// Extract Eloquent cast definitions from a class's members.
@@ -531,7 +515,7 @@ fn extract_string_literal(text: &str) -> Option<String> {
 fn extract_attributes_definitions<'a>(
     members: impl Iterator<Item = &'a ClassLikeMember<'a>>,
     content: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(String, PhpType)> {
     for member in members {
         if let ClassLikeMember::Property(Property::Plain(plain)) = member {
             for item in plain.items.iter() {
@@ -562,7 +546,7 @@ fn extract_attributes_definitions<'a>(
 /// float, or string).
 ///
 /// Returns a list of `(column_name, php_type)` pairs.
-fn parse_attributes_array(text: &str) -> Vec<(String, String)> {
+fn parse_attributes_array(text: &str) -> Vec<(String, PhpType)> {
     let mut results = Vec::new();
     let trimmed = text.trim();
 
@@ -592,65 +576,12 @@ fn parse_attributes_array(text: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        if let Some(php_type) = infer_type_from_literal(value_part) {
+        if let Some(php_type) = crate::util::infer_type_from_literal(value_part) {
             results.push((key, php_type));
         }
     }
 
     results
-}
-
-/// Infer a PHP type from a literal value in source text.
-///
-/// Recognises:
-/// - `true` / `false` → `"bool"`
-/// - `null` → `"null"`
-/// - Integer literals (e.g. `0`, `-42`) → `"int"`
-/// - Float literals (e.g. `1.5`, `-0.1`) → `"float"`
-/// - Single- or double-quoted strings → `"string"`
-/// - Array literals `[...]` → `"array"`
-///
-/// Returns `None` for unrecognised expressions (function calls,
-/// constants, variables, etc.).
-fn infer_type_from_literal(value: &str) -> Option<String> {
-    let v = value.trim();
-    if v.is_empty() {
-        return None;
-    }
-
-    let lower = v.to_lowercase();
-
-    // Boolean literals
-    if lower == "true" || lower == "false" {
-        return Some("bool".to_string());
-    }
-
-    // Null literal
-    if lower == "null" {
-        return Some("null".to_string());
-    }
-
-    // String literals (single or double quoted)
-    if (v.starts_with('\'') && v.ends_with('\'')) || (v.starts_with('"') && v.ends_with('"')) {
-        return Some("string".to_string());
-    }
-
-    // Array literal
-    if v.starts_with('[') {
-        return Some("array".to_string());
-    }
-
-    // Numeric literals — try float first (contains `.`), then int.
-    // Strip optional leading `-` for negative numbers.
-    let numeric = v.strip_prefix('-').unwrap_or(v).trim();
-    if !numeric.is_empty() && numeric.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
-        if numeric.contains('.') {
-            return Some("float".to_string());
-        }
-        return Some("int".to_string());
-    }
-
-    None
 }
 
 /// Extract timestamp configuration from a model class.
@@ -854,7 +785,7 @@ fn parse_string_list(text: &str) -> Vec<String> {
 fn infer_relationship_from_method<'a>(
     method: &Method<'a>,
     doc_ctx: Option<&DocblockCtx<'a>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let ctx = doc_ctx?;
     let MethodBody::Concrete(block) = &method.body else {
         return None;
@@ -927,9 +858,7 @@ impl Backend {
                     );
 
                     let mut use_generics = doc_info.use_generics;
-                    use_generics.extend(inline_use_generics.into_iter().map(|(name, args)| {
-                        (name, args.into_iter().map(|a| PhpType::parse(&a)).collect())
-                    }));
+                    use_generics.extend(inline_use_generics);
 
                     let keyword_offset = class.class.span.start.offset;
                     let start_offset = class.left_brace.start.offset;
@@ -1094,9 +1023,7 @@ impl Backend {
                         implements_generics: doc_info.implements_generics,
                         use_generics: {
                             let mut ug = doc_info.use_generics;
-                            ug.extend(inline_use_generics.into_iter().map(|(name, args)| {
-                                (name, args.into_iter().map(|a| PhpType::parse(&a)).collect())
-                            }));
+                            ug.extend(inline_use_generics);
                             ug
                         },
                         type_aliases: doc_info.type_aliases,
@@ -1174,13 +1101,7 @@ impl Backend {
                         template_param_defaults: doc_info.template_param_defaults,
                         extends_generics: vec![],
                         implements_generics: vec![],
-                        use_generics: {
-                            let mut ug: Vec<(String, Vec<PhpType>)> = vec![];
-                            ug.extend(inline_use_generics.into_iter().map(|(name, args)| {
-                                (name, args.into_iter().map(|a| PhpType::parse(&a)).collect())
-                            }));
-                            ug
-                        },
+                        use_generics: inline_use_generics,
                         type_aliases: HashMap::new(),
                         trait_precedences,
                         trait_aliases,
@@ -1235,7 +1156,7 @@ impl Backend {
 
                     let doc_info = extract_class_docblock(enum_def, doc_ctx);
 
-                    let interfaces: Vec<String> = enum_def
+                    let mut interfaces: Vec<String> = enum_def
                         .implements
                         .as_ref()
                         .map(|imp| {
@@ -1245,6 +1166,16 @@ impl Backend {
                                 .collect()
                         })
                         .unwrap_or_default();
+
+                    // Also add the implicit interface to the interfaces
+                    // list so that hierarchy checks (`is_subtype_of`)
+                    // recognise backed enums as subtypes of `BackedEnum`
+                    // and all enums as subtypes of `UnitEnum`.
+                    if !interfaces.iter().any(|i| {
+                        i.trim_start_matches('\\') == implicit_interface.trim_start_matches('\\')
+                    }) {
+                        interfaces.push(implicit_interface.to_string());
+                    }
 
                     let keyword_offset = enum_def.r#enum.span.start.offset;
                     let start_offset = enum_def.left_brace.start.offset;
@@ -1287,10 +1218,16 @@ impl Backend {
                         trait_aliases: vec![],
                         class_docblock: doc_info.raw_docblock,
                         file_namespace: None,
-                        backed_type: enum_def
-                            .backing_type_hint
-                            .as_ref()
-                            .map(|h| crate::parser::extract_hint_string(&h.hint)),
+                        backed_type: enum_def.backing_type_hint.as_ref().and_then(|h| {
+                            let ty = crate::parser::extract_hint_type(&h.hint);
+                            if ty.is_string_type() {
+                                Some(crate::types::BackedEnumType::String)
+                            } else if ty.is_int() {
+                                Some(crate::types::BackedEnumType::Int)
+                            } else {
+                                None
+                            }
+                        }),
                         attribute_targets: 0,
                         laravel: None,
                     });
@@ -1808,13 +1745,43 @@ impl Backend {
         doc_ctx: Option<&DocblockCtx<'a>>,
         class_template_params: &[String],
     ) -> ExtractedMembers {
+        /// Resolve a short class name to its FQN using the file's use-map
+        /// and namespace from [`DocblockCtx`].  When no context is
+        /// available the name is returned as-is.
+        fn resolve_name_via_ctx(name: &str, doc_ctx: Option<&DocblockCtx<'_>>) -> String {
+            // Already fully-qualified — strip the leading `\`.
+            if let Some(stripped) = name.strip_prefix('\\') {
+                return stripped.to_string();
+            }
+            let Some(ctx) = doc_ctx else {
+                return name.to_string();
+            };
+            // Check use-map (handles both unqualified and qualified names).
+            if let Some(pos) = name.find('\\') {
+                let first = &name[..pos];
+                let rest = &name[pos..];
+                if let Some(fqn) = ctx.use_map.get(first) {
+                    return format!("{fqn}{rest}");
+                }
+            } else if let Some(fqn) = ctx.use_map.get(name) {
+                return fqn.clone();
+            }
+            // Prepend current namespace if available.
+            if let Some(ref ns) = ctx.namespace {
+                format!("{ns}\\{name}")
+            } else {
+                name.to_string()
+            }
+        }
+
         let mut methods = Vec::new();
         let mut properties = Vec::new();
         let mut constants = Vec::new();
         let mut used_traits = Vec::new();
         let mut trait_precedences = Vec::new();
         let mut trait_aliases = Vec::new();
-        let mut inline_use_generics: Vec<(String, Vec<String>)> = Vec::new();
+        let mut inline_use_generics: Vec<(String, Vec<PhpType>)> = Vec::new();
+        let mut constructor_body: Option<&MethodBody<'_>> = None;
 
         for member in members {
             match member {
@@ -1849,19 +1816,18 @@ impl Backend {
                     let raw_native_return_type = method
                         .return_type_hint
                         .as_ref()
-                        .map(|rth| extract_hint_string(&rth.hint));
+                        .map(|rth| extract_hint_type(&rth.hint));
 
                     // Check for a #[LanguageLevelTypeAware] override on the
                     // method's return type.  When present, it replaces the
                     // native type hint with the version-appropriate string.
                     let native_return_type = if let Some(ctx) = doc_ctx
                         && let Some(ver) = ctx.php_version
-                        && let Some(override_type) =
-                            super::extract_language_level_type(&method.attribute_lists, ctx, ver)
                     {
-                        Some(PhpType::parse(&override_type))
+                        super::extract_language_level_type(&method.attribute_lists, ctx, ver)
+                            .or(raw_native_return_type)
                     } else {
-                        raw_native_return_type.map(|s| PhpType::parse(&s))
+                        raw_native_return_type
                     };
                     let is_static = method.modifiers.iter().any(|m| m.is_static());
                     let visibility = extract_visibility(method.modifiers.iter());
@@ -1891,13 +1857,10 @@ impl Backend {
                         method_template_param_bounds,
                         method_template_bindings,
                     ) = if let Some(ref info) = method_docblock_info {
-                        let doc_type = docblock::extract_return_type_from_info(info);
-
-                        let native_return_type_str =
-                            native_return_type.as_ref().map(|t| t.to_string());
-                        let effective = docblock::resolve_effective_type(
-                            native_return_type_str.as_deref(),
-                            doc_type.as_deref(),
+                        let parsed_doc_type = docblock::extract_return_type_from_info(info);
+                        let effective = docblock::resolve_effective_type_typed(
+                            native_return_type.as_ref(),
+                            parsed_doc_type.as_ref(),
                         );
 
                         let conditional = docblock::extract_conditional_return_type_from_info(info);
@@ -1912,7 +1875,7 @@ impl Backend {
                             .collect();
                         let tpl_param_bounds: HashMap<String, PhpType> = tpl_params_with_bounds
                             .into_iter()
-                            .filter_map(|(n, b)| b.map(|b| (n, PhpType::parse(&b))))
+                            .filter_map(|(n, b)| b.map(|b| (n, b)))
                             .collect();
                         let tpl_bindings = if !tpl_params.is_empty() {
                             docblock::extract_template_param_bindings_from_info(info, &tpl_params)
@@ -1957,12 +1920,11 @@ impl Backend {
                         //   @return T
                         // becomes a conditional that resolves T from the
                         // call-site argument (e.g. find(User::class) → User).
-                        let effective_str = effective.as_ref().map(|t| t.to_string());
                         let conditional = conditional.or_else(|| {
                             docblock::synthesize_template_conditional_from_info(
                                 info,
                                 &tpl_params,
-                                effective_str.as_deref(),
+                                effective.as_ref(),
                                 false,
                             )
                         });
@@ -2008,15 +1970,14 @@ impl Backend {
                     // (e.g. `@param list<User> $users` vs native `array $users`).
                     // We apply `resolve_effective_type()` to pick the winner.
                     if name == "__construct" {
+                        constructor_body = Some(&method.body);
                         for param in method.parameter_list.parameters.iter() {
                             if param.is_promoted_property() {
                                 let raw_name = param.variable.name.to_string();
                                 let prop_name =
                                     raw_name.strip_prefix('$').unwrap_or(&raw_name).to_string();
-                                let native_hint_str =
-                                    param.hint.as_ref().map(|h| extract_hint_string(h));
                                 let saved_native_hint =
-                                    native_hint_str.as_ref().map(|s| PhpType::parse(s));
+                                    param.hint.as_ref().map(|h| extract_hint_type(h));
                                 let prop_visibility = extract_visibility(param.modifiers.iter());
 
                                 // Check for a docblock type override.
@@ -2034,21 +1995,37 @@ impl Backend {
                                     docblock::extract_var_type(doc)
                                 });
 
-                                let type_hint = if let Some(var_type) = inline_var_type {
-                                    docblock::resolve_effective_type(
-                                        native_hint_str.as_deref(),
-                                        Some(&var_type),
+                                let type_hint = if let Some(ref var_type) = inline_var_type {
+                                    docblock::resolve_effective_type_typed(
+                                        saved_native_hint.as_ref(),
+                                        Some(var_type),
                                     )
                                 } else if let Some(ref info) = method_docblock_info {
-                                    let param_doc_type =
+                                    let parsed =
                                         docblock::extract_param_raw_type_from_info(info, &raw_name);
-                                    docblock::resolve_effective_type(
-                                        native_hint_str.as_deref(),
-                                        param_doc_type.as_deref(),
+                                    docblock::resolve_effective_type_typed(
+                                        saved_native_hint.as_ref(),
+                                        parsed.as_ref(),
                                     )
                                 } else {
                                     saved_native_hint.clone()
                                 };
+
+                                // When no type hint is available, infer from `new ClassName()`
+                                // default values (PHP 8.1+: `private $repo = new Repo()`).
+                                // Resolve to FQN eagerly so downstream code does not
+                                // need short-name resolution logic.
+                                let type_hint = type_hint.or_else(|| {
+                                    let dv = param.default_value.as_ref()?;
+                                    if let Expression::Instantiation(inst) = dv.value
+                                        && let Expression::Identifier(ident) = inst.class
+                                    {
+                                        let raw = ident.value().to_string();
+                                        let fqn = resolve_name_via_ctx(&raw, doc_ctx);
+                                        return Some(PhpType::Named(fqn));
+                                    }
+                                    None
+                                });
 
                                 let prop_name_offset = param.variable.span.start.offset;
                                 properties.push(PropertyInfo {
@@ -2074,7 +2051,7 @@ impl Backend {
                     // For example, `$this->hasMany(Post::class)` produces
                     // a return type of `HasMany<Post>`.
                     let return_type = if return_type.is_none() {
-                        infer_relationship_from_method(method, doc_ctx).map(|s| PhpType::parse(&s))
+                        infer_relationship_from_method(method, doc_ctx)
                     } else {
                         return_type
                     };
@@ -2089,8 +2066,8 @@ impl Backend {
                             let param_doc_type =
                                 docblock::extract_param_raw_type_from_info(info, &param.name);
                             if let Some(ref doc_type) = param_doc_type {
-                                let effective = docblock::resolve_effective_type(
-                                    param.type_hint.as_ref().map(|t| t.to_string()).as_deref(),
+                                let effective = docblock::resolve_effective_type_typed(
+                                    param.type_hint.as_ref(),
                                     Some(doc_type),
                                 );
                                 if effective.is_some() {
@@ -2122,11 +2099,10 @@ impl Backend {
                             if !parameters.iter().any(|p| p.name == tag_name) {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
-                                let type_hint = Some(tag_type);
                                 parameters.push(ParameterInfo {
                                     name: tag_name,
                                     is_required: false,
-                                    type_hint: type_hint.map(|s| PhpType::parse(&s)),
+                                    type_hint: Some(tag_type),
                                     native_type_hint: None,
                                     description,
                                     default_value: None,
@@ -2230,8 +2206,8 @@ impl Backend {
                             super::extract_language_level_type(attr_lists, ctx, ver)
                     {
                         for prop in &mut prop_infos {
-                            prop.type_hint = Some(PhpType::parse(&override_type));
-                            prop.native_type_hint = Some(PhpType::parse(&override_type));
+                            prop.type_hint = Some(override_type.clone());
+                            prop.native_type_hint = Some(override_type.clone());
                         }
                     }
 
@@ -2275,13 +2251,13 @@ impl Backend {
                                 prop.deprecated_replacement = Some(repl.clone());
                             }
                         }
-                        if let Some(doc_type) =
+                        if let Some(parsed_doc) =
                             info.as_ref().and_then(docblock::extract_var_type_from_info)
                         {
                             for prop in &mut prop_infos {
-                                let effective = docblock::resolve_effective_type(
-                                    prop.type_hint.as_ref().map(|t| t.to_string()).as_deref(),
-                                    Some(&doc_type),
+                                let effective = docblock::resolve_effective_type_typed(
+                                    prop.type_hint.as_ref(),
+                                    Some(&parsed_doc),
                                 );
                                 prop.type_hint = effective;
                             }
@@ -2323,7 +2299,7 @@ impl Backend {
                     properties.append(&mut prop_infos);
                 }
                 ClassLikeMember::Constant(constant) => {
-                    let type_hint = constant.hint.as_ref().map(|h| extract_hint_string(h));
+                    let type_hint = constant.hint.as_ref().map(|h| extract_hint_type(h));
                     let visibility = extract_visibility(constant.modifiers.iter());
                     let const_docblock_text = doc_ctx.and_then(|ctx| {
                         docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
@@ -2354,7 +2330,7 @@ impl Backend {
                         constants.push(ConstantInfo {
                             name: item.name.value.to_string(),
                             name_offset: item.name.span.start.offset,
-                            type_hint: type_hint.as_deref().map(PhpType::parse),
+                            type_hint: type_hint.clone(),
                             visibility,
                             deprecation_message: deprecation_message.clone(),
                             deprecated_replacement: constant_deprecated_replacement.clone(),
@@ -2472,6 +2448,35 @@ impl Backend {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Infer types for untyped properties from constructor assignments.
+        // Scans the constructor body for `$this->prop = new ClassName()`
+        // and fills in the type_hint when not set by declaration or docblock.
+        // Only applies when neither native type hint nor docblock type is present.
+        // Resolves to FQN eagerly so downstream code does not need
+        // short-name resolution logic.
+        if let Some(MethodBody::Concrete(concrete)) = constructor_body {
+            for stmt in concrete.statements.iter() {
+                if let Statement::Expression(expr_stmt) = stmt
+                    && let Expression::Assignment(assign) = expr_stmt.expression
+                    && let Expression::Access(Access::Property(pa)) = assign.lhs
+                    && let Expression::Variable(Variable::Direct(dv)) = pa.object
+                    && dv.name == "$this"
+                    && let ClassLikeMemberSelector::Identifier(ident) = &pa.property
+                    && let Expression::Instantiation(inst) = assign.rhs
+                    && let Expression::Identifier(class_ident) = inst.class
+                {
+                    let prop_name = ident.value.to_string();
+                    if let Some(prop) = properties.iter_mut().find(|p| {
+                        p.name == prop_name && p.type_hint.is_none() && p.native_type_hint.is_none()
+                    }) {
+                        let raw = class_ident.value().to_string();
+                        let fqn = resolve_name_via_ctx(&raw, doc_ctx);
+                        prop.type_hint = Some(PhpType::Named(fqn));
                     }
                 }
             }

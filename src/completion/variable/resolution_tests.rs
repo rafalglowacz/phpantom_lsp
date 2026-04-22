@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::enrich_builder_type_in_scope;
+use crate::php_type::PhpType;
 use crate::test_fixtures::make_class;
 
 use crate::completion::resolver::Loaders;
@@ -27,16 +28,21 @@ fn model_loader(name: &str) -> Option<Arc<ClassInfo>> {
 #[test]
 fn enrich_scope_method_with_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Builder", "scopeActive", false, &model, &model_loader);
-    assert_eq!(result, Some("Builder<App\\Models\\User>".to_string()));
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scopeActive",
+        false,
+        &model,
+        &model_loader,
+    );
+    assert_eq!(result, Some(PhpType::parse("Builder<App\\Models\\User>")));
 }
 
 #[test]
 fn enrich_scope_method_with_fqn_builder() {
     let model = make_model("App\\Models\\User");
     let result = enrich_builder_type_in_scope(
-        "Illuminate\\Database\\Eloquent\\Builder",
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Builder"),
         "scopeActive",
         false,
         &model,
@@ -44,61 +50,95 @@ fn enrich_scope_method_with_fqn_builder() {
     );
     assert_eq!(
         result,
-        Some("Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>".to_string())
+        Some(PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>"
+        ))
     );
 }
 
 #[test]
 fn enrich_skips_non_scope_method() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Builder", "getName", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "getName",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_bare_scope_name() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Builder", "scope", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scope",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_non_model_class() {
     let plain = make_class("App\\Services\\SomeService");
-    let result =
-        enrich_builder_type_in_scope("Builder", "scopeActive", false, &plain, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scopeActive",
+        false,
+        &plain,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_non_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Collection", "scopeActive", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Collection"),
+        "scopeActive",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_skips_builder_with_existing_generics() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Builder<User>", "scopeActive", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder<User>"),
+        "scopeActive",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_scope_multi_word_method_name() {
     let model = make_model("App\\Models\\User");
-    let result =
-        enrich_builder_type_in_scope("Builder", "scopeByAuthor", false, &model, &model_loader);
-    assert_eq!(result, Some("Builder<App\\Models\\User>".to_string()));
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "scopeByAuthor",
+        false,
+        &model,
+        &model_loader,
+    );
+    assert_eq!(result, Some(PhpType::parse("Builder<App\\Models\\User>")));
 }
 
 #[test]
 fn enrich_scope_with_fqn_builder() {
     let model = make_model("App\\Models\\User");
     let result = enrich_builder_type_in_scope(
-        "Illuminate\\Database\\Eloquent\\Builder",
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Builder"),
         "scopeActive",
         false,
         &model,
@@ -106,7 +146,9 @@ fn enrich_scope_with_fqn_builder() {
     );
     assert_eq!(
         result,
-        Some("Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>".to_string())
+        Some(PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>"
+        ))
     );
 }
 
@@ -115,15 +157,21 @@ fn enrich_scope_with_fqn_builder() {
 #[test]
 fn enrich_scope_attribute_method_with_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Builder", "active", true, &model, &model_loader);
-    assert_eq!(result, Some("Builder<App\\Models\\User>".to_string()));
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "active",
+        true,
+        &model,
+        &model_loader,
+    );
+    assert_eq!(result, Some(PhpType::parse("Builder<App\\Models\\User>")));
 }
 
 #[test]
 fn enrich_scope_attribute_with_fqn_builder() {
     let model = make_model("App\\Models\\User");
     let result = enrich_builder_type_in_scope(
-        "Illuminate\\Database\\Eloquent\\Builder",
+        &PhpType::parse("Illuminate\\Database\\Eloquent\\Builder"),
         "active",
         true,
         &model,
@@ -131,21 +179,35 @@ fn enrich_scope_attribute_with_fqn_builder() {
     );
     assert_eq!(
         result,
-        Some("Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>".to_string())
+        Some(PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>"
+        ))
     );
 }
 
 #[test]
 fn enrich_scope_attribute_skips_non_model_class() {
     let plain = make_class("App\\Services\\SomeService");
-    let result = enrich_builder_type_in_scope("Builder", "active", true, &plain, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "active",
+        true,
+        &plain,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
 #[test]
 fn enrich_scope_attribute_skips_non_builder_type() {
     let model = make_model("App\\Models\\User");
-    let result = enrich_builder_type_in_scope("Collection", "active", true, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Collection"),
+        "active",
+        true,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
@@ -153,7 +215,13 @@ fn enrich_scope_attribute_skips_non_builder_type() {
 fn enrich_no_scope_attribute_and_no_convention_skips() {
     let model = make_model("App\\Models\\User");
     // Not a scopeX name and no attribute → should skip.
-    let result = enrich_builder_type_in_scope("Builder", "active", false, &model, &model_loader);
+    let result = enrich_builder_type_in_scope(
+        &PhpType::parse("Builder"),
+        "active",
+        false,
+        &model,
+        &model_loader,
+    );
     assert_eq!(result, None);
 }
 
@@ -411,7 +479,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $data to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     assert!(
         ts.contains("name: string"),
         "Shape should contain 'name: string', got: {ts}"
@@ -447,7 +515,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $config to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     // The base array{host: string} should be merged with the new key.
     assert!(
         ts.contains("port: int"),
@@ -480,7 +548,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $data to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     assert!(
         ts.contains("value: int"),
         "Shape key 'value' should be overridden to int, got: {ts}"
@@ -529,7 +597,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $items to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     assert!(
         ts.contains("User"),
         "List element type should contain User, got: {ts}"
@@ -565,7 +633,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $items to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     assert!(
         ts.contains("string") && ts.contains("int"),
         "List should contain string|int union, got: {ts}"
@@ -597,7 +665,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $items to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     assert_eq!(
         ts, "list<string>",
         "Duplicate pushes of same type should not duplicate, got: {ts}"
@@ -631,7 +699,7 @@ function test() {
     );
 
     assert!(!results.is_empty(), "Should resolve $x to a type");
-    let ts = ResolvedType::type_strings_joined(&results);
+    let ts = ResolvedType::types_joined(&results).to_string();
     assert_eq!(
         ts, "list<string>",
         "Reassignment should reset; only 'string' push should remain, got: {ts}"
@@ -668,7 +736,7 @@ function test() {
     let ts = if results.is_empty() {
         "array".to_string()
     } else {
-        ResolvedType::type_strings_joined(&results)
+        ResolvedType::types_joined(&results).to_string()
     };
     assert!(
         !ts.contains('{'),
@@ -764,5 +832,104 @@ class LoggedConnection extends BaseConnector {
         names.contains(&"Response"),
         "$response should resolve to Response via parent::call(), got: {:?}",
         names
+    );
+}
+
+/// Nested array access assignments like `$b['a']['b'] = 'x'` should
+/// produce a nested array shape `array{a: array{b: string}}`.
+#[test]
+fn resolve_var_shape_from_nested_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $b['a']['a'] = 'a';
+    $b['x']
+}
+"#;
+    let cursor_offset = content.find("$b['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$b",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $b to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("a: array{a: string}"),
+        "Shape should contain nested 'a: array{{a: string}}', got: {ts}"
+    );
+}
+
+/// Deeply nested key assignments like `$c['a']['b']['c'] = 42` should
+/// produce `array{a: array{b: array{c: int}}}`.
+#[test]
+fn resolve_var_shape_from_deeply_nested_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $config['db']['host']['primary'] = 'localhost';
+    $config['x']
+}
+"#;
+    let cursor_offset = content.find("$config['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$config",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $config to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("db: array{host: array{primary: string}}"),
+        "Shape should contain deeply nested keys, got: {ts}"
+    );
+}
+
+/// Mixed single-level and nested key assignments should merge correctly.
+#[test]
+fn resolve_var_shape_mixed_single_and_nested_keys() {
+    let content = r#"<?php
+function test() {
+    $data['name'] = 'John';
+    $data['address']['city'] = 'NYC';
+    $data['address']['zip'] = '10001';
+    $data['x']
+}
+"#;
+    let cursor_offset = content.find("$data['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$data",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $data to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("name: string"),
+        "Shape should contain 'name: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("city: string"),
+        "Shape should contain nested 'city: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("zip: string"),
+        "Shape should contain nested 'zip: string', got: {ts}"
     );
 }

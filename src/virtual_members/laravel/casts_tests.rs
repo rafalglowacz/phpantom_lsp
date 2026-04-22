@@ -8,25 +8,31 @@ use std::sync::Arc;
 #[test]
 fn cast_datetime_maps_to_carbon() {
     assert_eq!(
-        cast_type_to_php_type("datetime", &no_loader),
+        cast_type_to_php_type("datetime", &no_loader).to_string(),
         "Carbon\\Carbon"
     );
 }
 
 #[test]
 fn cast_date_maps_to_carbon() {
-    assert_eq!(cast_type_to_php_type("date", &no_loader), "Carbon\\Carbon");
+    assert_eq!(
+        cast_type_to_php_type("date", &no_loader).to_string(),
+        "Carbon\\Carbon"
+    );
 }
 
 #[test]
 fn cast_timestamp_maps_to_int() {
-    assert_eq!(cast_type_to_php_type("timestamp", &no_loader), "int");
+    assert_eq!(
+        cast_type_to_php_type("timestamp", &no_loader).to_string(),
+        "int"
+    );
 }
 
 #[test]
 fn cast_immutable_datetime_maps_to_carbon_immutable() {
     assert_eq!(
-        cast_type_to_php_type("immutable_datetime", &no_loader),
+        cast_type_to_php_type("immutable_datetime", &no_loader).to_string(),
         "Carbon\\CarbonImmutable"
     );
 }
@@ -34,83 +40,116 @@ fn cast_immutable_datetime_maps_to_carbon_immutable() {
 #[test]
 fn cast_immutable_date_maps_to_carbon_immutable() {
     assert_eq!(
-        cast_type_to_php_type("immutable_date", &no_loader),
+        cast_type_to_php_type("immutable_date", &no_loader).to_string(),
         "Carbon\\CarbonImmutable"
     );
 }
 
 #[test]
 fn cast_boolean_maps_to_bool() {
-    assert_eq!(cast_type_to_php_type("boolean", &no_loader), "bool");
+    assert_eq!(
+        cast_type_to_php_type("boolean", &no_loader).to_string(),
+        "bool"
+    );
 }
 
 #[test]
 fn cast_bool_maps_to_bool() {
-    assert_eq!(cast_type_to_php_type("bool", &no_loader), "bool");
+    assert_eq!(
+        cast_type_to_php_type("bool", &no_loader).to_string(),
+        "bool"
+    );
 }
 
 #[test]
 fn cast_integer_maps_to_int() {
-    assert_eq!(cast_type_to_php_type("integer", &no_loader), "int");
+    assert_eq!(
+        cast_type_to_php_type("integer", &no_loader).to_string(),
+        "int"
+    );
 }
 
 #[test]
 fn cast_int_maps_to_int() {
-    assert_eq!(cast_type_to_php_type("int", &no_loader), "int");
+    assert_eq!(cast_type_to_php_type("int", &no_loader).to_string(), "int");
 }
 
 #[test]
 fn cast_float_maps_to_float() {
-    assert_eq!(cast_type_to_php_type("float", &no_loader), "float");
+    assert_eq!(
+        cast_type_to_php_type("float", &no_loader).to_string(),
+        "float"
+    );
 }
 
 #[test]
 fn cast_double_maps_to_float() {
-    assert_eq!(cast_type_to_php_type("double", &no_loader), "float");
+    assert_eq!(
+        cast_type_to_php_type("double", &no_loader).to_string(),
+        "float"
+    );
 }
 
 #[test]
 fn cast_real_maps_to_float() {
-    assert_eq!(cast_type_to_php_type("real", &no_loader), "float");
+    assert_eq!(
+        cast_type_to_php_type("real", &no_loader).to_string(),
+        "float"
+    );
 }
 
 #[test]
 fn cast_string_maps_to_string() {
-    assert_eq!(cast_type_to_php_type("string", &no_loader), "string");
+    assert_eq!(
+        cast_type_to_php_type("string", &no_loader).to_string(),
+        "string"
+    );
 }
 
 #[test]
 fn cast_array_maps_to_array() {
-    assert_eq!(cast_type_to_php_type("array", &no_loader), "array");
+    assert_eq!(
+        cast_type_to_php_type("array", &no_loader).to_string(),
+        "array"
+    );
 }
 
 #[test]
 fn cast_json_maps_to_array() {
-    assert_eq!(cast_type_to_php_type("json", &no_loader), "array");
+    assert_eq!(
+        cast_type_to_php_type("json", &no_loader).to_string(),
+        "array"
+    );
 }
 
 #[test]
 fn cast_object_maps_to_object() {
-    assert_eq!(cast_type_to_php_type("object", &no_loader), "object");
+    assert_eq!(
+        cast_type_to_php_type("object", &no_loader).to_string(),
+        "object"
+    );
 }
 
 #[test]
 fn cast_collection_maps_to_illuminate_collection() {
     assert_eq!(
-        cast_type_to_php_type("collection", &no_loader),
+        cast_type_to_php_type("collection", &no_loader).to_string(),
         "Illuminate\\Support\\Collection"
     );
 }
 
 #[test]
 fn cast_encrypted_maps_to_string() {
-    assert_eq!(cast_type_to_php_type("encrypted", &no_loader), "string");
+    assert_eq!(
+        cast_type_to_php_type("encrypted", &no_loader).to_string(),
+        "string"
+    );
 }
 
 #[test]
 fn cast_encrypted_array_maps_to_array() {
     assert_eq!(
-        cast_type_to_php_type("encrypted:array", &no_loader),
+        cast_type_to_php_type("encrypted:array", &no_loader).to_string(),
         "array"
     );
 }
@@ -118,7 +157,7 @@ fn cast_encrypted_array_maps_to_array() {
 #[test]
 fn cast_encrypted_collection_maps_to_collection() {
     assert_eq!(
-        cast_type_to_php_type("encrypted:collection", &no_loader),
+        cast_type_to_php_type("encrypted:collection", &no_loader).to_string(),
         "Illuminate\\Support\\Collection"
     );
 }
@@ -126,26 +165,35 @@ fn cast_encrypted_collection_maps_to_collection() {
 #[test]
 fn cast_encrypted_object_maps_to_object() {
     assert_eq!(
-        cast_type_to_php_type("encrypted:object", &no_loader),
+        cast_type_to_php_type("encrypted:object", &no_loader).to_string(),
         "object"
     );
 }
 
 #[test]
 fn cast_hashed_maps_to_string() {
-    assert_eq!(cast_type_to_php_type("hashed", &no_loader), "string");
+    assert_eq!(
+        cast_type_to_php_type("hashed", &no_loader).to_string(),
+        "string"
+    );
 }
 
 // ── cast_type_to_php_type: decimal variants ─────────────────────────
 
 #[test]
 fn cast_decimal_with_precision_maps_to_float() {
-    assert_eq!(cast_type_to_php_type("decimal:2", &no_loader), "float");
+    assert_eq!(
+        cast_type_to_php_type("decimal:2", &no_loader).to_string(),
+        "float"
+    );
 }
 
 #[test]
 fn cast_decimal_bare_maps_to_float() {
-    assert_eq!(cast_type_to_php_type("decimal", &no_loader), "float");
+    assert_eq!(
+        cast_type_to_php_type("decimal", &no_loader).to_string(),
+        "float"
+    );
 }
 
 // ── cast_type_to_php_type: datetime/date format variants ────────────
@@ -153,7 +201,7 @@ fn cast_decimal_bare_maps_to_float() {
 #[test]
 fn cast_datetime_with_format_maps_to_carbon() {
     assert_eq!(
-        cast_type_to_php_type("datetime:Y-m-d", &no_loader),
+        cast_type_to_php_type("datetime:Y-m-d", &no_loader).to_string(),
         "Carbon\\Carbon"
     );
 }
@@ -161,7 +209,7 @@ fn cast_datetime_with_format_maps_to_carbon() {
 #[test]
 fn cast_date_with_format_maps_to_carbon() {
     assert_eq!(
-        cast_type_to_php_type("date:Y-m-d", &no_loader),
+        cast_type_to_php_type("date:Y-m-d", &no_loader).to_string(),
         "Carbon\\Carbon"
     );
 }
@@ -169,7 +217,7 @@ fn cast_date_with_format_maps_to_carbon() {
 #[test]
 fn cast_immutable_datetime_with_format() {
     assert_eq!(
-        cast_type_to_php_type("immutable_datetime:Y-m-d H:i:s", &no_loader),
+        cast_type_to_php_type("immutable_datetime:Y-m-d H:i:s", &no_loader).to_string(),
         "Carbon\\CarbonImmutable"
     );
 }
@@ -177,7 +225,7 @@ fn cast_immutable_datetime_with_format() {
 #[test]
 fn cast_immutable_date_with_format() {
     assert_eq!(
-        cast_type_to_php_type("immutable_date:Y-m-d", &no_loader),
+        cast_type_to_php_type("immutable_date:Y-m-d", &no_loader).to_string(),
         "Carbon\\CarbonImmutable"
     );
 }
@@ -186,17 +234,26 @@ fn cast_immutable_date_with_format() {
 
 #[test]
 fn cast_case_insensitive() {
-    assert_eq!(cast_type_to_php_type("Boolean", &no_loader), "bool");
     assert_eq!(
-        cast_type_to_php_type("DATETIME", &no_loader),
+        cast_type_to_php_type("Boolean", &no_loader).to_string(),
+        "bool"
+    );
+    assert_eq!(
+        cast_type_to_php_type("DATETIME", &no_loader).to_string(),
         "Carbon\\Carbon"
     );
-    assert_eq!(cast_type_to_php_type("Integer", &no_loader), "int");
+    assert_eq!(
+        cast_type_to_php_type("Integer", &no_loader).to_string(),
+        "int"
+    );
 }
 
 #[test]
 fn cast_unknown_type_falls_back_to_mixed() {
-    assert_eq!(cast_type_to_php_type("unknown_cast", &no_loader), "mixed");
+    assert_eq!(
+        cast_type_to_php_type("unknown_cast", &no_loader).to_string(),
+        "mixed"
+    );
 }
 
 // ── cast_type_to_php_type: custom cast classes ──────────────────────
@@ -215,7 +272,7 @@ fn cast_custom_class_with_get_method() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\MoneyCast", &loader),
+        cast_type_to_php_type("App\\Casts\\MoneyCast", &loader).to_string(),
         "\\App\\Money"
     );
 }
@@ -236,7 +293,7 @@ fn cast_custom_class_canonical_fqn() {
     // Input is canonical (no leading `\`) — ingestion boundary in
     // ast_update.rs strips the prefix before values reach this function.
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\MoneyCast", &loader),
+        cast_type_to_php_type("App\\Casts\\MoneyCast", &loader).to_string(),
         "App\\Money"
     );
 }
@@ -251,7 +308,7 @@ fn cast_custom_class_without_get_returns_mixed() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\WeirdCast", &loader),
+        cast_type_to_php_type("App\\Casts\\WeirdCast", &loader).to_string(),
         "mixed"
     );
 }
@@ -270,7 +327,7 @@ fn cast_enum_resolves_to_enum_class() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Enums\\Status", &loader),
+        cast_type_to_php_type("App\\Enums\\Status", &loader).to_string(),
         "App\\Enums\\Status"
     );
 }
@@ -289,7 +346,7 @@ fn cast_enum_canonical_fqn() {
     // Input is canonical (no leading `\`) — ingestion boundary in
     // ast_update.rs strips the prefix before values reach this function.
     assert_eq!(
-        cast_type_to_php_type("App\\Enums\\Status", &loader),
+        cast_type_to_php_type("App\\Enums\\Status", &loader).to_string(),
         "App\\Enums\\Status"
     );
 }
@@ -308,7 +365,7 @@ fn cast_castable_resolves_to_class_itself() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\Address", &loader),
+        cast_type_to_php_type("App\\Casts\\Address", &loader).to_string(),
         "App\\Casts\\Address"
     );
 }
@@ -325,7 +382,7 @@ fn cast_castable_with_fqn_interface() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\Address", &loader),
+        cast_type_to_php_type("App\\Casts\\Address", &loader).to_string(),
         "App\\Casts\\Address"
     );
 }
@@ -342,7 +399,7 @@ fn cast_castable_short_interface_name() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\Address", &loader),
+        cast_type_to_php_type("App\\Casts\\Address", &loader).to_string(),
         "App\\Casts\\Address"
     );
 }
@@ -361,7 +418,7 @@ fn cast_class_with_colon_argument_suffix() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\Address:nullable", &loader),
+        cast_type_to_php_type("App\\Casts\\Address:nullable", &loader).to_string(),
         "App\\Casts\\Address"
     );
 }
@@ -378,7 +435,7 @@ fn cast_enum_with_colon_argument_suffix() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Enums\\Status:force", &loader),
+        cast_type_to_php_type("App\\Enums\\Status:force", &loader).to_string(),
         "App\\Enums\\Status"
     );
 }
@@ -397,7 +454,7 @@ fn cast_custom_class_with_colon_argument_and_get() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\MoneyCast:precision,2", &loader),
+        cast_type_to_php_type("App\\Casts\\MoneyCast:precision,2", &loader).to_string(),
         "\\App\\Money"
     );
 }
@@ -443,7 +500,7 @@ fn tget_from_casts_attributes_short_name() {
     )];
     assert_eq!(
         extract_tget_from_implements_generics(&c),
-        Some("HtmlString".to_string())
+        Some(PhpType::Named("HtmlString".to_string()))
     );
 }
 
@@ -459,7 +516,9 @@ fn tget_from_casts_attributes_fqn() {
     )];
     assert_eq!(
         extract_tget_from_implements_generics(&c),
-        Some("\\Illuminate\\Support\\HtmlString".to_string())
+        Some(PhpType::Named(
+            "\\Illuminate\\Support\\HtmlString".to_string()
+        ))
     );
 }
 
@@ -474,7 +533,7 @@ fn tget_from_casts_attributes_fqn_canonical() {
     )];
     assert_eq!(
         extract_tget_from_implements_generics(&c),
-        Some("HtmlString".to_string())
+        Some(PhpType::Named("HtmlString".to_string()))
     );
 }
 
@@ -530,7 +589,7 @@ fn cast_custom_class_falls_back_to_implements_generics() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\HtmlCast", &loader),
+        cast_type_to_php_type("App\\Casts\\HtmlCast", &loader).to_string(),
         "HtmlString"
     );
 }
@@ -558,7 +617,7 @@ fn cast_implements_generics_take_priority_over_get_return_type() {
     // @implements CastsAttributes<DifferentType, DifferentType> is the
     // canonical type declaration and should win over get()'s return type.
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\HtmlCast", &loader),
+        cast_type_to_php_type("App\\Casts\\HtmlCast", &loader).to_string(),
         "DifferentType"
     );
 }
@@ -578,7 +637,7 @@ fn cast_get_return_type_used_when_no_implements_generics() {
         }
     };
     assert_eq!(
-        cast_type_to_php_type("App\\Casts\\HtmlCast", &loader),
+        cast_type_to_php_type("App\\Casts\\HtmlCast", &loader).to_string(),
         "?HtmlString"
     );
 }

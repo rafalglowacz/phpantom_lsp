@@ -117,22 +117,21 @@ pub(super) fn namespace_line(namespace: &Option<String>) -> String {
 /// the native type.  Returns `None` when they are identical or when there
 /// is no effective type.
 pub(super) fn build_var_annotation(
-    effective: Option<&str>,
+    effective: Option<&PhpType>,
     native: Option<&PhpType>,
 ) -> Option<String> {
     let eff = effective?;
     // When there is no native type hint, `mixed` is the implicit type
     // in PHP — showing `@var mixed` would be noise.
-    if native.is_none() && eff == "mixed" {
+    if native.is_none() && eff.is_mixed() {
         return None;
     }
-    if let Some(n) = native {
-        let eff_parsed = PhpType::parse(eff);
-        if eff_parsed.equivalent(n) {
-            return None;
-        }
+    if let Some(n) = native
+        && eff.equivalent(n)
+    {
+        return None;
     }
-    Some(format!("@var {}", shorten_type_string(eff)))
+    Some(format!("@var {}", shorten_php_type(eff)))
 }
 
 /// Build a readable markdown section showing parameter and return type
@@ -164,7 +163,7 @@ pub(super) fn build_var_annotation(
 /// Returns `None` when there is nothing to show.
 pub(super) fn build_param_return_section(
     params: &[ParameterInfo],
-    effective_return: Option<&str>,
+    effective_return: Option<&PhpType>,
     native_return: Option<&PhpType>,
     return_description: Option<&str>,
 ) -> Option<String> {
@@ -173,10 +172,9 @@ pub(super) fn build_param_return_section(
     for p in params {
         let type_differs = match (&p.type_hint, p.native_type_hint.as_ref()) {
             (Some(eff_type), Some(nat)) => !eff_type.equivalent(nat),
-            (Some(eff_type), None) => eff_type.to_string() != "mixed",
+            (Some(eff_type), None) => !eff_type.is_mixed(),
             _ => false,
         };
-        let eff_str = p.type_hint_str();
         let has_desc = p.description.as_ref().is_some_and(|d| !d.is_empty());
 
         if !type_differs && !has_desc {
@@ -185,8 +183,8 @@ pub(super) fn build_param_return_section(
 
         let mut entry = format!("**{}**", p.name);
         if type_differs {
-            if let Some(ref eff) = eff_str {
-                entry.push_str(&format!(" `{}`", shorten_type_string(eff)));
+            if let Some(ref eff_type) = p.type_hint {
+                entry.push_str(&format!(" `{}`", shorten_php_type(eff_type)));
             }
             if p.is_variadic {
                 entry.push_str(" ...");
@@ -205,8 +203,8 @@ pub(super) fn build_param_return_section(
 
     // return entry
     let ret_type_differs = match (effective_return, native_return) {
-        (Some(eff), Some(nat)) => !PhpType::parse(eff).equivalent(nat),
-        (Some(eff), None) => eff != "mixed",
+        (Some(eff), Some(nat)) => !eff.equivalent(nat),
+        (Some(eff), None) => !eff.is_mixed(),
         _ => false,
     };
     let has_ret_desc = return_description.is_some_and(|d| !d.is_empty());
@@ -215,7 +213,7 @@ pub(super) fn build_param_return_section(
         let mut entry = String::from("**return**");
         if ret_type_differs {
             if let Some(eff) = effective_return {
-                entry.push_str(&format!(" `{}`", shorten_type_string(eff)));
+                entry.push_str(&format!(" `{}`", shorten_php_type(eff)));
             }
             if has_ret_desc {
                 entry.push_str("  \n\u{00a0}\u{00a0}\u{00a0}\u{00a0}");
@@ -368,10 +366,9 @@ pub(crate) fn hover_for_function(
     }
 
     // Build the readable param/return section as markdown.
-    let effective_return = func.return_type_str();
     if let Some(section) = build_param_return_section(
         &func.parameters,
-        effective_return.as_deref(),
+        func.return_type.as_ref(),
         func.native_return_type.as_ref(),
         func.return_description.as_deref(),
     ) {
@@ -480,21 +477,8 @@ pub(crate) fn extract_var_description_from_info(info: &DocblockInfo) -> Option<S
 ///
 /// Returns the remainder of the string after the type token.
 fn skip_type_token(s: &str) -> &str {
-    let mut depth = 0i32;
-    let mut end = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' | '(' | '{' => depth += 1,
-            '>' | ')' | '}' => depth -= 1,
-            _ if c.is_whitespace() && depth == 0 => {
-                end = i;
-                break;
-            }
-            _ => {}
-        }
-        end = i + c.len_utf8();
-    }
-    &s[end..]
+    let (_token, rest) = crate::docblock::type_strings::split_type_token(s);
+    rest
 }
 
 /// Convert basic HTML markup in docblock text to Markdown equivalents.
@@ -541,6 +525,7 @@ pub(crate) fn extract_docblock_description(docblock: Option<&str>) -> Option<Str
 ///   - `"App\\Models\\User"` → `"User"`
 ///   - `"list<App\\Models\\User>"` → `"list<User>"`
 ///   - `"App\\Foo|App\\Bar|null"` → `"Foo|Bar|null"`
+#[cfg(test)]
 pub(crate) fn shorten_type_string(ty: &str) -> String {
     use crate::php_type::PhpType;
 
@@ -552,6 +537,25 @@ pub(crate) fn shorten_type_string(ty: &str) -> String {
         return shorten_type_string_fallback(ty);
     }
     parsed.shorten().to_string()
+}
+
+/// Shorten a structured `PhpType` without a string round-trip.
+///
+/// This avoids the `PhpType → String → PhpType::parse → shorten → String`
+/// cycle that `shorten_type_string` incurs when the caller already has a
+/// `PhpType` value.
+pub(crate) fn shorten_php_type(ty: &PhpType) -> String {
+    // Defensive fallback: in practice `Raw` values never reach this function
+    // because all callers pass `PhpType` values from struct fields
+    // (`type_hint`, `return_type`, `native_return_type`) that are populated
+    // via `PhpType::parse()`, which only produces `Raw` for completely
+    // unparseable strings.  The guard remains so that future callers that
+    // might pass `Raw` values still get reasonable short names instead of
+    // fully-qualified namespace paths.
+    if matches!(ty, PhpType::Raw(_)) {
+        return shorten_type_string_fallback(&ty.to_string());
+    }
+    ty.shorten().to_string()
 }
 
 /// Fallback character-by-character shortener for type strings that

@@ -356,6 +356,7 @@ async fn test_user_function_takes_precedence_over_stub() {
         deprecation_message: None,
         deprecated_replacement: None,
         template_params: vec![],
+        template_param_bounds: std::collections::HashMap::new(),
         template_bindings: vec![],
         throws: vec![],
         is_polyfill: false,

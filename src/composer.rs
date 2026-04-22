@@ -397,7 +397,7 @@ pub fn resolve_class_path(
     let name = class_name;
 
     // Skip built-in type keywords that are never real classes
-    if is_builtin_type(name) {
+    if crate::php_type::is_keyword_type(name) {
         return None;
     }
 
@@ -424,31 +424,6 @@ pub fn resolve_class_path(
     }
 
     None
-}
-
-/// Check if a name is a PHP built-in type (not a class).
-fn is_builtin_type(name: &str) -> bool {
-    matches!(
-        name,
-        "$this"
-            | "self"
-            | "static"
-            | "parent"
-            | "string"
-            | "int"
-            | "float"
-            | "bool"
-            | "array"
-            | "object"
-            | "mixed"
-            | "void"
-            | "never"
-            | "null"
-            | "true"
-            | "false"
-            | "callable"
-            | "iterable"
-    )
 }
 
 /// Extract file paths from `require_once` statements in PHP source content.

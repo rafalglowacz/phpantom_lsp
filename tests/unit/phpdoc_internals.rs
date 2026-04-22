@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use phpantom_lsp::completion::phpdoc::*;
+use phpantom_lsp::php_type::PhpType;
 use phpantom_lsp::types::ClassInfo;
 use tower_lsp::lsp_types::*;
 
@@ -736,6 +737,28 @@ fn typing_pos_still_typing_tag_name_returns_none() {
 }
 
 #[test]
+fn typing_pos_no_panic_on_multibyte_characters() {
+    // "ń" is 2 bytes in UTF-8 but 1 UTF-16 code unit.
+    // Using the UTF-16 column as a byte offset would land inside the
+    // multibyte character and panic.
+    let content = "<?php\n/**\n * @param ń\n */\nfunction foo() {}\n";
+    let pos = Position {
+        line: 2,
+        character: 12,
+    };
+    // Must not panic. "ń" is not a valid PHP identifier character, so
+    // the trailing identifier extraction returns an empty partial.
+    let result = detect_docblock_typing_position(content, pos);
+    assert_eq!(
+        result,
+        Some(DocblockTypingContext::Type {
+            partial: String::new(),
+            tag: "param".to_string(),
+        })
+    );
+}
+
+#[test]
 fn typing_pos_tag_no_space_returns_none() {
     // Cursor right after `@param` with no space — tag name, not type
     let content = "<?php\n/**\n * @param\n */\n";
@@ -1138,13 +1161,13 @@ fn symbol_info_function_params() {
     assert_eq!(info.params.len(), 2);
     assert_eq!(
         info.params[0],
-        (Some("string".to_string()), "$name".to_string())
+        (Some(PhpType::parse("string")), "$name".to_string())
     );
     assert_eq!(
         info.params[1],
-        (Some("int".to_string()), "$age".to_string())
+        (Some(PhpType::parse("int")), "$age".to_string())
     );
-    assert_eq!(info.return_type, Some("string".to_string()));
+    assert_eq!(info.return_type, Some(PhpType::parse("string")));
 }
 
 #[test]
@@ -1185,7 +1208,7 @@ fn symbol_info_nullable_return() {
         character: 4,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.return_type, Some("?User".to_string()));
+    assert_eq!(info.return_type, Some(PhpType::parse("?User")));
 }
 
 #[test]
@@ -1203,7 +1226,7 @@ fn symbol_info_property_type() {
         character: 8,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.type_hint, Some("string".to_string()));
+    assert_eq!(info.type_hint, Some(PhpType::parse("string")));
 }
 
 #[test]
@@ -1221,7 +1244,7 @@ fn symbol_info_nullable_property() {
         character: 8,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.type_hint, Some("?int".to_string()));
+    assert_eq!(info.type_hint, Some(PhpType::parse("?int")));
 }
 
 #[test]
@@ -1239,7 +1262,7 @@ fn symbol_info_readonly_property() {
         character: 8,
     };
     let info = extract_symbol_info(content, pos);
-    assert_eq!(info.type_hint, Some("string".to_string()));
+    assert_eq!(info.type_hint, Some(PhpType::parse("string")));
 }
 
 #[test]
@@ -1259,7 +1282,7 @@ fn symbol_info_variadic_param() {
     assert_eq!(info.params.len(), 1);
     assert_eq!(
         info.params[0],
-        (Some("array".to_string()), "$arrays".to_string())
+        (Some(PhpType::parse("array")), "$arrays".to_string())
     );
 }
 
@@ -1278,8 +1301,14 @@ fn symbol_info_reference_param() {
     };
     let info = extract_symbol_info(content, pos);
     assert_eq!(info.params.len(), 2);
-    assert_eq!(info.params[0], (Some("int".to_string()), "$a".to_string()));
-    assert_eq!(info.params[1], (Some("int".to_string()), "$b".to_string()));
+    assert_eq!(
+        info.params[0],
+        (Some(PhpType::parse("int")), "$a".to_string())
+    );
+    assert_eq!(
+        info.params[1],
+        (Some(PhpType::parse("int")), "$b".to_string())
+    );
 }
 
 #[test]
@@ -1297,7 +1326,7 @@ fn symbol_info_no_params() {
     };
     let info = extract_symbol_info(content, pos);
     assert!(info.params.is_empty());
-    assert_eq!(info.return_type, Some("DateTimeImmutable".to_string()));
+    assert_eq!(info.return_type, Some(PhpType::parse("DateTimeImmutable")));
 }
 
 // ── find_existing_param_tags ─────────────────────────────────────

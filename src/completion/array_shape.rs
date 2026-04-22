@@ -333,16 +333,13 @@ impl Backend {
         // the original parse failed due to syntax errors.
         let class_loader =
             self.class_loader_with(effective_classes, &file_ctx.use_map, &file_ctx.namespace);
-        let effective_type = super::type_resolution::resolve_type_alias(
+        let parsed = super::type_resolution::resolve_type_alias_typed(
             &effective_type,
             "",
             effective_classes,
             &class_loader,
         )
         .unwrap_or(effective_type);
-
-        // Parse the array shape entries via PhpType.
-        let parsed = PhpType::parse(&effective_type);
         let entries = match parsed.shape_entries() {
             Some(e) => e,
             None => return vec![],
@@ -481,22 +478,22 @@ impl Backend {
     /// Walk through `prefix_keys` to resolve the inner type of a nested
     /// array shape.
     ///
-    /// Given a raw type like `"array{meta: array{page: int, total: int}}"` and
-    /// prefix keys `["meta"]`, returns `Some("array{page: int, total: int}")`.
+    /// Given a raw type like `array{meta: array{page: int, total: int}}` and
+    /// prefix keys `["meta"]`, returns `Some(PhpType)` for `array{page: int, total: int}`.
     fn resolve_through_prefix_keys(
         &self,
-        raw_type: &str,
+        raw_type: &PhpType,
         prefix_keys: &[String],
-    ) -> Option<String> {
+    ) -> Option<PhpType> {
         if prefix_keys.is_empty() {
-            return Some(raw_type.to_string());
+            return Some(raw_type.clone());
         }
 
-        let mut current = PhpType::parse(raw_type);
+        let mut current = raw_type.clone();
         for key in prefix_keys {
             current = current.shape_value_type(key)?.clone();
         }
-        Some(current.to_string())
+        Some(current)
     }
 
     /// Resolve the raw (uncleaned) type annotation for a variable.
@@ -505,7 +502,7 @@ impl Backend {
     /// simple assignments from function/method calls to extract their
     /// `@return` type.
     ///
-    /// Returns the raw type string (e.g. `"array{name: string, user: User}"`)
+    /// Returns the raw type (e.g. `array{name: string, user: User}`)
     /// or `None` if no type annotation is found.
     pub(crate) fn resolve_variable_raw_type(
         &self,
@@ -513,7 +510,7 @@ impl Backend {
         content: &str,
         cursor_offset: usize,
         file_ctx: &FileContext,
-    ) -> Option<String> {
+    ) -> Option<PhpType> {
         // 1. Direct @var / @param annotation on the variable.
         if let Some(raw) =
             docblock::find_iterable_raw_type_in_source(content, cursor_offset, var_name)
@@ -549,7 +546,7 @@ impl Backend {
         if resolved.is_empty() {
             None
         } else {
-            Some(ResolvedType::type_strings_joined(&resolved))
+            Some(ResolvedType::types_joined(&resolved))
         }
     }
 }

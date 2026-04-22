@@ -342,8 +342,12 @@ fn parse_property_mismatch(message: &str) -> Option<PhpDocMismatch> {
     })
 }
 
-/// Extract `(phpdoc_type, native_type)` from the tail of a message
-/// starting after `"with type "`.
+/// Extract the PHPDoc and native type strings from the remainder of a
+/// PHPStan diagnostic message.
+///
+/// Returns raw strings rather than `PhpType` because the PHPDoc type is
+/// spliced back into docblock text during the fix edit, which requires the
+/// original string form.
 ///
 /// Handles both:
 /// - `{phpdoc} is incompatible with native type {native}.`
@@ -626,10 +630,9 @@ fn replace_type_in_tag_line(line: &str, mismatch: &PhpDocMismatch) -> Option<Str
     let whitespace_len = after_tag.len() - after_tag.trim_start().len();
     let trimmed_after = after_tag.trim_start();
 
-    // Find where the type ends (next whitespace).
-    let type_end = trimmed_after
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(trimmed_after.len());
+    // Find where the type ends, respecting `<>`, `{}`, `()` nesting.
+    let (type_token, _) = crate::docblock::type_strings::split_type_token(trimmed_after);
+    let type_end = type_token.len();
 
     let type_start_in_line = after_tag_start + whitespace_len;
     let type_end_in_line = type_start_in_line + type_end;
@@ -1277,14 +1280,7 @@ mod tests {
             param_name: None,
         };
         let result = replace_type_in_tag_line(line, &m).unwrap();
-        // Generic types contain commas and angle brackets — the type
-        // token ends at the first whitespace, so `array<string,` would
-        // be matched.  For the initial implementation this is acceptable
-        // since the whole type string gets replaced.  A more precise
-        // approach would parse balanced angle brackets, but PHPStan
-        // typically uses `array` as the native type for arrays so the
-        // replacement still reads correctly.
-        assert!(result.contains("@return array"));
+        assert_eq!(result, "     * @return array");
     }
 
     // ── Single-line docblock ────────────────────────────────────────

@@ -70,19 +70,17 @@ pub(super) fn is_modern_accessor(method: &MethodInfo) -> bool {
 ///
 /// Given a return type like `Attribute<string>` or
 /// `Attribute<string, never>`, returns the first generic argument
-/// (`string` in both examples).  Falls back to `"mixed"` when no
-/// generic parameter is present.
-pub(super) fn extract_modern_accessor_type(method: &MethodInfo) -> String {
+/// (`string` in both examples).  Falls back to `PhpType::mixed()` when
+/// no generic parameter is present.
+pub(super) fn extract_modern_accessor_type(method: &MethodInfo) -> PhpType {
     if let Some(rt) = method.return_type.as_ref()
         && let PhpType::Generic(_, args) = rt
         && let Some(first) = args.first()
+        && !matches!(first, PhpType::Named(s) | PhpType::Raw(s) if s.is_empty())
     {
-        let s = first.to_string();
-        if !s.is_empty() {
-            return s;
-        }
+        return first.clone();
     }
-    "mixed".to_string()
+    PhpType::mixed()
 }
 
 /// Check whether a method on `class` with the given `method_name` is

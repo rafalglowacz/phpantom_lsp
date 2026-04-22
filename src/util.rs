@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
+use crate::php_type::PhpType;
+
 /// Resolve an unqualified or partially-qualified PHP class/function name
 /// to a fully-qualified name using the file's `use` map and namespace.
 ///
@@ -61,6 +63,28 @@ pub(crate) fn resolve_to_fqn(
         return format!("{}\\{}", ns, name);
     }
     name.to_string()
+}
+
+/// Resolve a class name to its FQN via the class loader.
+///
+/// Returns the FQN from the loaded `ClassInfo` when the loader can find
+/// the class, or falls back to the original `name` unchanged.
+///
+/// **Caveat:** when the loader cannot resolve `name`, the original string
+/// is returned as-is.  If `name` is a short (unqualified) class name,
+/// the returned value is *not* a FQN — it is the same short name.
+/// Callers that need a guaranteed FQN should use [`resolve_to_fqn`]
+/// with the file's use-map and namespace instead, falling back to this
+/// function only for names that are already expected to be resolvable
+/// by the class loader (e.g. names extracted from `::class` expressions
+/// or already-resolved type hints).
+pub(crate) fn resolve_name_via_loader(
+    name: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> String {
+    class_loader(name)
+        .map(|cls| cls.fqn())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// Check whether two LSP ranges overlap (share at least one character
@@ -323,6 +347,39 @@ pub(crate) fn position_to_byte_offset(content: &str, position: Position) -> usiz
     content.len()
 }
 
+/// Convert a UTF-16 column offset to a byte offset within a single line.
+///
+/// LSP positions use UTF-16 code units for the character offset.  When a
+/// line contains multi-byte characters (e.g. `ń` is 2 bytes in UTF-8 but
+/// 1 UTF-16 code unit), the two offsets diverge.  This helper walks the
+/// line counting UTF-16 code units and returns the corresponding byte
+/// position.
+///
+/// Returns `line.len()` if `utf16_col` is past the end of the line.
+pub(crate) fn utf16_col_to_byte_offset(line: &str, utf16_col: u32) -> usize {
+    let mut col = 0u32;
+    for (i, ch) in line.char_indices() {
+        if col == utf16_col {
+            return i;
+        }
+        col += ch.len_utf16() as u32;
+    }
+    line.len()
+}
+
+/// Convert a byte offset within a single line to a UTF-16 column offset.
+///
+/// This is the inverse of [`utf16_col_to_byte_offset`].  It counts
+/// UTF-16 code units for all characters before `byte_offset` and returns
+/// the result.
+///
+/// Returns the total UTF-16 length of the line if `byte_offset` is past
+/// the end.
+pub(crate) fn byte_offset_to_utf16_col(line: &str, byte_offset: usize) -> u32 {
+    let clamped = byte_offset.min(line.len());
+    line[..clamped].encode_utf16().count() as u32
+}
+
 /// Extract the short (unqualified) class name from a potentially
 /// fully-qualified name.
 ///
@@ -337,13 +394,6 @@ pub(crate) fn short_name(name: &str) -> &str {
 /// `"\\Foo\\Bar"` -> `"Foo\\Bar"`, `"Foo"` -> `"Foo"`.
 pub(crate) fn strip_fqn_prefix(name: &str) -> &str {
     name.strip_prefix('\\').unwrap_or(name)
-}
-
-/// Strip the nullable `?` prefix from a raw PHP type string.
-///
-/// `"?string"` → `"string"`, `"string"` → `"string"`.
-pub(crate) fn strip_nullable(name: &str) -> &str {
-    name.strip_prefix('?').unwrap_or(name)
 }
 
 /// Remove surrounding single or double quotes from a PHP string literal.
@@ -726,6 +776,304 @@ pub(crate) fn find_class_by_name<'a>(
     }
 }
 
+/// Check whether `class` is a subtype of the class identified by
+/// `ancestor_name`.  Returns `true` when:
+///
+/// - `class.name` equals `ancestor_name` (same class), or
+/// - walking the `parent_class` chain reaches `ancestor_name`, or
+/// - `ancestor_name` appears in the `interfaces` list of `class` or any
+///   of its ancestors.
+///
+/// Both short names and fully-qualified names are compared so that
+/// cross-file relationships (where `parent_class` stores FQNs) work.
+pub(crate) fn is_subtype_of(
+    class: &crate::types::ClassInfo,
+    ancestor_name: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> bool {
+    // Resolve the ancestor to its FQN so that all comparisons below are
+    // FQN-vs-FQN.  When `ancestor_name` is already a FQN (contains `\`)
+    // we use it directly.  When it is a short name we try to load it
+    // through the class_loader — which consults the use-map, namespace,
+    // and stubs — and use the loaded class's FQN.  For root-namespace
+    // classes (e.g. `RuntimeException`) the FQN equals the short name,
+    // so the fallback to `ancestor_name` is correct.
+    let ancestor_fqn: String = if ancestor_name.contains('\\') {
+        ancestor_name.to_string()
+    } else if let Some(loaded) = class_loader(ancestor_name) {
+        loaded.fqn()
+    } else {
+        // Cannot resolve — keep the original name.  For root-namespace
+        // classes this is already the FQN.
+        ancestor_name.to_string()
+    };
+    let ancestor = ancestor_fqn.as_str();
+
+    // Same class?  Always compare by FQN.
+    if class.fqn() == ancestor {
+        return true;
+    }
+
+    // Check interfaces on the class itself (stored as FQNs after
+    // resolve_parent_class_names), walking the full interface
+    // inheritance tree so that transitive relationships are found
+    // (e.g. Response implements ResponseInterface extends MessageInterface).
+    let mut iface_queue: Vec<String> = class.interfaces.clone();
+    let mut visited_ifaces: std::collections::HashSet<String> =
+        iface_queue.iter().cloned().collect();
+    while let Some(iface_name) = iface_queue.pop() {
+        if iface_name == ancestor {
+            return true;
+        }
+        // Load the interface and check its parents (interface extends).
+        if let Some(iface_info) = class_loader(&iface_name) {
+            // Interface parents are stored in both `parent_class`
+            // (first parent for single-extends compat) and
+            // `interfaces` (all parents for multi-extends).
+            for parent_iface in &iface_info.interfaces {
+                if visited_ifaces.insert(parent_iface.clone()) {
+                    iface_queue.push(parent_iface.clone());
+                }
+            }
+            if let Some(ref pc) = iface_info.parent_class
+                && visited_ifaces.insert(pc.clone())
+            {
+                iface_queue.push(pc.clone());
+            }
+        }
+    }
+
+    // Walk the parent class chain (parent_class is also a resolved FQN).
+    let mut current_parent = class.parent_class.clone();
+    let mut depth = 0u32;
+    while let Some(ref name) = current_parent {
+        depth += 1;
+        if depth > 20 {
+            break;
+        }
+        if name == ancestor {
+            return true;
+        }
+        // Load the parent to check its interfaces (transitively)
+        // and continue the class chain.
+        if let Some(parent_info) = class_loader(name) {
+            let mut p_iface_queue: Vec<String> = parent_info.interfaces.clone();
+            let mut p_visited: std::collections::HashSet<String> =
+                p_iface_queue.iter().cloned().collect();
+            while let Some(iface_name) = p_iface_queue.pop() {
+                if iface_name == ancestor {
+                    return true;
+                }
+                if let Some(iface_info) = class_loader(&iface_name) {
+                    for pi in &iface_info.interfaces {
+                        if p_visited.insert(pi.clone()) {
+                            p_iface_queue.push(pi.clone());
+                        }
+                    }
+                    if let Some(ref pc) = iface_info.parent_class
+                        && p_visited.insert(pc.clone())
+                    {
+                        p_iface_queue.push(pc.clone());
+                    }
+                }
+            }
+            current_parent = parent_info.parent_class.clone();
+        } else {
+            break;
+        }
+    }
+
+    false
+}
+
+/// Check whether `subtype` is a subtype of `supertype`, combining
+/// structural subtyping ([`PhpType::is_subtype_of`]) with nominal
+/// class-hierarchy walking ([`is_subtype_of`]).
+///
+/// This is the single entry point for all subtype checks that need
+/// both layers:
+///
+/// - Scalars, unions, intersections, generics, callables, literals,
+///   and other structural relationships are handled by
+///   `PhpType::is_subtype_of`.
+/// - Nominal class relationships (`Cat <: Animal`) are resolved by
+///   loading the class via `class_loader` and walking its parent
+///   chain and interface list.
+///
+/// Returns `true` when the structural check succeeds, or when both
+/// types are named (class/interface) types and the class hierarchy
+/// confirms the relationship.
+/// Convenience wrapper around [`is_subtype_of_typed`] that accepts bare
+/// class names instead of pre-constructed [`PhpType`] values.
+///
+/// This avoids the boilerplate of wrapping each name in
+/// `PhpType::Named(name.to_string())` at call sites that already have
+/// `&str` class names.
+pub(crate) fn is_subtype_of_names(
+    subtype_name: &str,
+    supertype_name: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> bool {
+    use crate::php_type::PhpType;
+    is_subtype_of_typed(
+        &PhpType::Named(subtype_name.to_string()),
+        &PhpType::Named(supertype_name.to_string()),
+        class_loader,
+    )
+}
+
+/// Like [`is_subtype_of_typed`] but accepts a `&str` for the supertype,
+/// avoiding `PhpType::Named` wrapping at call sites that already have a
+/// `&PhpType` subtype and a bare class name as supertype.
+pub(crate) fn is_subtype_of_named(
+    subtype: &crate::php_type::PhpType,
+    supertype_name: &str,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> bool {
+    use crate::php_type::PhpType;
+    is_subtype_of_typed(
+        subtype,
+        &PhpType::Named(supertype_name.to_string()),
+        class_loader,
+    )
+}
+
+pub(crate) fn is_subtype_of_typed(
+    subtype: &crate::php_type::PhpType,
+    supertype: &crate::php_type::PhpType,
+    class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+) -> bool {
+    use crate::php_type::PhpType;
+
+    // Fast path: structural subtyping covers scalars, unions,
+    // intersections, generics, callables, literals, etc.
+    if subtype.is_subtype_of(supertype) {
+        return true;
+    }
+
+    // ── Union subtype: every member must be a subtype ───────────
+    if let PhpType::Union(members) = subtype {
+        return members
+            .iter()
+            .all(|m| is_subtype_of_typed(m, supertype, class_loader));
+    }
+
+    // ── Union supertype: at least one member must accept subtype ─
+    if let PhpType::Union(members) = supertype {
+        return members
+            .iter()
+            .any(|m| is_subtype_of_typed(subtype, m, class_loader));
+    }
+
+    // ── Nullable normalisation ──────────────────────────────────
+    if let PhpType::Nullable(inner) = subtype {
+        let as_union = PhpType::Union(vec![inner.as_ref().clone(), PhpType::null()]);
+        return is_subtype_of_typed(&as_union, supertype, class_loader);
+    }
+    if let PhpType::Nullable(inner) = supertype {
+        let as_union = PhpType::Union(vec![inner.as_ref().clone(), PhpType::null()]);
+        return is_subtype_of_typed(subtype, &as_union, class_loader);
+    }
+
+    // ── Intersection subtype: at least one member suffices ──────
+    if let PhpType::Intersection(members) = subtype {
+        return members
+            .iter()
+            .any(|m| is_subtype_of_typed(m, supertype, class_loader));
+    }
+
+    // ── Intersection supertype: all members required ────────────
+    if let PhpType::Intersection(members) = supertype {
+        return members
+            .iter()
+            .all(|m| is_subtype_of_typed(subtype, m, class_loader));
+    }
+
+    // ── Generic covariance with class-loader awareness ──────────
+    // The structural `is_subtype_of` compares generic type params
+    // by structural equality, which fails when one side uses a
+    // namespace-qualified name and the other uses a short name
+    // (e.g. `list<Pen>` vs `list<Demo\Pen>`).  Re-check with the
+    // class loader so nominal hierarchy applies to inner params.
+    if let (PhpType::Generic(name_sub, args_sub), PhpType::Generic(name_sup, args_sup)) =
+        (subtype, supertype)
+    {
+        let base_sub = name_sub.to_ascii_lowercase();
+        let base_sup = name_sup.to_ascii_lowercase();
+        let bases_compatible = base_sub == base_sup
+            || (crate::php_type::is_array_like_name(name_sub)
+                && crate::php_type::is_array_like_name(name_sup));
+        if bases_compatible && args_sub.len() == args_sup.len() {
+            let is_array_like = crate::php_type::is_array_like_name(name_sub)
+                || crate::php_type::is_array_like_name(name_sup);
+            let all_params_ok = args_sub.iter().zip(args_sup.iter()).all(|(s, t)| {
+                if is_array_like {
+                    // Arrays are covariant in PHP (read-only semantics)
+                    is_subtype_of_typed(s, t, class_loader)
+                } else {
+                    // Non-array generics are invariant by default
+                    // (both directions must hold, or they must be equal)
+                    s == t
+                        || (is_subtype_of_typed(s, t, class_loader)
+                            && is_subtype_of_typed(t, s, class_loader))
+                }
+            });
+            if all_params_ok {
+                return true;
+            }
+        }
+    }
+
+    // ── Array slice covariance ──────────────────────────────────
+    // The structural `is_subtype_of` compares `X[]` vs `Y[]` by
+    // structural equality on the inner type, which misses nominal
+    // subclass relationships (e.g. `Cat[]` <: `Animal[]` where
+    // `Cat extends Animal`).  Re-check with the class loader so
+    // the hierarchy walk applies to inner types.
+    if let (PhpType::Array(inner_sub), PhpType::Array(inner_sup)) = (subtype, supertype)
+        && is_subtype_of_typed(inner_sub, inner_sup, class_loader)
+    {
+        return true;
+    }
+
+    // ── Callable specification <: Closure / object ──────────────
+    // A `Closure(int): string` is a Closure instance, which is an
+    // object.  The structural check only handles `callable` as
+    // the named supertype; extend to `Closure` and `object`.
+    if matches!(subtype, PhpType::Callable { .. })
+        && let Some(sup) = supertype.base_name()
+        && (sup.eq_ignore_ascii_case("Closure") || sup.eq_ignore_ascii_case("object"))
+    {
+        return true;
+    }
+
+    // ── class-string covariance through nominal hierarchy ────────
+    // The structural `is_subtype_of` handles `class-string<Cat> <:
+    // class-string<Animal>` only when `Cat` and `Animal` are
+    // structurally equal.  Extend to nominal hierarchy so that
+    // `class-string<Cat>` is accepted where `class-string<Animal>`
+    // is expected when `Cat extends Animal`.
+    if let (PhpType::ClassString(Some(sub_inner)), PhpType::ClassString(Some(sup_inner))) =
+        (subtype, supertype)
+    {
+        return is_subtype_of_typed(sub_inner, sup_inner, class_loader);
+    }
+
+    // ── Nominal class hierarchy check ───────────────────────────
+    // Both sides must resolve to a class name for the hierarchy walk.
+    let sub_name = subtype.base_name();
+    let sup_name = supertype.base_name();
+
+    if let (Some(sub), Some(sup)) = (sub_name, sup_name) {
+        // Try to load the subtype class and walk its hierarchy.
+        if let Some(cls) = class_loader(sub) {
+            return is_subtype_of(&cls, sup, class_loader);
+        }
+    }
+
+    false
+}
+
 /// Collapse multi-line method chains around the cursor into a single line.
 ///
 /// When the cursor line (after trimming leading whitespace) begins with
@@ -1024,14 +1372,24 @@ impl Backend {
             // (e.g. `Illuminate\Database\Eloquent\Builder` and
             // `Illuminate\Database\Query\Builder`).
             for cls in classes.iter().filter(|c| c.name == last_segment) {
+                let class_ns = cls.file_namespace.as_deref();
                 if let Some(exp_ns) = expected_ns {
                     // Use the per-class namespace (set during parsing)
                     // rather than the file-level namespace.  This
                     // correctly handles files with multiple namespace
                     // blocks where different classes live under different
                     // namespaces.
-                    let class_ns = cls.file_namespace.as_deref();
                     if class_ns != Some(exp_ns) {
+                        continue;
+                    }
+                } else {
+                    // Bare-name lookup (no namespace in the query).
+                    // Only match classes that are themselves in the
+                    // global namespace.  Without this check, looking
+                    // up bare `"Carbon"` would incorrectly match
+                    // `Carbon\Carbon` (or any other namespaced class
+                    // whose short name happens to be `Carbon`).
+                    if class_ns.is_some() {
                         continue;
                     }
                 }
@@ -1311,6 +1669,54 @@ impl Backend {
     }
 }
 
+// ─── Self-keyword helpers ───────────────────────────────────────────────────
+
+/// Returns `true` if `s` is one of the PHP keywords that refer to the
+/// *current* class (not the parent): `self`, `static`, or `$this`.
+///
+/// Callers that also need to match `parent` should add a separate
+/// `eq_ignore_ascii_case("parent")` check, because `parent` resolves
+/// to the *parent* class rather than the current one.
+///
+/// The comparison is case-insensitive for `self` and `static`.
+/// `$this` is matched literally (it is always lowercase in PHP).
+pub(crate) fn is_self_or_static(s: &str) -> bool {
+    s.eq_ignore_ascii_case("self") || s.eq_ignore_ascii_case("static") || s == "$this"
+}
+
+/// Returns `true` if `s` is one of the PHP class-keyword references:
+/// `self`, `static`, `$this`, or `parent`.
+///
+/// Use this when you need a single guard that covers *all* class
+/// keywords, including `parent`.  For the subset that resolves to the
+/// *current* class only, use [`is_self_or_static`].
+pub(crate) fn is_class_keyword(s: &str) -> bool {
+    is_self_or_static(s) || s.eq_ignore_ascii_case("parent")
+}
+
+/// Resolve `self`, `static`, `$this`, or `parent` to a class name.
+///
+/// Returns `Some(class_name)` when the keyword can be resolved, or
+/// `None` when:
+/// - `keyword` is not a recognised class keyword, or
+/// - there is no `current_class`, or
+/// - `parent` is used but the class has no parent.
+///
+/// This centralises the keyword → class-name mapping that was
+/// previously duplicated across 10+ call sites.
+pub(crate) fn resolve_class_keyword(
+    keyword: &str,
+    current_class: Option<&ClassInfo>,
+) -> Option<String> {
+    if is_self_or_static(keyword) {
+        current_class.map(|cc| cc.name.clone())
+    } else if keyword.eq_ignore_ascii_case("parent") {
+        current_class.and_then(|cc| cc.parent_class.clone())
+    } else {
+        None
+    }
+}
+
 // ─── Shared helpers for code actions and diagnostics ────────────────────────
 
 /// Check if a line contains the `function` keyword as a standalone word
@@ -1403,4 +1809,294 @@ pub(crate) fn find_identical_occurrences(
         search_from = search_from + pos + 1;
     }
     results
+}
+
+/// Infer a [`PhpType`] from a literal expression string.
+///
+/// Recognises integer, float, boolean, null, and string literals as
+/// well as empty arrays (`[]`).  Returns `None` for anything that
+/// is not a simple literal — callers should fall back to the full
+/// type resolver for those cases.
+///
+/// This is the shared core used by:
+/// - `code_actions::phpstan::fix_return_type::infer_type_from_literal`
+///   (extended wrapper that also handles `new` expressions and array
+///   literal contents)
+/// - `code_actions::extract_constant::literal_type_name`
+/// - `parser::classes` (Team 3, future)
+pub(crate) fn infer_type_from_literal(expr: &str) -> Option<PhpType> {
+    // Integer literal (decimal, hex, octal, binary — all parse as i64
+    // after stripping underscores for PHP 7.4+ numeric separators).
+    let clean = expr.replace('_', "");
+    if clean.parse::<i64>().is_ok() {
+        return Some(PhpType::int());
+    }
+    // Hex / octal / binary that i64 doesn't cover directly.
+    if (clean.starts_with("0x") || clean.starts_with("0X"))
+        && i64::from_str_radix(&clean[2..], 16).is_ok()
+    {
+        return Some(PhpType::int());
+    }
+    if (clean.starts_with("0b") || clean.starts_with("0B"))
+        && i64::from_str_radix(&clean[2..], 2).is_ok()
+    {
+        return Some(PhpType::int());
+    }
+    // Octal
+    if clean.starts_with('0')
+        && clean.len() > 1
+        && clean[1..].chars().all(|c| c.is_ascii_digit())
+        && i64::from_str_radix(&clean[1..], 8).is_ok()
+    {
+        return Some(PhpType::int());
+    }
+
+    // Float literal (must contain `.`, `e`, or `E` to distinguish from int).
+    if (clean.contains('.') || clean.contains('e') || clean.contains('E'))
+        && clean.parse::<f64>().is_ok()
+    {
+        return Some(PhpType::float());
+    }
+
+    // Negative numeric literals.
+    if let Some(stripped) = expr.strip_prefix('-') {
+        let abs = stripped.trim_start();
+        if let Some(inner) = infer_type_from_literal(abs)
+            && (inner.is_int() || inner.is_float())
+        {
+            return Some(inner);
+        }
+    }
+
+    // Boolean literals.
+    if expr.eq_ignore_ascii_case("true") || expr.eq_ignore_ascii_case("false") {
+        return Some(PhpType::bool());
+    }
+
+    // Null.
+    if expr.eq_ignore_ascii_case("null") {
+        return Some(PhpType::null());
+    }
+
+    // String literals (single- or double-quoted).
+    if (expr.starts_with('\'') && expr.ends_with('\''))
+        || (expr.starts_with('"') && expr.ends_with('"'))
+    {
+        return Some(PhpType::string());
+    }
+
+    // Empty array literal.
+    if expr == "[]" {
+        return Some(PhpType::array());
+    }
+
+    // Not a simple literal.
+    None
+}
+
+/// Find the concrete method body block that contains `offset` within
+/// the given class-like members.  Returns `None` if no method body
+/// spans the offset.
+///
+/// This is the shared kernel behind "find enclosing body" operations
+/// used by extract-function, property-assignment narrowing, and
+/// similar features that need to locate the method body surrounding
+/// the cursor.
+pub(crate) fn find_enclosing_method_block_in_members<'a>(
+    members: impl Iterator<Item = &'a mago_syntax::ast::class_like::member::ClassLikeMember<'a>>,
+    offset: u32,
+) -> Option<&'a mago_syntax::ast::block::Block<'a>> {
+    use mago_syntax::ast::class_like::member::ClassLikeMember;
+    use mago_syntax::ast::class_like::method::MethodBody;
+
+    for member in members {
+        if let ClassLikeMember::Method(method) = member
+            && let MethodBody::Concrete(block) = &method.body
+        {
+            let body_start = block.left_brace.start.offset;
+            let body_end = block.right_brace.end.offset;
+            if offset >= body_start && offset <= body_end {
+                return Some(block);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_self_or_static_matches_three() {
+        assert!(is_self_or_static("self"));
+        assert!(is_self_or_static("static"));
+        assert!(is_self_or_static("$this"));
+    }
+
+    #[test]
+    fn is_self_or_static_excludes_parent() {
+        assert!(!is_self_or_static("parent"));
+        assert!(!is_self_or_static("Parent"));
+        assert!(!is_self_or_static("PARENT"));
+    }
+
+    #[test]
+    fn is_self_or_static_case_insensitive() {
+        assert!(is_self_or_static("Self"));
+        assert!(is_self_or_static("SELF"));
+        assert!(is_self_or_static("Static"));
+        assert!(is_self_or_static("STATIC"));
+    }
+
+    #[test]
+    fn is_self_or_static_rejects_others() {
+        assert!(!is_self_or_static(""));
+        assert!(!is_self_or_static("this"));
+        assert!(!is_self_or_static("Foo"));
+    }
+
+    /// Helper to build a minimal `ClassInfo` for hierarchy tests.
+    fn make_class(
+        name: &str,
+        namespace: Option<&str>,
+        parent: Option<&str>,
+        interfaces: &[&str],
+    ) -> Arc<crate::types::ClassInfo> {
+        Arc::new(crate::types::ClassInfo {
+            name: name.to_string(),
+            file_namespace: namespace.map(|s| s.to_string()),
+            parent_class: parent.map(|s| s.to_string()),
+            interfaces: interfaces.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Build a class loader from a slice of `Arc<ClassInfo>`.
+    fn loader_from(
+        classes: &[Arc<crate::types::ClassInfo>],
+    ) -> impl Fn(&str) -> Option<Arc<crate::types::ClassInfo>> + '_ {
+        move |name: &str| classes.iter().find(|c| c.fqn() == name).cloned()
+    }
+
+    // ── is_subtype_of: FQN self-check ──────────────────────────
+
+    #[test]
+    fn subtype_of_self_by_fqn() {
+        let cls = make_class("User", Some("App\\Models"), None, &[]);
+        let classes = [cls.clone()];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&cls, "App\\Models\\User", &loader));
+    }
+
+    #[test]
+    fn subtype_of_self_root_namespace() {
+        // Root-namespace class: FQN == short name.
+        let cls = make_class("RuntimeException", None, None, &[]);
+        let classes = [cls.clone()];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&cls, "RuntimeException", &loader));
+    }
+
+    #[test]
+    fn subtype_of_self_short_name_resolves_via_loader() {
+        // Passing a short name that the loader can resolve to a FQN.
+        let cls = make_class("User", Some("App\\Models"), None, &[]);
+        let classes = [cls.clone()];
+        let loader = loader_from(&classes);
+        // The loader finds "User" → no, it only matches on fqn().
+        // So passing just "User" when the class is App\Models\User
+        // should NOT match (different FQN).
+        assert!(!is_subtype_of(&cls, "User", &loader));
+    }
+
+    // ── is_subtype_of: interface matching by FQN ────────────────
+
+    #[test]
+    fn subtype_of_interface_fqn_match() {
+        let cls = make_class(
+            "UserRepo",
+            Some("App\\Repos"),
+            None,
+            &["App\\Contracts\\Repository"],
+        );
+        let iface = make_class("Repository", Some("App\\Contracts"), None, &[]);
+        let classes = [cls.clone(), iface];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&cls, "App\\Contracts\\Repository", &loader));
+    }
+
+    #[test]
+    fn subtype_of_interface_short_name_does_not_match_different_namespace() {
+        // Two unrelated classes that share the short name "Carbon".
+        // `is_subtype_of` must NOT treat them as the same type.
+        let vendor_carbon = make_class("Carbon", Some("Vendor\\DateTime"), None, &[]);
+        let cls = make_class("MyDate", Some("App"), None, &["Vendor\\DateTime\\Carbon"]);
+        let app_carbon = make_class("Carbon", Some("App\\DateTime"), None, &[]);
+        let classes = [cls.clone(), vendor_carbon, app_carbon.clone()];
+        let loader = loader_from(&classes);
+
+        // The class implements Vendor\DateTime\Carbon, NOT App\DateTime\Carbon.
+        assert!(is_subtype_of(&cls, "Vendor\\DateTime\\Carbon", &loader));
+        assert!(!is_subtype_of(&cls, "App\\DateTime\\Carbon", &loader));
+    }
+
+    // ── is_subtype_of: parent chain by FQN ──────────────────────
+
+    #[test]
+    fn subtype_of_parent_fqn() {
+        let parent = make_class("BaseModel", Some("App\\Models"), None, &[]);
+        let child = make_class(
+            "User",
+            Some("App\\Models"),
+            Some("App\\Models\\BaseModel"),
+            &[],
+        );
+        let classes = [parent, child.clone()];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&child, "App\\Models\\BaseModel", &loader));
+    }
+
+    #[test]
+    fn subtype_of_grandparent_fqn() {
+        let grandparent = make_class("Model", Some("Illuminate"), None, &[]);
+        let parent = make_class("BaseModel", Some("App"), Some("Illuminate\\Model"), &[]);
+        let child = make_class("User", Some("App"), Some("App\\BaseModel"), &[]);
+        let classes = [grandparent, parent, child.clone()];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&child, "Illuminate\\Model", &loader));
+    }
+
+    #[test]
+    fn subtype_of_parent_interface_fqn() {
+        // Parent implements an interface; child should also be a subtype.
+        let iface = make_class("Countable", None, None, &[]);
+        let parent = make_class("Collection", Some("App"), None, &["Countable"]);
+        let child = make_class("UserCollection", Some("App"), Some("App\\Collection"), &[]);
+        let classes = [iface, parent, child.clone()];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&child, "Countable", &loader));
+    }
+
+    #[test]
+    fn subtype_of_unrelated_class_returns_false() {
+        let cls = make_class("User", Some("App"), None, &[]);
+        let other = make_class("Order", Some("App"), None, &[]);
+        let classes = [cls.clone(), other];
+        let loader = loader_from(&classes);
+        assert!(!is_subtype_of(&cls, "App\\Order", &loader));
+    }
+
+    // ── is_subtype_of: short ancestor resolves through loader ───
+
+    #[test]
+    fn subtype_of_short_ancestor_resolved_by_loader() {
+        // The ancestor name "RuntimeException" is a root-namespace class.
+        // The loader can resolve it, and the comparison should work.
+        let exc = make_class("RuntimeException", None, None, &["Exception"]);
+        let cls = make_class("AppException", Some("App"), Some("RuntimeException"), &[]);
+        let classes = [exc, cls.clone()];
+        let loader = loader_from(&classes);
+        assert!(is_subtype_of(&cls, "RuntimeException", &loader));
+    }
 }

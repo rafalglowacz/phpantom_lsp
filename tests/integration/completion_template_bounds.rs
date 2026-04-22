@@ -338,12 +338,13 @@ async fn test_template_bound_fqn() {
 #[test]
 fn test_extract_bounds_basic() {
     use phpantom_lsp::docblock::extract_template_params_with_bounds;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @template T of SomeClass\n */";
     let result = extract_template_params_with_bounds(docblock);
     assert_eq!(
         result,
-        vec![("T".to_string(), Some("SomeClass".to_string()))]
+        vec![("T".to_string(), Some(PhpType::parse("SomeClass")))]
     );
 }
 
@@ -359,6 +360,7 @@ fn test_extract_bounds_no_bound() {
 #[test]
 fn test_extract_bounds_mixed() {
     use phpantom_lsp::docblock::extract_template_params_with_bounds;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @template TKey\n * @template TValue of SomeInterface\n */";
     let result = extract_template_params_with_bounds(docblock);
@@ -366,7 +368,7 @@ fn test_extract_bounds_mixed() {
         result,
         vec![
             ("TKey".to_string(), None),
-            ("TValue".to_string(), Some("SomeInterface".to_string())),
+            ("TValue".to_string(), Some(PhpType::parse("SomeInterface"))),
         ]
     );
 }
@@ -374,35 +376,38 @@ fn test_extract_bounds_mixed() {
 #[test]
 fn test_extract_bounds_covariant() {
     use phpantom_lsp::docblock::extract_template_params_with_bounds;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @template-covariant TNode of PDependNode\n */";
     let result = extract_template_params_with_bounds(docblock);
     assert_eq!(
         result,
-        vec![("TNode".to_string(), Some("PDependNode".to_string()))]
+        vec![("TNode".to_string(), Some(PhpType::parse("PDependNode")))]
     );
 }
 
 #[test]
 fn test_extract_bounds_phpstan_prefix() {
     use phpantom_lsp::docblock::extract_template_params_with_bounds;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @phpstan-template T of Stringable\n */";
     let result = extract_template_params_with_bounds(docblock);
     assert_eq!(
         result,
-        vec![("T".to_string(), Some("Stringable".to_string()))]
+        vec![("T".to_string(), Some(PhpType::parse("Stringable")))]
     );
 }
 
 #[test]
 fn test_extract_bounds_contravariant_with_bound() {
     use phpantom_lsp::docblock::extract_template_params_with_bounds;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @template-contravariant TInput of Comparable\n */";
     let result = extract_template_params_with_bounds(docblock);
     assert_eq!(
         result,
-        vec![("TInput".to_string(), Some("Comparable".to_string()))]
+        vec![("TInput".to_string(), Some(PhpType::parse("Comparable")))]
     );
 }

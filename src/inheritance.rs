@@ -19,9 +19,7 @@ use std::collections::{HashMap, HashSet};
 /// concrete types.
 use std::sync::Arc;
 
-/// Bundles the trait-level configuration passed through
-/// [`merge_traits_into`] so the function stays within clippy's
-/// argument-count limit.
+#[cfg(test)]
 use std::borrow::Cow;
 
 /// A borrow-or-owned handle to a `ClassInfo`, used to walk the parent
@@ -47,6 +45,9 @@ impl std::ops::Deref for ClassRef<'_> {
     }
 }
 
+/// Bundles the trait-level configuration passed through
+/// [`merge_traits_into`] so the function stays within clippy's
+/// argument-count limit.
 pub(crate) struct TraitContext<'a> {
     /// Generic type arguments for `@use Trait<Type>` declarations.
     pub use_generics: &'a [(String, Vec<PhpType>)],
@@ -184,8 +185,23 @@ pub(crate) fn enrich_method_from_ancestor(existing: &mut MethodInfo, ancestor: &
         existing.type_assertions = ancestor.type_assertions.clone();
     }
 
-    // ── Parameters (by position) ────────────────────────────────
-    enrich_parameters_from_ancestor(&mut existing.parameters, &ancestor.parameters);
+    // ── Parameters ──────────────────────────────────────────────
+    // For constructors, use **name-based** matching instead of
+    // positional.  PHP constructors don't follow Liskov substitution
+    // — a child constructor can have a completely different signature
+    // (different parameter count, order, types).  Positional
+    // enrichment would incorrectly map ancestor param types onto
+    // unrelated child params (e.g. Exception's `$code` type `int`
+    // onto a child's `$message` param at position 1).
+    //
+    // This follows PHPStan's `PhpDocInheritanceResolver`: for
+    // `__construct` the positional parameter name list falls back to
+    // the child's own names, so only same-named parameters inherit.
+    if existing.name == "__construct" {
+        enrich_constructor_parameters_by_name(&mut existing.parameters, &ancestor.parameters);
+    } else {
+        enrich_parameters_from_ancestor(&mut existing.parameters, &ancestor.parameters);
+    }
 
     // ── Descriptions ────────────────────────────────────────────
     if existing.description.is_none() && ancestor.description.is_some() {
@@ -207,16 +223,66 @@ fn enrich_parameters_from_ancestor(
     ancestor_params: &[ParameterInfo],
 ) {
     for (existing_param, ancestor_param) in existing_params.iter_mut().zip(ancestor_params) {
-        // Type hint enrichment
-        if lacks_docblock_override(&existing_param.type_hint, &existing_param.native_type_hint)
-            && ancestor_param.type_hint.is_some()
+        enrich_single_parameter(existing_param, ancestor_param);
+    }
+}
+
+/// Enrich constructor parameters from ancestor parameters, matched by name.
+///
+/// Unlike regular methods (which follow Liskov substitution and can
+/// safely use positional matching), constructors can have completely
+/// different signatures.  Only parameters with the **same name** in
+/// both the child and ancestor are enriched.
+fn enrich_constructor_parameters_by_name(
+    existing_params: &mut [ParameterInfo],
+    ancestor_params: &[ParameterInfo],
+) {
+    for existing_param in existing_params.iter_mut() {
+        if let Some(ancestor_param) = ancestor_params
+            .iter()
+            .find(|ap| ap.name == existing_param.name)
         {
-            existing_param.type_hint = ancestor_param.type_hint.clone();
+            enrich_single_parameter(existing_param, ancestor_param);
         }
-        // Description enrichment
-        if existing_param.description.is_none() && ancestor_param.description.is_some() {
-            existing_param.description = ancestor_param.description.clone();
-        }
+    }
+}
+
+/// Enrich a single child parameter from an ancestor parameter.
+///
+/// Copies the ancestor's `type_hint` when the child lacks a docblock
+/// override, the ancestor has a richer type, **and** the child's
+/// native type is not a specific concrete type.
+///
+/// PHP allows contravariant parameter types: a concrete class may
+/// declare `?int` where the interface says `int`, or Carbon's
+/// `setTimezone(DateTimeZone|string|int)` may widen DateTime's
+/// `setTimezone(DateTimeZone)`.  In those cases the child's native
+/// type is an intentional widening and must not be narrowed.
+///
+/// However, when the child's native type is a placeholder like
+/// `object` or `mixed` (common in `@implements`/`@extends` generic
+/// patterns where the interface declares `object $entity` and the
+/// `@implements` tag substitutes the template to a concrete type),
+/// the ancestor's enriched type should flow through.
+fn enrich_single_parameter(existing_param: &mut ParameterInfo, ancestor_param: &ParameterInfo) {
+    // Type hint enrichment — the child must lack a docblock override
+    // AND the ancestor must have a richer type (docblock that goes
+    // beyond its native hint).  Additionally, skip enrichment when
+    // the child has a specific native type (not `object`/`mixed`)
+    // because the child's declaration is intentional and may be
+    // wider than the ancestor's (contravariant parameters).
+    let child_has_specific_native = existing_param.native_type_hint.as_ref().is_some_and(|nt| {
+        !nt.is_object() && !nt.is_mixed() && !nt.is_array_like() && !nt.is_iterable()
+    });
+    if !child_has_specific_native
+        && lacks_docblock_override(&existing_param.type_hint, &existing_param.native_type_hint)
+        && ancestor_has_richer_type(&ancestor_param.type_hint, &ancestor_param.native_type_hint)
+    {
+        existing_param.type_hint = ancestor_param.type_hint.clone();
+    }
+    // Description enrichment
+    if existing_param.description.is_none() && ancestor_param.description.is_some() {
+        existing_param.description = ancestor_param.description.clone();
     }
 }
 
@@ -340,15 +406,12 @@ pub(crate) fn resolve_class_with_inheritance(
             && !parent.template_params.is_empty()
             && is_factory_class(parent_name)
         {
-            let factory_fqn = match &current.file_namespace {
-                Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, current.name),
-                _ => current.name.clone(),
-            };
+            let factory_fqn = current.fqn();
             if let Some(model_fqn) = factory_to_model_fqn(&factory_fqn)
                 && class_loader(&model_fqn).is_some()
             {
                 for param in &parent.template_params {
-                    level_subs.insert(param.clone(), PhpType::parse(&model_fqn));
+                    level_subs.insert(param.clone(), PhpType::Named(model_fqn.clone()));
                 }
             }
         }
@@ -566,14 +629,11 @@ fn merge_traits_into(
             && is_has_factory_trait(trait_name)
             && extends_eloquent_model(merged, class_loader)
         {
-            let model_fqn = match &merged.file_namespace {
-                Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, merged.name),
-                _ => merged.name.clone(),
-            };
+            let model_fqn = merged.fqn();
             let factory_fqn = model_to_factory_fqn(&model_fqn);
             if class_loader(&factory_fqn).is_some() {
                 for param in &trait_info.template_params {
-                    trait_subs.insert(param.clone(), PhpType::parse(&factory_fqn));
+                    trait_subs.insert(param.clone(), PhpType::Named(factory_fqn.clone()));
                 }
             }
         }
@@ -676,10 +736,9 @@ fn merge_traits_into(
             // TraitB's methods, `method` should be skipped.
             let excluded = ctx.precedences.iter().any(|p| {
                 p.method_name == method.name
-                    && p.insteadof.iter().any(|excluded_trait| {
-                        excluded_trait == trait_name
-                            || short_name(excluded_trait) == short_name(trait_name)
-                    })
+                    && p.insteadof
+                        .iter()
+                        .any(|excluded_trait| excluded_trait == trait_name)
             });
             if excluded {
                 continue;
@@ -699,10 +758,7 @@ fn merge_traits_into(
                     && let Some(vis) = alias.visibility
                 {
                     // Check trait name matches (if specified)
-                    let name_matches = alias
-                        .trait_name
-                        .as_ref()
-                        .is_none_or(|t| t == trait_name || short_name(t) == short_name(trait_name));
+                    let name_matches = alias.trait_name.as_ref().is_none_or(|t| t == trait_name);
                     if name_matches {
                         method.visibility = vis;
                     }
@@ -746,10 +802,7 @@ fn merge_traits_into(
             };
 
             // Check trait name matches (if specified).
-            let name_matches = alias
-                .trait_name
-                .as_ref()
-                .is_none_or(|t| t == trait_name || short_name(t) == short_name(trait_name));
+            let name_matches = alias.trait_name.as_ref().is_none_or(|t| t == trait_name);
             if !name_matches {
                 continue;
             }
@@ -968,7 +1021,9 @@ pub(crate) fn apply_substitution_to_property(
 ///
 /// Internally delegates to [`PhpType::substitute`] which walks the
 /// parsed type tree.  This wrapper preserves the `&str → Cow<str>` API
-/// so that existing callers do not need to change.
+/// for test assertions that compare type strings before and after
+/// substitution.
+#[cfg(test)]
 pub(crate) fn apply_substitution<'a>(
     type_str: &'a str,
     subs: &HashMap<String, PhpType>,
@@ -1007,7 +1062,10 @@ pub(crate) fn apply_substitution<'a>(
 ///
 /// Returns an empty map when no substitutions can be made (e.g. when
 /// `template_params` or `type_args` is empty).
-pub(crate) fn build_generic_subs(class: &ClassInfo, type_args: &[&str]) -> HashMap<String, PhpType> {
+pub(crate) fn build_generic_subs(
+    class: &ClassInfo,
+    type_args: &[PhpType],
+) -> HashMap<String, PhpType> {
     if class.template_params.is_empty() || type_args.is_empty() {
         return HashMap::new();
     }
@@ -1038,14 +1096,57 @@ pub(crate) fn build_generic_subs(class: &ClassInfo, type_args: &[&str]) -> HashM
     let mut subs = HashMap::new();
     for (i, param_name) in class.template_params.iter().enumerate() {
         if i < offset {
+            // Skipped (right-aligned) params: fall back to their
+            // declared upper bound or `mixed` so the raw template
+            // name never leaks into downstream consumers.
+            let fallback = class
+                .template_param_bounds
+                .get(param_name)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed);
+            subs.insert(param_name.clone(), fallback);
             continue;
         }
         if let Some(arg) = type_args.get(i - offset) {
-            subs.insert(param_name.clone(), PhpType::parse(arg));
+            subs.insert(param_name.clone(), arg.clone());
+        } else {
+            // Unbound param (more template params than type args and
+            // right-alignment didn't apply): use upper bound or `mixed`.
+            let fallback = class
+                .template_param_bounds
+                .get(param_name)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed);
+            subs.insert(param_name.clone(), fallback);
         }
     }
 
     subs
+}
+
+/// Build default type arguments for a class whose template parameters
+/// have no concrete bindings (e.g. `new Collection()` without a generic
+/// annotation).
+///
+/// Each template parameter is mapped to its declared upper bound
+/// (`@template T of Foo` → `Foo`) or `mixed` when no bound exists.
+/// The returned vector is ordered to match `class.template_params`.
+///
+/// This follows PHPStan's `resolveToBounds()` semantics: unbound
+/// template parameters are erased to their bounds so that downstream
+/// consumers never see raw template names like `TValue`.
+pub(crate) fn default_type_args(class: &ClassInfo) -> Vec<PhpType> {
+    class
+        .template_params
+        .iter()
+        .map(|p| {
+            class
+                .template_param_bounds
+                .get(p)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed)
+        })
+        .collect()
 }
 
 /// Apply explicit generic type arguments to a class's members.
@@ -1061,10 +1162,10 @@ pub(crate) fn build_generic_subs(class: &ClassInfo, type_args: &[&str]) -> HashM
 /// # Example
 ///
 /// Given a `Collection` class with `@template TKey` and `@template TValue`,
-/// calling `apply_generic_args(&collection_class, &["int", "User"])` will
-/// substitute every occurrence of `TKey` with `int` and `TValue` with `User`
+/// calling `apply_generic_args(&collection_class, &[PhpType::parse("int"), PhpType::parse("User")])`
+/// will substitute every occurrence of `TKey` with `int` and `TValue` with `User`
 /// in the class's methods and properties.
-pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> ClassInfo {
+pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[PhpType]) -> ClassInfo {
     let subs = build_generic_subs(class, type_args);
 
     if subs.is_empty() {
@@ -1100,13 +1201,10 @@ pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> Class
 /// when fewer arguments than template parameters are provided.
 fn is_key_like_bound(bound: &PhpType) -> bool {
     match bound {
-        PhpType::Named(n) => matches!(n.as_str(), "array-key" | "int" | "string"),
+        PhpType::Named(_) => bound.is_array_key() || bound.is_int() || bound.is_string_type(),
         PhpType::Union(members) => {
             // `int|string` is equivalent to `array-key`.
-            !members.is_empty()
-                && members.iter().all(
-                    |m| matches!(m, PhpType::Named(n) if matches!(n.as_str(), "int" | "string")),
-                )
+            !members.is_empty() && members.iter().all(|m| m.is_int() || m.is_string_type())
         }
         _ => false,
     }

@@ -1828,6 +1828,72 @@ class Consumer {
 }
 
 #[test]
+fn no_diagnostic_for_self_return_type_in_cross_file_chain() {
+    // Regression test: when a cross-file class has a method returning
+    // `HasMany<self, $this>` (or any generic with `self`), the `self`
+    // keyword must resolve to the *declaring* class, not get looked up
+    // via the consuming file's use-map.  Previously, `self` was resolved
+    // using `class_info.name` (the short name "TariffCode") which the
+    // consuming file's class_loader could not find because it doesn't
+    // import TariffCode.  The fix passes the FQN as owning_class_name
+    // and uses find_class_by_name in resolve_named_type.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/" } } }"#,
+        &[
+            (
+                "src/TariffCode.php",
+                r#"<?php
+namespace App;
+
+class TariffCode {
+    public string $code = '';
+
+    /** @return self[] */
+    public function children(): array { return []; }
+}
+"#,
+            ),
+            (
+                "src/OrderProduct.php",
+                r#"<?php
+namespace App;
+
+class OrderProduct {
+    public function __construct(
+        public readonly ?TariffCode $tariffCode = null,
+    ) {}
+}
+"#,
+            ),
+        ],
+    );
+
+    // Consumer file does NOT import App\TariffCode.  The chain
+    // $tariffCode->children()[0]->code must still resolve because
+    // children() returns `self[]` where `self` = App\TariffCode.
+    let uri = "file:///test.php";
+    let text = r#"<?php
+use App\OrderProduct;
+
+class Consumer {
+    public function run(OrderProduct $op): void {
+        $tariffCode = $op->tariffCode;
+        if ($tariffCode) {
+            $first = $tariffCode->children()[0];
+            $first->code;
+        }
+    }
+}
+"#;
+    let diags = unknown_member_diagnostics(&backend, uri, text);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("code")),
+        "No diagnostic expected for 'code' on self-referencing return type resolved cross-file, got: {:?}",
+        diags
+    );
+}
+
+#[test]
 fn no_diagnostic_for_static_method_return_array_access() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
@@ -3095,5 +3161,801 @@ class KlaviyoService {
         !diags.iter().any(|d| d.message.contains("updateProfile")),
         "updateProfile from mixin TWraps→ProfilesApi should not be flagged, got: {:?}",
         diags
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Scope methods not found on Builder in analyzer chains
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn no_diagnostic_for_scope_method_on_builder_in_static_chain() {
+    // When a model has scope methods (e.g. scopeWhereIsLuxury), they should be
+    // available on the Builder returned by static query methods like
+    // whereHas().  The Builder-forwarded methods on the model substitute
+    // `static` → `Builder<Model>`, and type_hint_to_classes_typed should
+    // inject the model's scope methods onto that Builder.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/", "Illuminate\\": "illuminate/" } } }"#,
+        &[
+            (
+                "illuminate/Database/Eloquent/Model.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+class Model {}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Builder.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TModel of \Illuminate\Database\Eloquent\Model
+ */
+class Builder {
+    /** @return static */
+    public function where(string $column, mixed $operator = null, mixed $value = null): static { return $this; }
+    /** @return static */
+    public function whereHas(string $relation, ?\Closure $callback = null): static { return $this; }
+    /** @return static */
+    public function orderBy(string $column, string $direction = 'asc'): static { return $this; }
+    /** @return \Illuminate\Database\Eloquent\Collection<int, TModel> */
+    public function get(): Collection { return new Collection(); }
+    /**
+     * @template TValue
+     * @param string $column
+     * @return \Illuminate\Support\Collection<int, TValue>
+     */
+    public function pluck(string $column): \Illuminate\Support\Collection { return new \Illuminate\Support\Collection(); }
+}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Collection.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TKey of array-key
+ * @template TModel
+ */
+class Collection {
+    /** @return TModel|null */
+    public function first(): mixed { return null; }
+}
+"#,
+            ),
+            (
+                "illuminate/Support/Collection.php",
+                r#"<?php
+namespace Illuminate\Support;
+
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+class Collection {
+    /** @return array<TKey, TValue> */
+    public function all(): array { return []; }
+}
+"#,
+            ),
+            (
+                "src/Product.php",
+                r#"<?php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
+
+class Product extends Model {
+    public function scopeWhereIsLuxury(Builder $query): Builder { return $query->where('is_luxury', true); }
+    public function scopeWhereIsDerma(Builder $query): Builder { return $query->where('is_derma', true); }
+    public function scopeWhereIsProHairCare(Builder $query): Builder { return $query->where('is_pro_hair_care', true); }
+}
+"#,
+            ),
+        ],
+    );
+
+    let uri = "file:///consumer.php";
+    let text = r#"<?php
+use App\Product;
+
+class ProductRepository {
+    public function getFiltered(bool $onlyLuxury): void {
+        $products = Product::whereHas('translations')
+            ->whereIsLuxury()
+            ->whereIsDerma()
+            ->whereIsProHairCare()
+            ->get();
+    }
+}
+"#;
+    backend.update_ast(uri, text);
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics(uri, text, &mut diags);
+
+    assert!(
+        !diags.iter().any(|d| d.message.contains("whereIsLuxury")),
+        "Scope method 'whereIsLuxury' should be found on Builder<Product>, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("whereIsDerma")),
+        "Scope method 'whereIsDerma' should be found on Builder<Product>, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("whereIsProHairCare")),
+        "Scope method 'whereIsProHairCare' should be found on Builder<Product>, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn no_diagnostic_for_scope_method_after_wherehas_with_closure() {
+    // Same as above but with a closure argument to whereHas, matching
+    // the real-world pattern from EventRepository.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/", "Illuminate\\": "illuminate/" } } }"#,
+        &[
+            (
+                "illuminate/Database/Eloquent/Model.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+class Model {}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Builder.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TModel of \Illuminate\Database\Eloquent\Model
+ */
+class Builder {
+    /** @return static */
+    public function where(string $column, mixed $operator = null, mixed $value = null): static { return $this; }
+    /**
+     * @param  string  $relation
+     * @param  (\Closure(\Illuminate\Database\Eloquent\Builder<TModel>): mixed)|null  $callback
+     * @return static
+     */
+    public function whereHas(string $relation, ?\Closure $callback = null): static { return $this; }
+    /**
+     * @template TValue
+     * @param string $column
+     * @return \Illuminate\Support\Collection<int, TValue>
+     */
+    public function pluck(string $column): \Illuminate\Support\Collection { return new \Illuminate\Support\Collection(); }
+}
+"#,
+            ),
+            (
+                "illuminate/Support/Collection.php",
+                r#"<?php
+namespace Illuminate\Support;
+
+/**
+ * @template TKey of array-key
+ * @template TValue
+ */
+class Collection {
+    /** @return array<TKey, TValue> */
+    public function all(): array { return []; }
+}
+"#,
+            ),
+            (
+                "src/Product.php",
+                r#"<?php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
+
+class Product extends Model {
+    public function scopeWhereIsBlackFriday(Builder $query): Builder { return $query->where('is_black_friday', true); }
+    public function scopeWhereIsVisible(Builder $query): Builder { return $query->where('is_visible', true); }
+}
+"#,
+            ),
+        ],
+    );
+
+    let uri = "file:///consumer.php";
+    let text = r#"<?php
+use App\Product;
+use Illuminate\Database\Eloquent\Builder;
+
+class EventRepository {
+    public function getProductIds(): array {
+        $ids = Product::whereHas(
+            'translations',
+            fn(Builder $query): Builder => $query->where('lang_code', 'en')
+        )
+            ->whereIsBlackFriday()
+            ->whereIsVisible()
+            ->pluck('id')
+            ->all();
+        return $ids;
+    }
+}
+"#;
+    backend.update_ast(uri, text);
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics(uri, text, &mut diags);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("whereIsBlackFriday")),
+        "Scope method 'whereIsBlackFriday' should be found on Builder<Product>, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("whereIsVisible")),
+        "Scope method 'whereIsVisible' should be found on Builder<Product>, got: {:?}",
+        diags
+    );
+    // pluck and all should also resolve without issues
+    assert!(
+        !diags.iter().any(|d| d.message.contains("pluck")),
+        "pluck should be found on Builder after scope methods, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn no_diagnostic_for_scope_in_when_closure_with_callable_inference() {
+    // When a closure parameter is typed as bare `Builder` but the
+    // enclosing method's callable signature provides `$this`/`static`,
+    // the inferred type is refined to `Builder<Product>` (a supertype
+    // match with generic args).  Scope methods are then found on the
+    // refined type and should NOT be flagged.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/", "Illuminate\\": "illuminate/" } } }"#,
+        &[
+            (
+                "illuminate/Database/Eloquent/Model.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+class Model {}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Builder.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TModel of \Illuminate\Database\Eloquent\Model
+ */
+class Builder {
+    /** @return static */
+    public function where(string $column, mixed $operator = null, mixed $value = null): static { return $this; }
+    /** @return static */
+    public function whereHas(string $relation, ?\Closure $callback = null): static { return $this; }
+    /**
+     * @param bool $value
+     * @param callable(static): static $callback
+     * @return static
+     */
+    public function when(bool $value, callable $callback): static { return $this; }
+    /** @return \Illuminate\Database\Eloquent\Collection<int, TModel> */
+    public function get(): Collection { return new Collection(); }
+
+    /** @return mixed */
+    public function __call(string $method, array $parameters): mixed { return null; }
+}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Collection.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TKey of array-key
+ * @template TModel
+ */
+class Collection {}
+"#,
+            ),
+            (
+                "src/Product.php",
+                r#"<?php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
+
+class Product extends Model {
+    public function scopeWhereIsLuxury(Builder $query): Builder { return $query->where('is_luxury', true); }
+    public function scopeWhereIsDerma(Builder $query): Builder { return $query->where('is_derma', true); }
+}
+"#,
+            ),
+        ],
+    );
+
+    let uri = "file:///consumer.php";
+    let text = r#"<?php
+use App\Product;
+use Illuminate\Database\Eloquent\Builder;
+
+class ProductRepository {
+    public function getFiltered(bool $onlyLuxury, bool $onlyDerma): void {
+        Product::whereHas('translations')
+            ->when($onlyLuxury, fn(Builder $q): Builder => $q->whereIsLuxury())
+            ->when($onlyDerma, fn(Builder $q): Builder => $q->whereIsDerma())
+            ->get();
+    }
+}
+"#;
+    backend.update_ast(uri, text);
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics(uri, text, &mut diags);
+
+    // The callable signature `callable(static)` on `when()` provides
+    // `static` as the closure param type.  Since the receiver is
+    // `Builder<Product>`, `static` resolves to `Builder<Product>`.
+    // The explicit `Builder` type hint is a supertype, so the inferred
+    // `Builder<Product>` is preferred — scope methods are found.
+    assert!(
+        !diags.iter().any(|d| d.message.contains("whereIsLuxury")),
+        "Scope method should be found via callable param inference from when(), got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("whereIsDerma")),
+        "Scope method should be found via callable param inference from when(), got: {:?}",
+        diags
+    );
+
+    // Known methods after the scope calls should also resolve.
+    assert!(
+        !diags.iter().any(|d| d.message.contains("get")),
+        "Known method 'get' should resolve after scope calls, got: {:?}",
+        diags
+    );
+    // No broken-chain / unresolved diagnostics downstream.
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("could not be resolved")),
+        "Chain should not break, got: {:?}",
+        diags
+    );
+}
+
+#[test]
+fn scope_on_standalone_bare_builder_param_flags_warning_chain_continues() {
+    // When a function parameter is typed as bare `Builder` (no callable
+    // inference context), scope methods cannot be verified statically.
+    // They are flagged via MagicFallback (__call exists), but the chain
+    // continues because Builder's __call return type is patched to
+    // `static` during resolution.
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/", "Illuminate\\": "illuminate/" } } }"#,
+        &[
+            (
+                "illuminate/Database/Eloquent/Model.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+class Model {}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Builder.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TModel of \Illuminate\Database\Eloquent\Model
+ */
+class Builder {
+    /** @return static */
+    public function where(string $column, mixed $operator = null, mixed $value = null): static { return $this; }
+    /** @return static */
+    public function orderBy(string $column, string $direction = 'asc'): static { return $this; }
+    /** @return \Illuminate\Database\Eloquent\Collection<int, TModel> */
+    public function get(): Collection { return new Collection(); }
+
+    /** @return mixed */
+    public function __call(string $method, array $parameters): mixed { return null; }
+}
+"#,
+            ),
+            (
+                "illuminate/Database/Eloquent/Collection.php",
+                r#"<?php
+namespace Illuminate\Database\Eloquent;
+
+/**
+ * @template TKey of array-key
+ * @template TModel
+ */
+class Collection {}
+"#,
+            ),
+            (
+                "src/Product.php",
+                r#"<?php
+namespace App;
+
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Builder;
+
+class Product extends Model {
+    public function scopeWhereIsLuxury(Builder $query): Builder { return $query->where('is_luxury', true); }
+}
+"#,
+            ),
+        ],
+    );
+
+    let uri = "file:///consumer.php";
+    // Standalone function parameter — no callable inference context.
+    let text = r#"<?php
+use Illuminate\Database\Eloquent\Builder;
+
+function filterProducts(Builder $query): void {
+    $query->whereIsLuxury()->orderBy('name')->get();
+}
+"#;
+    backend.update_ast(uri, text);
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics(uri, text, &mut diags);
+
+    // Scope method IS flagged — no callable inference to refine the
+    // bare Builder to Builder<Product>.
+    assert!(
+        diags.iter().any(|d| d.message.contains("whereIsLuxury")),
+        "Scope method on standalone bare Builder param should be flagged, got: {:?}",
+        diags
+    );
+
+    // Chain continues — known methods after the unknown scope call
+    // should NOT be flagged because __call returns static.
+    assert!(
+        !diags.iter().any(|d| d.message.contains("orderBy")),
+        "Known method 'orderBy' should resolve after __call fallback, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags.iter().any(|d| d.message.contains("get")),
+        "Known method 'get' should resolve after __call fallback, got: {:?}",
+        diags
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("could not be resolved")),
+        "Chain should not break after __call fallback, got: {:?}",
+        diags
+    );
+}
+
+/// Cross-file variant: `Collection::reduce()` loaded via PSR-4 with
+/// two method-level `@template` params and a `callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType`
+/// parameter.  The return type `TReduceReturnType` must be inferred from the
+/// closure's return type annotation even when the Collection class lives in
+/// a separate file.
+#[test]
+fn no_false_positive_on_reduce_two_tpl_cross_file() {
+    let composer = r#"{"autoload":{"psr-4":{"App\\":"src/","Illuminate\\Support\\":"vendor/illuminate/support/src/"}}}"#;
+
+    let collection_php = r#"<?php
+namespace Illuminate\Support;
+
+/**
+ * @template TKey
+ * @template TValue
+ */
+class Collection {
+    /**
+     * @template TReduceInitial
+     * @template TReduceReturnType
+     * @param callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType $callback
+     * @param TReduceInitial $initial
+     * @return TReduceInitial|TReduceReturnType
+     */
+    public function reduce(callable $callback, mixed $initial = null): mixed {}
+}
+"#;
+
+    let decimal_php = r#"<?php
+namespace App;
+
+class Decimal {
+    public function add(Decimal $other): Decimal { return $this; }
+    public function getValue(): string { return '0'; }
+}
+"#;
+
+    let order_product_php = r#"<?php
+namespace App;
+
+class OrderProduct {
+    public float $price;
+}
+"#;
+
+    let service_php = r#"<?php
+namespace App;
+
+use Illuminate\Support\Collection;
+
+class FlowService {
+    public function test(): void {
+        /** @var Collection<int, OrderProduct> $products */
+        $products = new Collection();
+        $products->reduce(fn(Decimal $c, OrderProduct $p): Decimal => $c->add($p->price), new Decimal('0'))->add(new Decimal('1'));
+        $products->reduce(fn(Decimal $c, OrderProduct $p): Decimal => $c->add($p->price), new Decimal('0'))->getValue();
+    }
+}
+"#;
+
+    let (backend, _dir) = create_psr4_workspace(
+        composer,
+        &[
+            (
+                "vendor/illuminate/support/src/Collection.php",
+                collection_php,
+            ),
+            ("src/Decimal.php", decimal_php),
+            ("src/OrderProduct.php", order_product_php),
+            ("src/FlowService.php", service_php),
+        ],
+    );
+
+    let uri = &format!(
+        "file://{}",
+        _dir.path().join("src/FlowService.php").display()
+    );
+    let diags = unknown_member_diagnostics(&backend, uri, service_php);
+
+    let chained_diags: Vec<_> = diags.iter().filter(|d| !d.message.contains("$c")).collect();
+    assert!(
+        !chained_diags.iter().any(|d| d.message.contains("add")),
+        "reduce() should resolve TReduceReturnType=Decimal cross-file, chained 'add' should be known, got: {:?}",
+        chained_diags
+    );
+    assert!(
+        !chained_diags.iter().any(|d| d.message.contains("getValue")),
+        "reduce() should resolve TReduceReturnType=Decimal cross-file, chained 'getValue' should be known, got: {:?}",
+        chained_diags
+    );
+    assert!(
+        !chained_diags
+            .iter()
+            .any(|d| d.message.contains("could not be resolved")),
+        "reduce() return type should be fully resolved cross-file when chained, got: {:?}",
+        chained_diags
+    );
+}
+
+/// Cross-file test modelling the real Laravel structure: `Collection` uses
+/// a trait `EnumeratesValues` (which defines `reduce()` with
+/// `@return TReduceReturnType`) and implements an interface `Enumerable`
+/// (which declares `reduce()` with `@return TReduceInitial|TReduceReturnType`).
+/// The inheritance merger might pick up the interface's union return type,
+/// so the template substitution must handle both template params in the
+/// return type union.
+///
+/// Regression test for template inference through trait + interface + collection reduce.
+#[test]
+fn no_false_positive_on_reduce_trait_interface_pattern() {
+    let composer = r#"{"autoload":{"psr-4":{"App\\":"src/","Illuminate\\Support\\":"vendor/illuminate/support/src/"}}}"#;
+
+    let enumerable_php = r#"<?php
+namespace Illuminate\Support;
+
+/**
+ * @template TKey
+ * @template TValue
+ */
+interface Enumerable {
+    /**
+     * @template TReduceInitial
+     * @template TReduceReturnType
+     * @param callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType $callback
+     * @param TReduceInitial $initial
+     * @return TReduceInitial|TReduceReturnType
+     */
+    public function reduce(callable $callback, $initial = null);
+}
+"#;
+
+    let trait_php = r#"<?php
+namespace Illuminate\Support;
+
+trait EnumeratesValues {
+    /**
+     * @template TReduceInitial
+     * @template TReduceReturnType
+     * @param callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType $callback
+     * @param TReduceInitial $initial
+     * @return TReduceReturnType
+     */
+    public function reduce(callable $callback, $initial = null)
+    {
+        $result = $initial;
+        foreach ($this as $key => $value) {
+            $result = $callback($result, $value, $key);
+        }
+        return $result;
+    }
+}
+"#;
+
+    let collection_php = r#"<?php
+namespace Illuminate\Support;
+
+/**
+ * @template TKey
+ * @template TValue
+ * @implements Enumerable<TKey, TValue>
+ */
+class Collection implements Enumerable {
+    use EnumeratesValues;
+}
+"#;
+
+    let decimal_php = r#"<?php
+namespace App;
+
+class Decimal {
+    public function add(Decimal $other): Decimal { return $this; }
+    public function getValue(): string { return '0'; }
+}
+"#;
+
+    let order_product_php = r#"<?php
+namespace App;
+
+class OrderProduct {
+    public float $price;
+}
+"#;
+
+    let service_php = r#"<?php
+namespace App;
+
+use Illuminate\Support\Collection;
+
+class FlowService {
+    public function test(): void {
+        /** @var Collection<int, OrderProduct> $products */
+        $products = new Collection();
+        $products->reduce(fn(Decimal $c, OrderProduct $p): Decimal => $c->add($p->price), new Decimal('0'))->add(new Decimal('1'));
+        $products->reduce(fn(Decimal $c, OrderProduct $p): Decimal => $c->add($p->price), new Decimal('0'))->getValue();
+    }
+}
+"#;
+
+    let (backend, _dir) = create_psr4_workspace(
+        composer,
+        &[
+            (
+                "vendor/illuminate/support/src/Enumerable.php",
+                enumerable_php,
+            ),
+            (
+                "vendor/illuminate/support/src/EnumeratesValues.php",
+                trait_php,
+            ),
+            (
+                "vendor/illuminate/support/src/Collection.php",
+                collection_php,
+            ),
+            ("src/Decimal.php", decimal_php),
+            ("src/OrderProduct.php", order_product_php),
+            ("src/FlowService.php", service_php),
+        ],
+    );
+
+    let uri = &format!(
+        "file://{}",
+        _dir.path().join("src/FlowService.php").display()
+    );
+    let diags = unknown_member_diagnostics(&backend, uri, service_php);
+
+    let chained_diags: Vec<_> = diags.iter().filter(|d| !d.message.contains("$c")).collect();
+    assert!(
+        !chained_diags.iter().any(|d| d.message.contains("add")),
+        "reduce() via trait+interface should resolve TReduceReturnType=Decimal, chained 'add' should be known, got: {:?}",
+        chained_diags
+    );
+    assert!(
+        !chained_diags.iter().any(|d| d.message.contains("getValue")),
+        "reduce() via trait+interface should resolve TReduceReturnType=Decimal, chained 'getValue' should be known, got: {:?}",
+        chained_diags
+    );
+    assert!(
+        !chained_diags
+            .iter()
+            .any(|d| d.message.contains("could not be resolved")),
+        "reduce() return type via trait+interface should be fully resolved when chained, got: {:?}",
+        chained_diags
+    );
+}
+
+/// `Collection::reduce()` with two method-level `@template` params
+/// (`TReduceInitial`, `TReduceReturnType`) and a callable whose first
+/// parameter is the union `TReduceInitial|TReduceReturnType`.  The
+/// return type is `TReduceReturnType` which should be inferred from
+/// the closure's return type annotation.  Chaining `.add()` on the
+/// result must not produce a diagnostic.
+///
+/// Regression test for reduce with two template parameters.
+#[test]
+fn no_false_positive_on_reduce_with_two_template_params() {
+    let backend = create_test_backend();
+    let uri = "file:///test_reduce_two_tpl.php";
+    let text = r#"<?php
+class Decimal {
+    public function add(Decimal $other): Decimal { return $this; }
+    public function getValue(): string { return '0'; }
+}
+
+class OrderProduct {
+    public float $price;
+}
+
+/**
+ * @template TKey
+ * @template TValue
+ */
+class Collection {
+    /**
+     * @template TReduceInitial
+     * @template TReduceReturnType
+     * @param callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType $callback
+     * @param TReduceInitial $initial
+     * @return TReduceReturnType
+     */
+    public function reduce(callable $callback, mixed $initial = null): mixed {}
+}
+
+class FlowService {
+    public function test(): void {
+        /** @var Collection<int, OrderProduct> $products */
+        $products = new Collection();
+        $products->reduce(fn(Decimal $c, OrderProduct $p): Decimal => $c->add($p->price), new Decimal('0'))->add(new Decimal('1'));
+        $products->reduce(fn(Decimal $c, OrderProduct $p): Decimal => $c->add($p->price), new Decimal('0'))->getValue();
+    }
+}
+"#;
+    let diags = unknown_member_diagnostics(&backend, uri, text);
+    // Filter out diagnostics for the inner `$c->add($p->price)` inside
+    // the closure — we only care about the chained call after reduce().
+    let chained_diags: Vec<_> = diags.iter().filter(|d| !d.message.contains("$c")).collect();
+    assert!(
+        !chained_diags.iter().any(|d| d.message.contains("add")),
+        "reduce() should resolve TReduceReturnType=Decimal, chained 'add' should be known, got: {:?}",
+        chained_diags
+    );
+    assert!(
+        !chained_diags.iter().any(|d| d.message.contains("getValue")),
+        "reduce() should resolve TReduceReturnType=Decimal, chained 'getValue' should be known, got: {:?}",
+        chained_diags
+    );
+    assert!(
+        !chained_diags
+            .iter()
+            .any(|d| d.message.contains("could not be resolved")),
+        "reduce() return type should be fully resolved when chained, got: {:?}",
+        chained_diags
     );
 }

@@ -59,7 +59,7 @@ pub use tags::{
     extract_var_type_with_name_from_info, find_enclosing_return_type, find_inline_var_docblock,
     find_iterable_raw_type_in_source, find_var_raw_type_in_source, get_docblock_info_for_node,
     get_docblock_text_for_node, has_deprecated_tag, has_deprecated_tag_from_info,
-    resolve_effective_type, should_override_type,
+    resolve_effective_type_typed, sanitise_and_parse_docblock_type, should_override_type_typed,
 };
 
 // Template / generics / type alias tags
@@ -81,6 +81,6 @@ pub use conditional::{extract_conditional_return_type, extract_conditional_retur
 
 // Type utilities
 pub use types::{
-    clean_type, extract_array_shape_value_type, extract_object_shape_property_type,
-    is_object_shape, parse_array_shape, parse_object_shape,
+    extract_array_shape_value_type_typed, extract_object_shape_property_type_typed,
+    is_object_shape_typed, parse_array_shape_typed, parse_object_shape_typed,
 };

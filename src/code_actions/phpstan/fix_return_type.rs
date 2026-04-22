@@ -9,8 +9,12 @@
 //! - **`return.empty`** — a non-void function has a bare `return;`.
 //!   Fix: change the return type to `void` and remove `@return`.
 //! - **`return.type`** — the return type doesn't match what the
-//!   function actually returns.  Fix: update the native return type
-//!   to the actual type reported by PHPStan.
+//!   function actually returns.  Single fix: "Update return type"
+//!   which updates the native type hint (to the base type, stripping
+//!   generics) and updates or creates a `@return` docblock tag with
+//!   the full type.  Not marked as preferred since the right fix
+//!   might be to change the code rather than the signature.  The
+//!   exact edits are deferred to Phase 2 to keep Phase 1 cheap.
 //! - **`missingType.return`** — no return type specified.
 //!   Fix: add a return type hint.  The type is inferred from the
 //!   function body by scanning return statements for literals,
@@ -38,6 +42,7 @@ use crate::code_actions::phpstan::add_iterable_type::{
 use crate::code_actions::{CodeActionData, make_code_action_data};
 use crate::completion::resolver::Loaders;
 use crate::completion::variable::resolution::resolve_variable_types;
+use crate::docblock::type_strings::split_type_token;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader, ResolvedType};
 use crate::util::{find_brace_match_line, find_semicolon_balanced, ranges_overlap};
@@ -51,10 +56,10 @@ use crate::util::{find_brace_match_line, find_semicolon_balanced, ranges_overlap
 /// When the two are identical, no docblock is needed.
 pub(crate) struct InferredReturnType {
     /// Valid native PHP type hint (e.g. `array`, `int`, `Foo`).
-    pub(crate) native: String,
+    pub(crate) native: PhpType,
     /// Full effective type including generics/shapes (e.g. `list<string>`).
     /// `None` when the native type already captures the full type.
-    pub(crate) effective: Option<String>,
+    pub(crate) effective: Option<PhpType>,
 }
 
 // ── PHPStan identifiers ─────────────────────────────────────────────────────
@@ -75,7 +80,7 @@ const MISSING_TYPE_RETURN_ID: &str = "missingType.return";
 const ACTION_KIND_STRIP_EXPR: &str = "phpstan.fixReturnType.stripExpr";
 
 /// Action kind string for changing the return type to match the actual
-/// return value.
+/// return value (return.void only — simple types without generics).
 const ACTION_KIND_CHANGE_TYPE_TO_ACTUAL: &str = "phpstan.fixReturnType.changeTypeToActual";
 
 /// Action kind string for the change-return-type-to-void fix (return.empty).
@@ -83,6 +88,11 @@ const ACTION_KIND_CHANGE_TYPE: &str = "phpstan.fixReturnType.changeType";
 
 /// Action kind string for adding a missing return type hint.
 const ACTION_KIND_ADD_TYPE: &str = "phpstan.fixReturnType.addType";
+
+/// Action kind string for the unified "Update return type" fix
+/// (return.type).  Updates both the native type hint and the `@return`
+/// docblock tag in a single action.
+const ACTION_KIND_UPDATE_RETURN_TYPE: &str = "phpstan.fixReturnType.updateReturnType";
 
 /// Message fragment that identifies a `return.void` diagnostic.
 const RETURN_VOID_MSG_SUFFIX: &str = "but should not return anything.";
@@ -160,21 +170,22 @@ impl Backend {
                     // just a habit.  The "Remove return statement" fix above
                     // handles it.
                     if let Some(actual_type) = extract_actual_type(&diag.message)
-                        && actual_type != "null"
+                        && !actual_type.is_null()
                     {
                         // Verify the change-type fix is applicable (the
                         // function has a return type that can be replaced).
-                        if build_change_return_type_edits_to(content, diag_line, actual_type)
+                        if build_change_return_type_edits_to(content, diag_line, &actual_type)
                             .is_some()
                         {
+                            let actual_str = actual_type.to_string();
                             let extra = serde_json::json!({
                                 "diagnostic_line": diag_line,
                                 "identifier": RETURN_VOID_ID,
-                                "actual_type": actual_type,
+                                "actual_type": actual_str,
                             });
 
                             out.push(CodeActionOrCommand::CodeAction(CodeAction {
-                                title: format!("Change return type to {}", actual_type),
+                                title: format!("Change return type to {}", actual_str),
                                 kind: Some(CodeActionKind::QUICKFIX),
                                 diagnostics: Some(vec![diag.clone()]),
                                 edit: None,
@@ -197,7 +208,9 @@ impl Backend {
                     }
 
                     // Verify the fix is applicable.
-                    if build_change_return_type_edits_to(content, diag_line, "void").is_none() {
+                    if build_change_return_type_edits_to(content, diag_line, &PhpType::void())
+                        .is_none()
+                    {
                         continue;
                     }
 
@@ -224,25 +237,20 @@ impl Backend {
                 }
                 RETURN_TYPE_ID => {
                     // "Method Foo::bar() should return {expected} but returns {actual}."
-                    let actual_type = match extract_return_type_actual(&diag.message) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-
-                    // Verify the fix is applicable.
-                    if build_change_return_type_edits_to(content, diag_line, actual_type).is_none()
-                    {
+                    // Just verify the message is parseable — defer all
+                    // computation to Phase 2.
+                    if extract_return_type_actual(&diag.message).is_none() {
                         continue;
                     }
 
                     let extra = serde_json::json!({
                         "diagnostic_line": diag_line,
                         "identifier": RETURN_TYPE_ID,
-                        "actual_type": actual_type,
+                        "message": &diag.message,
                     });
 
                     out.push(CodeActionOrCommand::CodeAction(CodeAction {
-                        title: format!("Change return type to {}", actual_type),
+                        title: "Update return type".to_string(),
                         kind: Some(CodeActionKind::QUICKFIX),
                         diagnostics: Some(vec![diag.clone()]),
                         edit: None,
@@ -250,7 +258,7 @@ impl Backend {
                         is_preferred: Some(false),
                         disabled: None,
                         data: Some(make_code_action_data(
-                            ACTION_KIND_CHANGE_TYPE_TO_ACTUAL,
+                            ACTION_KIND_UPDATE_RETURN_TYPE,
                             uri,
                             &params.range,
                             extra,
@@ -393,7 +401,7 @@ pub(crate) fn infer_return_type(
         .unwrap_or_default();
 
     // Scan return statements and resolve their types.
-    let mut return_types: Vec<String> = Vec::new();
+    let mut return_types: Vec<PhpType> = Vec::new();
     let mut has_bare_return = false;
     let mut has_return_with_value = false;
 
@@ -440,7 +448,16 @@ pub(crate) fn infer_return_type(
 
             // Try syntax-level inference first (cheap).
             if let Some(t) = infer_type_from_literal(expr) {
-                return_types.push(t);
+                // Resolve short class names to FQN via the class loader
+                // so that `new Foo(…)` produces a fully-qualified type.
+                let resolved = t.resolve_names(&|name: &str| {
+                    if let Some(cls) = class_loader(name) {
+                        cls.fqn()
+                    } else {
+                        name.to_string()
+                    }
+                });
+                return_types.push(resolved);
                 continue;
             }
 
@@ -462,57 +479,61 @@ pub(crate) fn infer_return_type(
                     Loaders::with_function(function_loader),
                     None,
                 );
-                let type_str = ResolvedType::type_strings_joined(&results);
-                if !type_str.is_empty() {
-                    return_types.push(type_str);
+                let joined = ResolvedType::types_joined(&results);
+                if !joined.is_mixed() {
+                    return_types.push(joined);
                     continue;
                 }
             }
 
             // For other expressions, fall back to `mixed`.
-            return_types.push("mixed".to_string());
+            return_types.push(PhpType::mixed());
         }
     }
 
     if !has_return_with_value && !has_bare_return {
         return Some(InferredReturnType {
-            native: "void".to_string(),
+            native: PhpType::void(),
             effective: None,
         });
     }
 
     if return_types.is_empty() && has_bare_return {
         return Some(InferredReturnType {
-            native: "void".to_string(),
+            native: PhpType::void(),
             effective: None,
         });
     }
 
-    // Deduplicate types.
-    return_types.sort();
-    return_types.dedup();
-
-    if has_bare_return {
-        return_types.push("null".to_string());
-        return_types.sort();
-        return_types.dedup();
+    // Deduplicate types structurally (no string round-trip).
+    let mut deduped: Vec<PhpType> = Vec::with_capacity(return_types.len());
+    for ty in &return_types {
+        if !deduped.iter().any(|existing| existing.equivalent(ty)) {
+            deduped.push(ty.clone());
+        }
     }
 
-    let effective = if return_types.len() == 1 {
-        return_types.into_iter().next().unwrap()
-    } else if return_types.len() <= 3 {
-        return_types.join("|")
+    if has_bare_return {
+        let has_null = deduped.iter().any(|t| t.is_null());
+        if !has_null {
+            deduped.push(PhpType::null());
+        }
+    }
+
+    let effective = if deduped.len() == 1 {
+        deduped.into_iter().next().unwrap()
+    } else if deduped.len() <= 3 {
+        PhpType::Union(deduped)
     } else {
         return None;
     };
 
     // Convert effective type → native PHP type hint.
-    let parsed = PhpType::parse(&effective);
-    let native = parsed
-        .to_native_hint()
-        .unwrap_or_else(|| "mixed".to_string());
+    let native = effective
+        .to_native_hint_typed()
+        .unwrap_or_else(PhpType::mixed);
 
-    let needs_docblock = native != effective;
+    let needs_docblock = !native.equivalent(&effective);
     Some(InferredReturnType {
         native,
         effective: if needs_docblock {
@@ -539,7 +560,7 @@ pub(crate) fn enrichment_return_type(
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // The position is on or near the docblock / function signature.
     // Search forward from that line to find the `function` keyword.
     let lines: Vec<&str> = content.lines().collect();
@@ -588,8 +609,52 @@ impl Backend {
                 })
             }
             ACTION_KIND_CHANGE_TYPE_TO_ACTUAL => {
-                let actual_type = extra.get("actual_type")?.as_str()?;
-                let edits = build_change_return_type_edits_to(content, diag_line, actual_type)?;
+                let actual_type_str = extra.get("actual_type")?.as_str()?;
+                let actual_type = PhpType::parse(actual_type_str);
+                let edits = build_change_return_type_edits_to(content, diag_line, &actual_type)?;
+                let mut changes = HashMap::new();
+                changes.insert(doc_uri, edits);
+                Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                })
+            }
+            ACTION_KIND_UPDATE_RETURN_TYPE => {
+                let diag_msg = extra.get("message")?.as_str()?;
+                let tip_type = extract_return_type_actual(diag_msg)?;
+
+                // Run our own inference and compare to the current
+                // declaration.  If they differ, our inference spotted
+                // the mismatch — use it (it already has the correct
+                // native/effective split, e.g. native=`array`,
+                // effective=`list<int>`).  If they agree, we can't
+                // see the problem ourselves — trust the PHPStan tip.
+                //
+                // The diagnostic line is a return statement inside the
+                // body.  Walk backward to find the function declaration
+                // line so the inference engine can locate the full body.
+                let lines: Vec<&str> = content.lines().collect();
+                let brace_line = find_function_open_brace_line(&lines, diag_line)?;
+                let (paren_line, _) = find_close_paren_before_brace(&lines, brace_line)?;
+                let func_line = find_func_keyword_line(&lines, paren_line)?;
+
+                let our = self.infer_return_type_for_function(&data.uri, content, func_line);
+                let current = read_current_return_type(content, diag_line);
+
+                let edits = if should_use_own_inference(&our, &current) {
+                    let inferred = our?;
+                    build_update_return_type_edits_split(
+                        content,
+                        diag_line,
+                        &inferred.native,
+                        inferred.effective.as_ref(),
+                    )?
+                } else {
+                    // Trust the PHPStan tip.
+                    build_update_return_type_edits(content, diag_line, &tip_type)?
+                };
+
                 let mut changes = HashMap::new();
                 changes.insert(doc_uri, edits);
                 Some(WorkspaceEdit {
@@ -599,7 +664,8 @@ impl Backend {
                 })
             }
             ACTION_KIND_CHANGE_TYPE => {
-                let edits = build_change_return_type_edits_to(content, diag_line, "void")?;
+                let void = PhpType::void();
+                let edits = build_change_return_type_edits_to(content, diag_line, &void)?;
                 let mut changes = HashMap::new();
                 changes.insert(doc_uri, edits);
                 Some(WorkspaceEdit {
@@ -613,6 +679,8 @@ impl Backend {
                 let inferred =
                     self.infer_return_type_for_function(&data.uri, content, diag_line)?;
 
+                let native_str = inferred.native.to_string();
+
                 let lines: Vec<&str> = content.lines().collect();
                 let brace_line = find_open_brace_from_declaration(&lines, diag_line)?;
                 let (paren_line, paren_col) = find_close_paren_before_brace(&lines, brace_line)?;
@@ -625,12 +693,13 @@ impl Backend {
                         start: Position::new(paren_line as u32, (paren_col + 1) as u32),
                         end: Position::new(paren_line as u32, (paren_col + 1) as u32),
                     },
-                    new_text: format!(": {}", inferred.native),
+                    new_text: format!(": {}", native_str),
                 });
 
                 // When the effective type is richer than the native hint,
                 // add a `@return` docblock tag.
-                if let Some(ref eff) = inferred.effective {
+                if let Some(ref eff_type) = inferred.effective {
+                    let eff = eff_type.to_string();
                     let func_line = find_func_keyword_line(&lines, paren_line).unwrap_or(diag_line);
                     let docblock_info = find_function_docblock(&lines, func_line);
 
@@ -841,7 +910,7 @@ fn build_strip_return_expr_edit(content: &str, diag_line: usize) -> Option<TextE
 fn build_change_return_type_edits_to(
     content: &str,
     diag_line: usize,
-    target_type: &str,
+    target_type: &PhpType,
 ) -> Option<Vec<TextEdit>> {
     let lines: Vec<&str> = content.lines().collect();
     if diag_line >= lines.len() {
@@ -859,17 +928,433 @@ fn build_change_return_type_edits_to(
     let (paren_line, paren_col) = find_close_paren_before_brace(&lines, brace_line)?;
 
     // ── Step 3: Find the return type hint between `)` and `{` ───────
-    let type_edit = find_return_type_edit(&lines, paren_line, paren_col, brace_line, target_type)?;
+    let target_str = target_type.to_string();
+    let type_edit = find_return_type_edit(&lines, paren_line, paren_col, brace_line, &target_str)?;
     edits.push(type_edit);
 
     // ── Step 4: Find the function signature line ────────────────────
     let func_line = find_func_keyword_line(&lines, paren_line)?;
 
     // ── Step 5: Remove @return from docblock when target is void ────
-    if target_type == "void"
+    if target_type.is_void()
         && let Some(return_tag_edit) = find_and_remove_return_tag(&lines, func_line)
     {
         edits.push(return_tag_edit);
+    }
+
+    Some(edits)
+}
+
+/// The current return type declaration as read from the source text.
+///
+/// Combines the native type hint (`: array`) with the `@return` tag
+/// type (if any) into a single effective type string that can be
+/// compared against our inference result.
+struct CurrentReturnType {
+    /// The native type hint after `:`, e.g. `array`, `int`.
+    /// `None` when the function has no return type declaration.
+    native: Option<PhpType>,
+    /// The `@return` tag type, e.g. `array<int, string>`.
+    /// `None` when there is no docblock or no `@return` tag.
+    docblock: Option<PhpType>,
+}
+
+/// Read the current native return type and `@return` tag type from the
+/// source text around `diag_line` (a return statement inside the body).
+fn read_current_return_type(content: &str, diag_line: usize) -> CurrentReturnType {
+    let lines: Vec<&str> = content.lines().collect();
+    if diag_line >= lines.len() {
+        return CurrentReturnType {
+            native: None,
+            docblock: None,
+        };
+    }
+
+    let brace_line = match find_function_open_brace_line(&lines, diag_line) {
+        Some(l) => l,
+        None => {
+            return CurrentReturnType {
+                native: None,
+                docblock: None,
+            };
+        }
+    };
+    let (paren_line, paren_col) = match find_close_paren_before_brace(&lines, brace_line) {
+        Some(p) => p,
+        None => {
+            return CurrentReturnType {
+                native: None,
+                docblock: None,
+            };
+        }
+    };
+
+    // ── Native type hint ────────────────────────────────────────────
+    let between = gather_between_paren_and_brace(&lines, paren_line, paren_col, brace_line);
+    let native = between.find(':').map(|colon_pos| {
+        let after_colon = &between[colon_pos + 1..];
+        let type_start = after_colon.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+        let type_text = &after_colon[type_start..];
+        let type_len = type_text
+            .find(|c: char| c.is_whitespace() || c == '{')
+            .unwrap_or(type_text.len());
+        PhpType::parse(&type_text[..type_len])
+    });
+
+    // ── @return tag type ────────────────────────────────────────────
+    let func_line = find_func_keyword_line(&lines, paren_line);
+    let docblock = func_line.and_then(|fl| {
+        let info = find_function_docblock(&lines, fl);
+        let tag_line = info.return_tag_line?;
+        let line_text = lines[tag_line];
+        let at_pos = line_text.find("@return")?;
+        let after = &line_text[at_pos + "@return".len()..];
+        let trimmed = after.trim_start();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let (type_token, _remainder) = split_type_token(trimmed);
+        Some(PhpType::parse(type_token))
+    });
+
+    CurrentReturnType { native, docblock }
+}
+
+/// Decide whether to use our own inference or fall back to the
+/// PHPStan tip.
+///
+/// Returns `true` when our inference disagrees with the current
+/// declaration (native hint + `@return` tag) — meaning we can see
+/// the mismatch ourselves and our type is likely more specific
+/// (e.g. `list<int>` vs PHPStan's `array<int, int>`).
+///
+/// Returns `false` when inference failed or agrees with the
+/// declaration — we can't see the bug, so the caller should trust
+/// the PHPStan tip.
+fn should_use_own_inference(our: &Option<InferredReturnType>, current: &CurrentReturnType) -> bool {
+    let Some(inferred) = our else {
+        return false;
+    };
+
+    // The effective type our inference would write (prefers the rich
+    // docblock type, falls back to the native hint).
+    let our_effective = inferred.effective.as_ref().unwrap_or(&inferred.native);
+
+    // The effective type currently declared (prefers the @return tag,
+    // falls back to the native hint).
+    let current_effective = current.docblock.as_ref().or(current.native.as_ref());
+    let Some(current_effective) = current_effective else {
+        return true;
+    };
+    !our_effective.equivalent(current_effective)
+}
+
+/// Build edits using pre-split native and effective types from our
+/// own inference (where native is already a valid PHP type hint).
+///
+/// This is the counterpart of [`build_update_return_type_edits`] for
+/// when we trust our own inference rather than the PHPStan tip.  The
+/// difference is that the caller provides the native/effective split
+/// directly (e.g. native=`array`, effective=`list<int>`) instead of
+/// a single type string that gets split via `PhpType::to_native_hint`.
+fn build_update_return_type_edits_split(
+    content: &str,
+    diag_line: usize,
+    native_type: &PhpType,
+    effective_type: Option<&PhpType>,
+) -> Option<Vec<TextEdit>> {
+    // The effective type is the full type for the @return tag.
+    // If there is no effective type, the native type is used for both
+    // and no docblock is needed.
+    let native_str = native_type.to_string();
+    let full_type = effective_type
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| native_str.clone());
+    let has_docblock_type = effective_type.is_some();
+
+    let lines: Vec<&str> = content.lines().collect();
+    if diag_line >= lines.len() {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+
+    // ── Step 1: Update native type hint ─────────────────────────────
+    let brace_line = find_function_open_brace_line(&lines, diag_line)?;
+    let (paren_line, paren_col) = find_close_paren_before_brace(&lines, brace_line)?;
+
+    if let Some(type_edit) =
+        find_return_type_edit(&lines, paren_line, paren_col, brace_line, &native_str)
+    {
+        edits.push(type_edit);
+    }
+
+    // ── Step 2: Update @return docblock tag ──────────────────────────
+    let func_line = find_func_keyword_line(&lines, paren_line)?;
+    let docblock_info = find_function_docblock(&lines, func_line);
+
+    if docblock_info.has_docblock && docblock_info.has_return_tag {
+        // Replace the existing @return tag's type.
+        if let Some(tag_line) = docblock_info.return_tag_line {
+            let line_text = lines[tag_line];
+            if let Some(at_pos) = line_text.find("@return") {
+                let after_return = &line_text[at_pos + "@return".len()..];
+                let type_start = after_return
+                    .find(|c: char| !c.is_whitespace())
+                    .unwrap_or(after_return.len());
+                let type_text = &after_return[type_start..];
+                let (_, remainder) = split_type_token(type_text);
+                let description = remainder.to_string();
+
+                let new_line = format!(
+                    "{}@return {}{}",
+                    &line_text[..at_pos],
+                    full_type,
+                    description
+                );
+
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position::new(tag_line as u32, 0),
+                        end: Position::new(tag_line as u32, line_text.len() as u32),
+                    },
+                    new_text: new_line,
+                });
+            }
+        }
+    } else if has_docblock_type {
+        // Only create/insert a @return tag when the effective type
+        // differs from the native type.
+        let indent = &docblock_info.indent;
+
+        if docblock_info.has_docblock {
+            let doc_end = docblock_info.doc_end_line;
+            let close_line = lines[doc_end];
+
+            if docblock_info.doc_start_line == doc_end {
+                let trimmed = close_line.trim();
+                let inner = trimmed
+                    .strip_prefix("/**")
+                    .and_then(|s| s.strip_suffix("*/"))
+                    .map(|s| s.trim())
+                    .unwrap_or("");
+
+                let mut new_doc = format!("{}/**\n", indent);
+                if !inner.is_empty() {
+                    new_doc.push_str(&format!("{} * {}\n", indent, inner));
+                    new_doc.push_str(&format!("{} *\n", indent));
+                }
+                new_doc.push_str(&format!("{} * @return {}\n", indent, full_type));
+                new_doc.push_str(&format!("{} */", indent));
+
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position::new(doc_end as u32, 0),
+                        end: Position::new(doc_end as u32, close_line.len() as u32),
+                    },
+                    new_text: new_doc,
+                });
+            } else {
+                let prev_line = if doc_end > docblock_info.doc_start_line {
+                    lines[doc_end - 1].trim()
+                } else {
+                    ""
+                };
+                let prev_trimmed = prev_line.trim_start_matches('*').trim();
+                let needs_separator = !prev_trimmed.is_empty()
+                    && !prev_trimmed.starts_with("@return")
+                    && !prev_trimmed.starts_with("@throws")
+                    && prev_trimmed.starts_with('@');
+
+                let mut insert_text = String::new();
+                if needs_separator {
+                    insert_text.push_str(&format!("{} *\n", indent));
+                }
+                insert_text.push_str(&format!("{} * @return {}\n", indent, full_type));
+
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position::new(doc_end as u32, 0),
+                        end: Position::new(doc_end as u32, 0),
+                    },
+                    new_text: insert_text,
+                });
+            }
+        } else {
+            let new_doc = format!(
+                "{}/**\n{} * @return {}\n{} */\n",
+                indent, indent, full_type, indent
+            );
+            edits.push(TextEdit {
+                range: Range {
+                    start: Position::new(func_line as u32, 0),
+                    end: Position::new(func_line as u32, 0),
+                },
+                new_text: new_doc,
+            });
+        }
+    }
+
+    if edits.is_empty() {
+        return None;
+    }
+
+    Some(edits)
+}
+
+/// Build a list of `TextEdit`s that update both the native return type
+/// hint and the `@return` docblock tag for a `return.type` diagnostic.
+///
+/// The native type is changed to the base type (generics stripped) so
+/// that it remains valid PHP.  The `@return` tag gets the full type
+/// including any generic parameters.
+///
+/// When the actual type has no generics and there is no existing
+/// `@return` tag, only the native type is changed.
+///
+/// Returns `None` if the enclosing function cannot be found.
+fn build_update_return_type_edits(
+    content: &str,
+    diag_line: usize,
+    actual_type: &PhpType,
+) -> Option<Vec<TextEdit>> {
+    let lines: Vec<&str> = content.lines().collect();
+    if diag_line >= lines.len() {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+
+    let actual_str = actual_type.to_string();
+    let base_type = actual_type
+        .to_native_hint()
+        .unwrap_or_else(|| actual_str.clone());
+    let has_generics = base_type != actual_str;
+
+    // ── Step 1: Update native type hint ─────────────────────────────
+    let brace_line = find_function_open_brace_line(&lines, diag_line)?;
+    let (paren_line, paren_col) = find_close_paren_before_brace(&lines, brace_line)?;
+
+    // Only change the native type if the base type differs from the
+    // current native type.
+    if let Some(type_edit) =
+        find_return_type_edit(&lines, paren_line, paren_col, brace_line, &base_type)
+    {
+        edits.push(type_edit);
+    }
+
+    // ── Step 2: Update @return docblock tag ──────────────────────────
+    let func_line = find_func_keyword_line(&lines, paren_line)?;
+    let docblock_info = find_function_docblock(&lines, func_line);
+
+    if docblock_info.has_docblock && docblock_info.has_return_tag {
+        // Replace the existing @return tag's type.
+        if let Some(tag_line) = docblock_info.return_tag_line {
+            let line_text = lines[tag_line];
+            if let Some(at_pos) = line_text.find("@return") {
+                let after_return = &line_text[at_pos + "@return".len()..];
+                let type_start = after_return
+                    .find(|c: char| !c.is_whitespace())
+                    .unwrap_or(after_return.len());
+                let type_text = &after_return[type_start..];
+                let (_, remainder) = split_type_token(type_text);
+                let description = remainder.to_string();
+
+                let new_line = format!(
+                    "{}@return {}{}",
+                    &line_text[..at_pos],
+                    actual_str,
+                    description
+                );
+
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position::new(tag_line as u32, 0),
+                        end: Position::new(tag_line as u32, line_text.len() as u32),
+                    },
+                    new_text: new_line,
+                });
+            }
+        }
+    } else if has_generics {
+        // Only create/insert a @return tag when the actual type has
+        // generics — otherwise the native type hint is sufficient.
+        let indent = &docblock_info.indent;
+
+        if docblock_info.has_docblock {
+            // Docblock exists but has no @return tag — insert one.
+            let doc_end = docblock_info.doc_end_line;
+            let close_line = lines[doc_end];
+
+            if docblock_info.doc_start_line == doc_end {
+                // Single-line docblock: convert to multi-line.
+                let trimmed = close_line.trim();
+                let inner = trimmed
+                    .strip_prefix("/**")
+                    .and_then(|s| s.strip_suffix("*/"))
+                    .map(|s| s.trim())
+                    .unwrap_or("");
+
+                let mut new_doc = format!("{}/**\n", indent);
+                if !inner.is_empty() {
+                    new_doc.push_str(&format!("{} * {}\n", indent, inner));
+                    new_doc.push_str(&format!("{} *\n", indent));
+                }
+                new_doc.push_str(&format!("{} * @return {}\n", indent, actual_str));
+                new_doc.push_str(&format!("{} */", indent));
+
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position::new(doc_end as u32, 0),
+                        end: Position::new(doc_end as u32, close_line.len() as u32),
+                    },
+                    new_text: new_doc,
+                });
+            } else {
+                // Multi-line docblock: insert @return before `*/`.
+                let prev_line = if doc_end > docblock_info.doc_start_line {
+                    lines[doc_end - 1].trim()
+                } else {
+                    ""
+                };
+                let prev_trimmed = prev_line.trim_start_matches('*').trim();
+                let needs_separator = !prev_trimmed.is_empty()
+                    && !prev_trimmed.starts_with("@return")
+                    && !prev_trimmed.starts_with("@throws")
+                    && prev_trimmed.starts_with('@');
+
+                let mut insert_text = String::new();
+                if needs_separator {
+                    insert_text.push_str(&format!("{} *\n", indent));
+                }
+                insert_text.push_str(&format!("{} * @return {}\n", indent, actual_str));
+
+                edits.push(TextEdit {
+                    range: Range {
+                        start: Position::new(doc_end as u32, 0),
+                        end: Position::new(doc_end as u32, 0),
+                    },
+                    new_text: insert_text,
+                });
+            }
+        } else {
+            // No existing docblock — create one with `@return`.
+            let new_doc = format!(
+                "{}/**\n{} * @return {}\n{} */\n",
+                indent, indent, actual_str, indent
+            );
+            edits.push(TextEdit {
+                range: Range {
+                    start: Position::new(func_line as u32, 0),
+                    end: Position::new(func_line as u32, 0),
+                },
+                new_text: new_doc,
+            });
+        }
+    }
+
+    if edits.is_empty() {
+        return None;
     }
 
     Some(edits)
@@ -881,9 +1366,9 @@ fn build_change_return_type_edits_to(
 /// Message format:
 /// `{desc} with return type void returns {actual} but should not return anything.`
 ///
-/// Returns the `{actual}` type string, or `None` if the message
-/// doesn't match.
-fn extract_actual_type(message: &str) -> Option<&str> {
+/// Returns the `{actual}` type as a `PhpType`, or `None` if the
+/// message doesn't match.
+fn extract_actual_type(message: &str) -> Option<PhpType> {
     let marker = " returns ";
     let start = message.find(marker)? + marker.len();
     let rest = &message[start..];
@@ -892,7 +1377,7 @@ fn extract_actual_type(message: &str) -> Option<&str> {
     if actual.is_empty() {
         return None;
     }
-    Some(actual)
+    Some(PhpType::parse(actual))
 }
 
 /// Extract the actual return type from a `return.type` diagnostic
@@ -901,9 +1386,9 @@ fn extract_actual_type(message: &str) -> Option<&str> {
 /// Message format:
 /// `{desc} should return {expected} but returns {actual}.`
 ///
-/// Returns the `{actual}` type string, or `None` if the message
-/// doesn't match.
-fn extract_return_type_actual(message: &str) -> Option<&str> {
+/// Returns the `{actual}` type as a `PhpType`, or `None` if the
+/// message doesn't match.
+fn extract_return_type_actual(message: &str) -> Option<PhpType> {
     let marker = " but returns ";
     let start = message.find(marker)? + marker.len();
     let rest = &message[start..];
@@ -912,46 +1397,25 @@ fn extract_return_type_actual(message: &str) -> Option<&str> {
     if actual.is_empty() {
         return None;
     }
-    Some(actual)
+    Some(PhpType::parse(actual))
 }
 
 /// Infer a PHP type from a literal return expression (cheap, no
 /// resolution needed).
 ///
+/// Delegates to the shared `crate::util::infer_type_from_literal()`
+/// for basic scalar/null/string/empty-array literals, then handles
+/// extended cases (array literals with elements, `new ClassName()`).
+///
 /// Returns `None` for anything that isn't a simple literal — the
 /// caller should fall back to the full type resolver for those.
-fn infer_type_from_literal(expr: &str) -> Option<String> {
-    // Integer literal.
-    if expr.parse::<i64>().is_ok() {
-        return Some("int".to_string());
+fn infer_type_from_literal(expr: &str) -> Option<PhpType> {
+    // Try the shared utility for basic literals.
+    if let Some(t) = crate::util::infer_type_from_literal(expr) {
+        return Some(t);
     }
 
-    // Float literal.
-    if expr.contains('.') && expr.parse::<f64>().is_ok() {
-        return Some("float".to_string());
-    }
-
-    // Boolean literals.
-    if expr == "true" || expr == "false" {
-        return Some("bool".to_string());
-    }
-
-    // Null.
-    if expr == "null" {
-        return Some("null".to_string());
-    }
-
-    // String literals.
-    if (expr.starts_with('\'') && expr.ends_with('\''))
-        || (expr.starts_with('"') && expr.ends_with('"'))
-    {
-        return Some("string".to_string());
-    }
-
-    // Array literal.
-    if expr == "[]" {
-        return Some("array".to_string());
-    }
+    // Array literal with elements.
     if expr.starts_with('[') && expr.ends_with(']') {
         return infer_array_literal_type(&expr[1..expr.len() - 1]);
     }
@@ -967,7 +1431,7 @@ fn infer_type_from_literal(expr: &str) -> Option<String> {
             .unwrap_or("")
             .trim();
         if !class_name.is_empty() {
-            return Some(class_name.to_string());
+            return Some(PhpType::Named(class_name.to_string()));
         }
     }
 
@@ -981,20 +1445,20 @@ fn infer_type_from_literal(expr: &str) -> Option<String> {
 /// (e.g. `['a', 'b']` → `list<string>`, `[1, 2, 3]` → `list<int>`).
 /// Key-value pairs with string keys produce `array<string, V>`.
 /// Falls back to `array` when elements are mixed or too complex.
-fn infer_array_literal_type(inner: &str) -> Option<String> {
+fn infer_array_literal_type(inner: &str) -> Option<PhpType> {
     let inner = inner.trim();
     if inner.is_empty() {
-        return Some("array".to_string());
+        return Some(PhpType::array());
     }
 
     // Split on commas at the top level (not inside nested brackets,
     // parens, or strings).
     let elements = split_array_elements(inner);
     if elements.is_empty() {
-        return Some("array".to_string());
+        return Some(PhpType::array());
     }
 
-    let mut value_types: Vec<String> = Vec::new();
+    let mut value_types: Vec<PhpType> = Vec::new();
     let mut has_string_keys = false;
     let mut has_int_keys = false;
 
@@ -1017,43 +1481,49 @@ fn infer_array_literal_type(inner: &str) -> Option<String> {
                 has_int_keys = true;
             } else {
                 // Complex key expression — bail.
-                return Some("array".to_string());
+                return Some(PhpType::array());
             }
 
             match infer_type_from_literal(value) {
                 Some(t) => value_types.push(t),
-                None => return Some("array".to_string()),
+                None => return Some(PhpType::array()),
             }
         } else {
             // Sequential element (no key).
             match infer_type_from_literal(elem) {
                 Some(t) => value_types.push(t),
-                None => return Some("array".to_string()),
+                None => return Some(PhpType::array()),
             }
         }
     }
 
     if value_types.is_empty() {
-        return Some("array".to_string());
+        return Some(PhpType::array());
     }
 
     // Deduplicate value types.
-    value_types.sort();
-    value_types.dedup();
+    let mut deduped: Vec<PhpType> = Vec::with_capacity(value_types.len());
+    for ty in &value_types {
+        if !deduped.iter().any(|existing| existing.equivalent(ty)) {
+            deduped.push(ty.clone());
+        }
+    }
 
-    let value_union = if value_types.len() <= 3 {
-        value_types.join("|")
+    let value_union_type = if deduped.len() > 3 {
+        PhpType::mixed()
+    } else if deduped.len() == 1 {
+        deduped.into_iter().next().unwrap()
     } else {
-        "mixed".to_string()
+        PhpType::Union(deduped)
     };
 
     if has_string_keys && !has_int_keys {
-        Some(format!("array<string, {}>", value_union))
+        Some(PhpType::generic_array(PhpType::string(), value_union_type))
     } else if has_string_keys {
         // Mixed key types — just use array with value type.
-        Some(format!("array<{}>", value_union))
+        Some(PhpType::generic_array_val(value_union_type))
     } else {
-        Some(format!("list<{}>", value_union))
+        Some(PhpType::list(value_union_type))
     }
 }
 
@@ -1531,7 +2001,7 @@ pub(crate) fn is_fix_return_type_stale(content: &str, diag_line: usize, identifi
                     .split(|c: char| c.is_whitespace() || c == '{')
                     .next()
                     .unwrap_or("");
-                type_word == "void"
+                PhpType::parse(type_word).is_void()
             } else {
                 false
             }
@@ -1643,7 +2113,7 @@ mod tests {
     #[test]
     fn changes_return_type_to_void() {
         let content = "<?php\nfunction foo(): int {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 2, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 2, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 1);
         let edit = &edits[0];
         assert_eq!(edit.new_text, ": void");
@@ -1657,7 +2127,7 @@ mod tests {
     #[test]
     fn changes_return_type_string() {
         let content = "<?php\nfunction foo(): string {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 2, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 2, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, ": void");
     }
@@ -1665,7 +2135,7 @@ mod tests {
     #[test]
     fn changes_return_type_to_actual() {
         let content = "<?php\nfunction foo(): void {\n    return 42;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 2, "int").unwrap();
+        let edits = build_change_return_type_edits_to(content, 2, &PhpType::parse("int")).unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, ": int");
     }
@@ -1673,7 +2143,8 @@ mod tests {
     #[test]
     fn changes_void_to_string() {
         let content = "<?php\nfunction foo(): void {\n    return 'hello';\n}\n";
-        let edits = build_change_return_type_edits_to(content, 2, "string").unwrap();
+        let edits =
+            build_change_return_type_edits_to(content, 2, &PhpType::parse("string")).unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, ": string");
     }
@@ -1681,7 +2152,7 @@ mod tests {
     #[test]
     fn changes_nullable_return_type() {
         let content = "<?php\nfunction foo(): ?string {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 2, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 2, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, ": void");
     }
@@ -1690,7 +2161,7 @@ mod tests {
     fn changes_return_type_and_removes_return_tag() {
         let content =
             "<?php\n/**\n * @return int The value\n */\nfunction foo(): int {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 5, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 5, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 2);
 
         // One edit replaces the type, one removes the @return line.
@@ -1708,26 +2179,26 @@ mod tests {
     #[test]
     fn does_not_change_when_already_void() {
         let content = "<?php\nfunction foo(): void {\n    return;\n}\n";
-        assert!(build_change_return_type_edits_to(content, 2, "void").is_none());
+        assert!(build_change_return_type_edits_to(content, 2, &PhpType::void()).is_none());
     }
 
     #[test]
     fn does_not_change_when_already_matches_actual() {
         let content = "<?php\nfunction foo(): int {\n    return 42;\n}\n";
-        assert!(build_change_return_type_edits_to(content, 2, "int").is_none());
+        assert!(build_change_return_type_edits_to(content, 2, &PhpType::parse("int")).is_none());
     }
 
     #[test]
     fn returns_none_when_no_function_found() {
         let content = "<?php\nreturn;\n";
-        assert!(build_change_return_type_edits_to(content, 1, "void").is_none());
+        assert!(build_change_return_type_edits_to(content, 1, &PhpType::void()).is_none());
     }
 
     #[test]
     fn changes_method_return_type() {
         let content =
             "<?php\nclass Foo {\n    public function bar(): string {\n        return;\n    }\n}\n";
-        let edits = build_change_return_type_edits_to(content, 3, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 3, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, ": void");
     }
@@ -1786,27 +2257,27 @@ mod tests {
     fn extracts_actual_type_int() {
         let msg =
             "Method Foo::bar() with return type void returns int but should not return anything.";
-        assert_eq!(extract_actual_type(msg), Some("int"));
+        assert_eq!(extract_actual_type(msg), Some(PhpType::parse("int")));
     }
 
     #[test]
     fn extracts_actual_type_string() {
         let msg =
             "Function foo() with return type void returns string but should not return anything.";
-        assert_eq!(extract_actual_type(msg), Some("string"));
+        assert_eq!(extract_actual_type(msg), Some(PhpType::parse("string")));
     }
 
     #[test]
     fn extracts_actual_type_union() {
         let msg = "Method X::y() with return type void returns int|string but should not return anything.";
-        assert_eq!(extract_actual_type(msg), Some("int|string"));
+        assert_eq!(extract_actual_type(msg), Some(PhpType::parse("int|string")));
     }
 
     #[test]
     fn extracts_actual_type_null() {
         let msg =
             "Method X::y() with return type void returns null but should not return anything.";
-        assert_eq!(extract_actual_type(msg), Some("null"));
+        assert_eq!(extract_actual_type(msg), Some(PhpType::parse("null")));
     }
 
     #[test]
@@ -1820,19 +2291,25 @@ mod tests {
     #[test]
     fn extracts_return_type_actual_int() {
         let msg = "Method Foo::bar() should return string but returns int.";
-        assert_eq!(extract_return_type_actual(msg), Some("int"));
+        assert_eq!(extract_return_type_actual(msg), Some(PhpType::parse("int")));
     }
 
     #[test]
     fn extracts_return_type_actual_union() {
         let msg = "Function foo() should return int but returns int|string.";
-        assert_eq!(extract_return_type_actual(msg), Some("int|string"));
+        assert_eq!(
+            extract_return_type_actual(msg),
+            Some(PhpType::parse("int|string"))
+        );
     }
 
     #[test]
     fn extracts_return_type_actual_class() {
         let msg = "Method X::y() should return self but returns App\\Models\\User.";
-        assert_eq!(extract_return_type_actual(msg), Some("App\\Models\\User"));
+        assert_eq!(
+            extract_return_type_actual(msg),
+            Some(PhpType::parse("App\\Models\\User"))
+        );
     }
 
     #[test]
@@ -1861,46 +2338,64 @@ mod tests {
 
     #[test]
     fn literal_int() {
-        assert_eq!(infer_type_from_literal("42"), Some("int".to_string()));
-        assert_eq!(infer_type_from_literal("-1"), Some("int".to_string()));
+        assert_eq!(
+            infer_type_from_literal("42").map(|t| t.to_string()),
+            Some("int".to_string())
+        );
+        assert_eq!(
+            infer_type_from_literal("-1").map(|t| t.to_string()),
+            Some("int".to_string())
+        );
     }
 
     #[test]
     fn literal_float() {
-        assert_eq!(infer_type_from_literal("1.5"), Some("float".to_string()));
+        assert_eq!(
+            infer_type_from_literal("1.5").map(|t| t.to_string()),
+            Some("float".to_string())
+        );
     }
 
     #[test]
     fn literal_bool() {
-        assert_eq!(infer_type_from_literal("true"), Some("bool".to_string()));
-        assert_eq!(infer_type_from_literal("false"), Some("bool".to_string()));
+        assert_eq!(
+            infer_type_from_literal("true").map(|t| t.to_string()),
+            Some("bool".to_string())
+        );
+        assert_eq!(
+            infer_type_from_literal("false").map(|t| t.to_string()),
+            Some("bool".to_string())
+        );
     }
 
     #[test]
     fn literal_string() {
         assert_eq!(
-            infer_type_from_literal("'hello'"),
+            infer_type_from_literal("'hello'").map(|t| t.to_string()),
             Some("string".to_string())
         );
         assert_eq!(
-            infer_type_from_literal("\"world\""),
+            infer_type_from_literal("\"world\"").map(|t| t.to_string()),
             Some("string".to_string())
         );
     }
 
     #[test]
     fn literal_array_empty() {
-        assert_eq!(infer_type_from_literal("[]"), Some("array".to_string()));
+        assert_eq!(
+            infer_type_from_literal("[]").map(|t| t.to_string()),
+            Some("array".to_string())
+        );
     }
 
     #[test]
     fn literal_array_of_strings() {
         assert_eq!(
-            infer_type_from_literal("['string']"),
+            infer_type_from_literal("['string']").map(|t| t.to_string()),
             Some("list<string>".to_string())
         );
         assert_eq!(
-            infer_type_from_literal("['a', 'b', 'c']"),
+            infer_type_from_literal("['a', 'b', 'c']").map(|t| t.to_string()),
             Some("list<string>".to_string())
         );
     }
@@ -1908,7 +2403,7 @@ mod tests {
     #[test]
     fn literal_array_of_ints() {
         assert_eq!(
-            infer_type_from_literal("[1, 2, 3]"),
+            infer_type_from_literal("[1, 2, 3]").map(|t| t.to_string()),
             Some("list<int>".to_string())
         );
     }
@@ -1916,27 +2411,27 @@ mod tests {
     #[test]
     fn literal_array_mixed_scalars() {
         assert_eq!(
-            infer_type_from_literal("['a', 1]"),
-            Some("list<int|string>".to_string())
+            infer_type_from_literal("['a', 1]").map(|t| t.to_string()),
+            Some("list<string|int>".to_string())
         );
     }
 
     #[test]
     fn literal_array_with_string_keys() {
         assert_eq!(
-            infer_type_from_literal("['key' => 'value']"),
+            infer_type_from_literal("['key' => 'value']").map(|t| t.to_string()),
             Some("array<string, string>".to_string())
         );
         assert_eq!(
-            infer_type_from_literal("['name' => 'Alice', 'age' => 42]"),
-            Some("array<string, int|string>".to_string())
+            infer_type_from_literal("['name' => 'Alice', 'age' => 42]").map(|t| t.to_string()),
+            Some("array<string, string|int>".to_string())
         );
     }
 
     #[test]
     fn literal_array_nested() {
         assert_eq!(
-            infer_type_from_literal("[['a'], ['b']]"),
+            infer_type_from_literal("[['a'], ['b']]").map(|t| t.to_string()),
             Some("list<list<string>>".to_string())
         );
     }
@@ -1944,7 +2439,7 @@ mod tests {
     #[test]
     fn literal_array_with_variable_falls_back() {
         assert_eq!(
-            infer_type_from_literal("[$var, 'a']"),
+            infer_type_from_literal("[$var, 'a']").map(|t| t.to_string()),
             Some("array".to_string())
         );
     }
@@ -1952,7 +2447,7 @@ mod tests {
     #[test]
     fn literal_array_legacy_syntax() {
         assert_eq!(
-            infer_type_from_literal("array('a', 'b')"),
+            infer_type_from_literal("array('a', 'b')").map(|t| t.to_string()),
             Some("list<string>".to_string())
         );
     }
@@ -1960,7 +2455,7 @@ mod tests {
     #[test]
     fn literal_array_new_objects() {
         assert_eq!(
-            infer_type_from_literal("[new Foo(), new Foo()]"),
+            infer_type_from_literal("[new Foo(), new Foo()]").map(|t| t.to_string()),
             Some("list<Foo>".to_string())
         );
     }
@@ -1968,7 +2463,7 @@ mod tests {
     #[test]
     fn literal_array_trailing_comma() {
         assert_eq!(
-            infer_type_from_literal("['a', 'b',]"),
+            infer_type_from_literal("['a', 'b',]").map(|t| t.to_string()),
             Some("list<string>".to_string())
         );
     }
@@ -1976,14 +2471,17 @@ mod tests {
     #[test]
     fn literal_new_class() {
         assert_eq!(
-            infer_type_from_literal("new Foo()"),
+            infer_type_from_literal("new Foo()").map(|t| t.to_string()),
             Some("Foo".to_string())
         );
     }
 
     #[test]
     fn literal_null() {
-        assert_eq!(infer_type_from_literal("null"), Some("null".to_string()));
+        assert_eq!(
+            infer_type_from_literal("null").map(|t| t.to_string()),
+            Some("null".to_string())
+        );
     }
 
     #[test]
@@ -2053,7 +2551,7 @@ mod tests {
     #[test]
     fn change_to_actual_does_not_remove_return_tag() {
         let content = "<?php\n/**\n * @return int The value\n */\nfunction foo(): void {\n    return 42;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 5, "int").unwrap();
+        let edits = build_change_return_type_edits_to(content, 5, &PhpType::parse("int")).unwrap();
         // Should only change the type hint, NOT remove the @return tag
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, ": int");
@@ -2077,7 +2575,7 @@ mod tests {
     #[test]
     fn removes_return_tag_from_multiline_docblock() {
         let content = "<?php\n/**\n * Does something.\n * @return int\n */\nfunction foo(): int {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 6, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 6, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 2);
         let tag_edit = edits.iter().find(|e| e.new_text.is_empty()).unwrap();
         assert_eq!(tag_edit.range.start.line, 3);
@@ -2087,7 +2585,7 @@ mod tests {
     #[test]
     fn no_return_tag_edit_when_no_docblock() {
         let content = "<?php\nfunction foo(): int {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 2, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 2, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 1); // Only the type edit, no tag edit.
     }
 
@@ -2095,7 +2593,7 @@ mod tests {
     fn no_return_tag_edit_when_docblock_has_no_return() {
         let content =
             "<?php\n/**\n * Does something.\n */\nfunction foo(): int {\n    return;\n}\n";
-        let edits = build_change_return_type_edits_to(content, 5, "void").unwrap();
+        let edits = build_change_return_type_edits_to(content, 5, &PhpType::void()).unwrap();
         assert_eq!(edits.len(), 1); // Only the type edit, no tag edit.
     }
 
@@ -2176,5 +2674,169 @@ mod tests {
         // because the line no longer has `return ` (it now has `42;`).
         let after = "<?php\nfunction foo(): void {\n    42;\n}\n";
         assert!(is_fix_return_type_stale(after, 2, "return.void"));
+    }
+
+    // ── PhpType::to_native_hint (replaces strip_generic_params) ────
+
+    #[test]
+    fn strip_generic_simple_type() {
+        let parsed = PhpType::parse("int");
+        assert_eq!(
+            parsed.to_native_hint().unwrap_or_else(|| "int".to_string()),
+            "int"
+        );
+    }
+
+    #[test]
+    fn strip_generic_array_with_params() {
+        let parsed = PhpType::parse("array<int, string>");
+        assert_eq!(
+            parsed
+                .to_native_hint()
+                .unwrap_or_else(|| "array<int, string>".to_string()),
+            "array"
+        );
+    }
+
+    #[test]
+    fn strip_generic_nested() {
+        let parsed = PhpType::parse("array<int, array<string, bool>>");
+        assert_eq!(
+            parsed
+                .to_native_hint()
+                .unwrap_or_else(|| "array<int, array<string, bool>>".to_string()),
+            "array"
+        );
+    }
+
+    #[test]
+    fn strip_generic_union_no_generics() {
+        let parsed = PhpType::parse("int|string");
+        assert_eq!(
+            parsed
+                .to_native_hint()
+                .unwrap_or_else(|| "int|string".to_string()),
+            "int|string"
+        );
+    }
+
+    // ── split_type_token (replaces find_phpdoc_type_end) ───────────
+
+    #[test]
+    fn phpdoc_type_end_simple() {
+        let (tok, _) = split_type_token("int The value");
+        assert_eq!(tok, "int");
+    }
+
+    #[test]
+    fn phpdoc_type_end_generic() {
+        let (tok, _) = split_type_token("array<int, string> The value");
+        assert_eq!(tok, "array<int, string>");
+    }
+
+    #[test]
+    fn phpdoc_type_end_nested_generic() {
+        let (tok, _) = split_type_token("array<int, array<string, bool>> desc");
+        assert_eq!(tok, "array<int, array<string, bool>>");
+    }
+
+    #[test]
+    fn phpdoc_type_end_no_description() {
+        let (tok, _) = split_type_token("int");
+        assert_eq!(tok, "int");
+    }
+
+    #[test]
+    fn phpdoc_type_end_generic_no_description() {
+        let (tok, _) = split_type_token("array<int, string>");
+        assert_eq!(tok, "array<int, string>");
+    }
+
+    // ── build_update_return_type_edits ─────────────────────────────
+
+    #[test]
+    fn update_return_type_simple_changes_native_only() {
+        // Simple type (no generics) — only native type hint changes.
+        let content = "<?php\nfunction foo(): string {\n    return 42;\n}\n";
+        let edits = build_update_return_type_edits(content, 2, &PhpType::parse("int")).unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, ": int");
+    }
+
+    #[test]
+    fn update_return_type_generic_keeps_native_adds_docblock() {
+        // Generic type — native stays `array`, docblock gets `array<int, int>`.
+        let content = "<?php\nfunction foo(): array {\n    return [1, 2, 3];\n}\n";
+        let edits =
+            build_update_return_type_edits(content, 2, &PhpType::parse("array<int, int>")).unwrap();
+        // Should only have docblock edit (native `array` already matches).
+        assert_eq!(edits.len(), 1);
+        assert!(
+            edits[0].new_text.contains("@return array<int, int>"),
+            "should create @return with generic type: {:?}",
+            edits[0].new_text
+        );
+    }
+
+    #[test]
+    fn update_return_type_generic_changes_native_and_docblock() {
+        // Native type differs AND has generics.
+        let content = "<?php\nfunction foo(): string {\n    return [1, 2, 3];\n}\n";
+        let edits =
+            build_update_return_type_edits(content, 2, &PhpType::parse("array<int, int>")).unwrap();
+        assert_eq!(edits.len(), 2);
+        // One edit for the native type, one for the docblock.
+        let type_edit = edits.iter().find(|e| e.new_text == ": array").unwrap();
+        assert!(type_edit.range.start.line == 1);
+        let doc_edit = edits
+            .iter()
+            .find(|e| e.new_text.contains("@return array<int, int>"))
+            .unwrap();
+        assert!(doc_edit.range.start.line == 1); // inserted before function
+    }
+
+    #[test]
+    fn update_return_type_replaces_existing_generic_return_tag() {
+        // Existing @return with generics — should be fully replaced.
+        let content = "<?php\n/**\n * @return array<int, string>\n */\nfunction foo(): array {\n    return [1, 2, 3];\n}\n";
+        let edits =
+            build_update_return_type_edits(content, 5, &PhpType::parse("array<int, int>")).unwrap();
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        assert!(
+            edit.new_text.contains("@return array<int, int>"),
+            "should replace generic type: {}",
+            edit.new_text
+        );
+        // Old type should not remain.
+        assert!(
+            !edit.new_text.contains("string>"),
+            "old generic params should be gone: {}",
+            edit.new_text
+        );
+    }
+
+    #[test]
+    fn update_return_type_preserves_description_with_generics() {
+        let content = "<?php\n/**\n * @return array<int, string> The data\n */\nfunction foo(): array {\n    return [1, 2, 3];\n}\n";
+        let edits =
+            build_update_return_type_edits(content, 5, &PhpType::parse("array<int, int>")).unwrap();
+        assert_eq!(edits.len(), 1);
+        assert!(
+            edits[0].new_text.contains("@return array<int, int>"),
+            "should have new type: {}",
+            edits[0].new_text
+        );
+        assert!(
+            edits[0].new_text.contains("The data"),
+            "should preserve description: {}",
+            edits[0].new_text
+        );
+    }
+
+    #[test]
+    fn update_return_type_returns_none_when_already_correct() {
+        let content = "<?php\nfunction foo(): int {\n    return 42;\n}\n";
+        assert!(build_update_return_type_edits(content, 2, &PhpType::parse("int")).is_none());
     }
 }

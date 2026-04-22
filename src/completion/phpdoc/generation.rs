@@ -53,6 +53,7 @@ use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader};
+use crate::util::{byte_offset_to_utf16_col, utf16_col_to_byte_offset};
 
 /// Detect whether the cursor is immediately after a `/**` trigger and,
 /// if so, generate a full docblock completion item.
@@ -81,7 +82,13 @@ pub fn try_generate_docblock(
         return None;
     }
 
-    let sym = parse_declaration_info(&remaining);
+    let mut sym = parse_declaration_info(&remaining);
+
+    // For untyped properties, try to fill in the type from the parsed
+    // class data (e.g. constructor-inferred `$this->prop = new Foo()`).
+    if matches!(context, DocblockContext::Property) && sym.type_hint.is_none() {
+        enrich_property_type_from_class(&mut sym, content, position, local_classes);
+    }
 
     let snippet = build_docblock_snippet(
         &context,
@@ -175,7 +182,13 @@ pub fn try_generate_docblock_on_enter(
         return None;
     }
 
-    let sym = parse_declaration_info(&after_block);
+    let mut sym = parse_declaration_info(&after_block);
+
+    // For untyped properties, try to fill in the type from the parsed
+    // class data (e.g. constructor-inferred `$this->prop = new Foo()`).
+    if matches!(context, DocblockContext::Property) && sym.type_hint.is_none() {
+        enrich_property_type_from_class(&mut sym, content, position, local_classes);
+    }
 
     // Build the docblock as plain text (no snippet tab stops).
     let plain = build_docblock_plain(
@@ -386,7 +399,12 @@ fn detect_docblock_trigger(content: &str, position: Position) -> Option<(Range, 
     }
 
     let line = lines[line_idx];
-    let col = position.character as usize;
+
+    // Convert the UTF-16 column offset to a byte offset within the line.
+    // LSP positions use UTF-16 code units, which diverge from byte offsets
+    // when the line contains multibyte characters (e.g. "ń" is 2 bytes in
+    // UTF-8 but 1 UTF-16 code unit).
+    let col = utf16_col_to_byte_offset(line, position.character);
 
     // The cursor column must be at least 3 (for `/**`).
     if col < 3 {
@@ -412,7 +430,7 @@ fn detect_docblock_trigger(content: &str, position: Position) -> Option<(Range, 
     }
 
     // Check what follows the `/**` on this line.
-    let after_trigger = &line[col..];
+    let after_trigger = if col <= line.len() { &line[col..] } else { "" };
 
     // Editors like VS Code auto-close `/**` into `/** */` on the same
     // line.  We allow this when the only thing after `/**` is optional
@@ -446,14 +464,13 @@ fn detect_docblock_trigger(content: &str, position: Position) -> Option<(Range, 
     }
 
     let indent = prefix.to_string();
-    let start_col = (col - 3) as u32;
 
-    // If the editor auto-closed `/** */`, extend the range to cover
-    // the closing `*/` so the snippet replaces the entire block.
+    // Convert byte offsets back to UTF-16 columns for the LSP Range.
+    let start_col = byte_offset_to_utf16_col(line, col - 3);
     let end_col = if after_trigger.contains("*/") {
-        line.len() as u32
+        byte_offset_to_utf16_col(line, line.len())
     } else {
-        col as u32
+        byte_offset_to_utf16_col(line, col)
     };
 
     let range = Range {
@@ -749,7 +766,7 @@ fn extract_class_supertypes(decl: &str) -> (Vec<String>, Vec<String>) {
 }
 
 /// Parse a comma-separated parameter list into `(type_hint, $name)` pairs.
-fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
+fn parse_params(params_str: &str) -> Vec<(Option<PhpType>, String)> {
     if params_str.trim().is_empty() {
         return Vec::new();
     }
@@ -798,7 +815,7 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
             let type_hint = if type_parts.is_empty() {
                 None
             } else {
-                Some(type_parts.join(" "))
+                Some(PhpType::parse(&type_parts.join(" ")))
             };
             result.push((type_hint, name));
         }
@@ -808,7 +825,7 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
 }
 
 /// Extract the return type from the text after the closing `)`.
-fn extract_return_type_from_decl(after_close: &str) -> Option<String> {
+fn extract_return_type_from_decl(after_close: &str) -> Option<PhpType> {
     // Look for `: Type` pattern.
     let trimmed = after_close.trim_start();
     if !trimmed.starts_with(':') {
@@ -836,12 +853,60 @@ fn extract_return_type_from_decl(after_close: &str) -> Option<String> {
     if ret_type.is_empty() {
         None
     } else {
-        Some(ret_type.to_string())
+        Some(PhpType::parse(ret_type))
     }
 }
 
 /// Extract the type hint from a property or constant declaration.
-fn extract_property_type(decl: &str) -> Option<String> {
+/// Enrich an untyped property's [`SymbolInfo::type_hint`] by looking up
+/// the property in the file's parsed class data.
+///
+/// When a property has no native type hint or docblock, the constructor-
+/// inference pass in `extract_class_like_members` may have filled in a
+/// type from `$this->prop = new ClassName()` or a promoted parameter
+/// default.  This function finds that inferred type and copies it into
+/// `sym` so that the generated `@var` tag uses the concrete class name
+/// instead of `mixed`.
+///
+/// The type is shortened (leading namespace segments stripped) for
+/// readability in the generated docblock.
+fn enrich_property_type_from_class(
+    sym: &mut SymbolInfo,
+    content: &str,
+    position: Position,
+    local_classes: &[Arc<ClassInfo>],
+) {
+    // Extract the bare property name (strip the `$` prefix).
+    let prop_name = sym
+        .variable_name
+        .as_ref()
+        .and_then(|v| v.strip_prefix('$'))
+        .unwrap_or("");
+    if prop_name.is_empty() {
+        return;
+    }
+
+    // Find the enclosing class by byte offset.
+    let cursor_offset = position_to_byte_offset(content, position) as u32;
+    let enclosing = local_classes
+        .iter()
+        .find(|cls| cls.start_offset <= cursor_offset && cursor_offset <= cls.end_offset);
+    let Some(cls) = enclosing else {
+        return;
+    };
+
+    // Look up the property.  Only use the type when it was inferred
+    // (the native_type_hint is None — if it were set, the source-text
+    // parser would already have extracted it).
+    if let Some(prop) = cls.properties.iter().find(|p| p.name == prop_name)
+        && prop.native_type_hint.is_none()
+        && let Some(ref inferred) = prop.type_hint
+    {
+        sym.type_hint = Some(inferred.shorten());
+    }
+}
+
+fn extract_property_type(decl: &str) -> Option<PhpType> {
     // Strip modifiers.
     let modifiers = [
         "public",
@@ -913,20 +978,30 @@ fn extract_property_type(decl: &str) -> Option<String> {
     if type_str.is_empty() {
         None
     } else {
-        Some(type_str.to_string())
+        Some(PhpType::parse(type_str))
     }
 }
 
 // ─── Type Enrichment Helpers ────────────────────────────────────────────────
 
-/// PHP scalar / built-in types that never have template parameters.
-const NON_CLASS_TYPES: &[&str] = &[
-    "int", "float", "string", "bool", "true", "false", "null", "void", "never", "mixed", "object",
-    "iterable", "resource", "self", "static", "parent",
-];
+/// Check whether a `PhpType` is a bare callable/Closure keyword (no signature).
+fn is_callable_keyword(pt: &PhpType) -> bool {
+    pt.is_callable()
+}
 
-/// Types that need a callable-signature placeholder in PHPDoc.
-const CALLABLE_TYPES: &[&str] = &["callable", "Closure"];
+/// Check whether a `PhpType` is a bare `array` keyword (no generic params).
+fn is_bare_array(pt: &PhpType) -> bool {
+    pt.is_bare_array()
+}
+
+/// Extract the callable display name from a `PhpType` that satisfies
+/// `is_callable_keyword`.
+fn callable_display_name(pt: &PhpType) -> &str {
+    match pt {
+        PhpType::Named(s) => s.as_str(),
+        _ => "callable",
+    }
+}
 
 /// Determine whether a native type hint "needs enrichment" via a PHPDoc
 /// tag, and if so return the tag type string to use.
@@ -939,65 +1014,60 @@ const CALLABLE_TYPES: &[&str] = &["callable", "Closure"];
 /// - `array` → `"${N:array}"` (snippet) or `"array"` (plain)
 /// - Class with templates → `"ClassName<${N:T1}, ${N+1:T2}>"` or plain equivalent
 pub(crate) fn enrichment_snippet(
-    type_hint: &Option<String>,
+    type_hint: Option<&PhpType>,
     tab_stop: &mut u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<String> {
-    let th = match type_hint {
+    let pt = match type_hint {
         None => {
             let s = format!("${{{}:mixed}}", *tab_stop);
             *tab_stop += 1;
             return Some(s);
         }
-        Some(t) => t.as_str(),
+        Some(t) => t,
     };
 
     // `void` is never enriched for return types (caller handles skip).
     // `array` always needs enrichment.
-    if th == "array" {
+    if is_bare_array(pt) {
         let s = format!("array<${{{}:mixed}}>", *tab_stop);
         *tab_stop += 1;
         return Some(s);
     }
 
     // `Closure` / `callable` need a callable-signature placeholder.
-    let clean = th.trim_start_matches('\\');
-    if CALLABLE_TYPES.iter().any(|s| s.eq_ignore_ascii_case(clean)) {
-        let s = format!("({}(): ${{{}:mixed}})", clean, *tab_stop);
+    if is_callable_keyword(pt) {
+        let name = callable_display_name(pt);
+        let s = format!("({}(): ${{{}:mixed}})", name, *tab_stop);
         *tab_stop += 1;
         return Some(s);
     }
 
     // Union types — enrich individual callable / array parts.
-    // Use PhpType::parse + union_members to correctly handle generic nesting
+    // Use union_members to correctly handle generic nesting
     // (e.g. `Collection<int|string, User>|null` must not be split on the inner `|`).
-    let parsed = PhpType::parse(th);
-    let members = parsed.union_members();
+    let members = pt.union_members();
     if members.len() > 1 {
-        let needs = members.iter().any(|member| {
-            let s = member.to_string();
-            let p = s.trim_start_matches('\\');
-            p.eq_ignore_ascii_case("array")
-                || CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p))
-        });
+        let needs = members
+            .iter()
+            .any(|member| is_bare_array(member) || is_callable_keyword(member));
         if needs {
             let enriched_parts: Vec<String> = members
                 .iter()
                 .map(|member| {
-                    let s = member.to_string();
-                    let p = s.trim_start_matches('\\');
-                    if CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p)) {
-                        format!("({}(): ${{{}:mixed}})", p, {
+                    if is_callable_keyword(member) {
+                        let name = callable_display_name(member);
+                        format!("({}(): ${{{}:mixed}})", name, {
                             let t = *tab_stop;
                             *tab_stop += 1;
                             t
                         })
-                    } else if p.eq_ignore_ascii_case("array") {
+                    } else if is_bare_array(member) {
                         let s = format!("array<${{{}:mixed}}>", *tab_stop);
                         *tab_stop += 1;
                         s
                     } else {
-                        s.to_string()
+                        member.to_string()
                     }
                 })
                 .collect();
@@ -1007,20 +1077,18 @@ pub(crate) fn enrichment_snippet(
     }
 
     // Intersection types (&), nullable (?Type) — skip.
-    if matches!(parsed, PhpType::Intersection(_) | PhpType::Nullable(_)) {
+    if matches!(pt, PhpType::Intersection(_) | PhpType::Nullable(_)) {
         return None;
     }
 
-    // Check if it's a class with template parameters.
-    if NON_CLASS_TYPES
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(clean))
-    {
+    // Scalar / built-in types never have template parameters.
+    if pt.is_scalar() {
         return None;
     }
 
     // Try to load the class and check for templates.
-    if let Some(cls) = class_loader(clean)
+    if let Some(name) = pt.base_name()
+        && let Some(cls) = class_loader(name)
         && !cls.template_params.is_empty()
     {
         let mut parts = Vec::new();
@@ -1028,7 +1096,90 @@ pub(crate) fn enrichment_snippet(
             parts.push(format!("${{{}:{}}}", *tab_stop, tp));
             *tab_stop += 1;
         }
-        return Some(format!("{}<{}>", clean, parts.join(", ")));
+        return Some(format!("{}<{}>", name, parts.join(", ")));
+    }
+
+    None
+}
+
+/// Structured version of [`enrichment_plain`] returning a [`PhpType`]
+/// instead of a display string.
+///
+/// Use this when the enriched type needs to be compared structurally
+/// (via [`PhpType::equivalent`]) rather than by string equality. The
+/// plain-text callers that only need a display string should keep using
+/// [`enrichment_plain`].
+pub(crate) fn enrichment_plain_typed(
+    type_hint: Option<&PhpType>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> Option<PhpType> {
+    let pt = match type_hint {
+        None => return Some(PhpType::mixed()),
+        Some(t) => t,
+    };
+
+    if is_bare_array(pt) {
+        return Some(PhpType::generic_array_val(PhpType::mixed()));
+    }
+
+    if is_callable_keyword(pt) {
+        let kind = callable_display_name(pt).to_string();
+        return Some(PhpType::Callable {
+            kind,
+            params: vec![],
+            return_type: Some(Box::new(PhpType::mixed())),
+        });
+    }
+
+    // Union types — enrich individual callable / array parts.
+    let members = pt.union_members();
+    if members.len() > 1 {
+        let needs = members
+            .iter()
+            .any(|member| is_bare_array(member) || is_callable_keyword(member));
+        if needs {
+            let enriched: Vec<PhpType> = members
+                .iter()
+                .map(|member| {
+                    if is_callable_keyword(member) {
+                        let kind = callable_display_name(member).to_string();
+                        PhpType::Callable {
+                            kind,
+                            params: vec![],
+                            return_type: Some(Box::new(PhpType::mixed())),
+                        }
+                    } else if is_bare_array(member) {
+                        PhpType::generic_array_val(PhpType::mixed())
+                    } else {
+                        (*member).clone()
+                    }
+                })
+                .collect();
+            return Some(PhpType::Union(enriched));
+        }
+        return None;
+    }
+
+    if matches!(pt, PhpType::Intersection(_) | PhpType::Nullable(_)) {
+        return None;
+    }
+
+    // Scalar / built-in types never have template parameters.
+    if pt.is_scalar() {
+        return None;
+    }
+
+    // Try to load the class and check for templates.
+    if let Some(name) = pt.base_name()
+        && let Some(cls) = class_loader(name)
+        && !cls.template_params.is_empty()
+    {
+        let args: Vec<PhpType> = cls
+            .template_params
+            .iter()
+            .map(|s| PhpType::Named(s.clone()))
+            .collect();
+        return Some(PhpType::Generic(name.to_string(), args));
     }
 
     None
@@ -1038,75 +1189,35 @@ pub(crate) fn enrichment_snippet(
 ///
 /// Also used by tag completion (`build_phpdoc_completions`) to enrich
 /// `@param`, `@return`, and `@var` type hints with template parameters.
+///
+/// Callable types are wrapped in parentheses for PHPDoc notation:
+/// `(Closure(): mixed)`, `(callable(): mixed)`.
 pub(crate) fn enrichment_plain(
-    type_hint: &Option<String>,
+    type_hint: Option<&PhpType>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<String> {
-    let th = match type_hint {
-        None => return Some("mixed".to_string()),
-        Some(t) => t.as_str(),
-    };
+    let typed = enrichment_plain_typed(type_hint, class_loader)?;
 
-    if th == "array" {
-        return Some("array<mixed>".to_string());
+    // Callable types need parentheses in PHPDoc notation, which
+    // PhpType::Display does not add.
+    Some(enrichment_type_to_plain(&typed))
+}
+
+/// Format an enriched `PhpType` as a plain-text PHPDoc type string.
+///
+/// Callable types are wrapped in parentheses (`(Closure(): mixed)`)
+/// to match PHPDoc inline callable notation. Union members are
+/// formatted individually and joined with `|`.
+fn enrichment_type_to_plain(ty: &PhpType) -> String {
+    match ty {
+        PhpType::Callable { .. } => format!("({})", ty),
+        PhpType::Union(members) => members
+            .iter()
+            .map(enrichment_type_to_plain)
+            .collect::<Vec<_>>()
+            .join("|"),
+        _ => ty.to_string(),
     }
-
-    let clean = th.trim_start_matches('\\');
-    if CALLABLE_TYPES.iter().any(|s| s.eq_ignore_ascii_case(clean)) {
-        return Some(format!("({}(): mixed)", clean));
-    }
-
-    // Union types — enrich individual callable / array parts.
-    // Use PhpType::parse + union_members to correctly handle generic nesting
-    // (e.g. `Collection<int|string, User>|null` must not be split on the inner `|`).
-    let parsed = PhpType::parse(th);
-    let members = parsed.union_members();
-    if members.len() > 1 {
-        let needs = members.iter().any(|member| {
-            let s = member.to_string();
-            let p = s.trim_start_matches('\\');
-            p.eq_ignore_ascii_case("array")
-                || CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p))
-        });
-        if needs {
-            let enriched_parts: Vec<String> = members
-                .iter()
-                .map(|member| {
-                    let s = member.to_string();
-                    let p = s.trim_start_matches('\\');
-                    if CALLABLE_TYPES.iter().any(|c| c.eq_ignore_ascii_case(p)) {
-                        format!("({}(): mixed)", p)
-                    } else if p.eq_ignore_ascii_case("array") {
-                        "array<mixed>".to_string()
-                    } else {
-                        s.to_string()
-                    }
-                })
-                .collect();
-            return Some(enriched_parts.join("|"));
-        }
-        return None;
-    }
-
-    if matches!(parsed, PhpType::Intersection(_) | PhpType::Nullable(_)) {
-        return None;
-    }
-
-    if NON_CLASS_TYPES
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(clean))
-    {
-        return None;
-    }
-
-    if let Some(cls) = class_loader(clean)
-        && !cls.template_params.is_empty()
-    {
-        let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
-        return Some(format!("{}<{}>", clean, parts.join(", ")));
-    }
-
-    None
 }
 
 // ─── Snippet / Plain Builder ────────────────────────────────────────────────
@@ -1205,8 +1316,8 @@ fn build_function_snippet(
     _indent: &str,
     content: &str,
     position: Position,
-    _use_map: &HashMap<String, String>,
-    _file_namespace: &Option<String>,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
@@ -1214,6 +1325,8 @@ fn build_function_snippet(
     let throws_ctx = ThrowsContext {
         class_loader,
         function_loader,
+        use_map,
+        file_namespace,
     };
     let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
         content,
@@ -1227,11 +1340,12 @@ fn build_function_snippet(
     // Each entry is (snippet_type, display_len, escaped_name).
     let mut param_tags: Vec<(String, usize, String)> = Vec::new();
     for (type_hint, name) in &sym.params {
-        if let Some(enriched) = enrichment_snippet(type_hint, &mut tab_stop, class_loader) {
+        if let Some(enriched) = enrichment_snippet(type_hint.as_ref(), &mut tab_stop, class_loader)
+        {
             // Use the plain-text version to measure the rendered width for
             // alignment.  The snippet version contains `${N:...}` markers
             // that inflate its length.
-            let display_len = enrichment_plain(type_hint, class_loader)
+            let display_len = enrichment_plain(type_hint.as_ref(), class_loader)
                 .map(|p| p.len())
                 .unwrap_or(enriched.len());
             // Escape `$` in PHP parameter names so the snippet parser
@@ -1246,10 +1360,7 @@ fn build_function_snippet(
         .method_name
         .as_ref()
         .is_some_and(|n| n.eq_ignore_ascii_case("__construct"));
-    let is_void = sym
-        .return_type
-        .as_ref()
-        .is_some_and(|r| r.eq_ignore_ascii_case("void"));
+    let is_void = sym.return_type.as_ref().is_some_and(|r| r.is_void());
     let return_tag = if is_void || is_constructor {
         None
     } else {
@@ -1263,15 +1374,16 @@ fn build_function_snippet(
             function_loader,
         );
         let inferred = body_inferred.filter(|t| {
-            let lower = t.to_lowercase();
-            lower != "void" && lower != "mixed" && Some(t.as_str()) != sym.return_type.as_deref()
+            !t.is_void()
+                && !t.is_mixed()
+                && sym.return_type.as_ref().is_none_or(|s| !t.equivalent(s))
         });
         // Fall back to signature-based enrichment when body inference
         // doesn't produce anything useful.
         if let Some(t) = inferred {
-            Some(t)
+            Some(t.to_string())
         } else {
-            enrichment_snippet(&sym.return_type, &mut tab_stop, class_loader)
+            enrichment_snippet(sym.return_type.as_ref(), &mut tab_stop, class_loader)
         }
     };
 
@@ -1302,7 +1414,9 @@ fn build_function_snippet(
             lines.push(" *".to_string());
         }
         for exc in &uncaught {
-            lines.push(format!(" * @throws {}", exc));
+            let exc_str = exc.to_string();
+            let display = crate::util::short_name(&exc_str);
+            lines.push(format!(" * @throws {}", display));
         }
     }
 
@@ -1327,8 +1441,8 @@ fn build_function_plain(
     indent: &str,
     content: &str,
     position: Position,
-    _use_map: &HashMap<String, String>,
-    _file_namespace: &Option<String>,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
@@ -1336,6 +1450,8 @@ fn build_function_plain(
     let throws_ctx = ThrowsContext {
         class_loader,
         function_loader,
+        use_map,
+        file_namespace,
     };
     let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
         content,
@@ -1346,7 +1462,7 @@ fn build_function_plain(
     // Collect @param tags that need enrichment.
     let mut param_tags: Vec<(String, String)> = Vec::new();
     for (type_hint, name) in &sym.params {
-        if let Some(enriched) = enrichment_plain(type_hint, class_loader) {
+        if let Some(enriched) = enrichment_plain(type_hint.as_ref(), class_loader) {
             param_tags.push((enriched, name.clone()));
         }
     }
@@ -1356,10 +1472,7 @@ fn build_function_plain(
         .method_name
         .as_ref()
         .is_some_and(|n| n.eq_ignore_ascii_case("__construct"));
-    let is_void = sym
-        .return_type
-        .as_ref()
-        .is_some_and(|r| r.eq_ignore_ascii_case("void"));
+    let is_void = sym.return_type.as_ref().is_some_and(|r| r.is_void());
     let return_tag = if is_void || is_constructor {
         None
     } else {
@@ -1375,12 +1488,15 @@ fn build_function_plain(
         // Filter out types that don't need a @return tag (void, scalars
         // that match the native hint exactly).
         let inferred = body_inferred.filter(|t| {
-            let lower = t.to_lowercase();
-            lower != "void" && lower != "mixed" && Some(t.as_str()) != sym.return_type.as_deref()
+            !t.is_void()
+                && !t.is_mixed()
+                && sym.return_type.as_ref().is_none_or(|s| !t.equivalent(s))
         });
         // Fall back to signature-based enrichment when body inference
         // doesn't produce anything useful.
-        inferred.or_else(|| enrichment_plain(&sym.return_type, class_loader))
+        inferred
+            .map(|t| t.to_string())
+            .or_else(|| enrichment_plain(sym.return_type.as_ref(), class_loader))
     };
 
     let has_throws = !uncaught.is_empty();
@@ -1410,7 +1526,9 @@ fn build_function_plain(
             lines.push(format!("{} *", indent));
         }
         for exc in &uncaught {
-            lines.push(format!("{} * @throws {}", indent, exc));
+            let exc_str = exc.to_string();
+            let display = crate::util::short_name(&exc_str).to_string();
+            lines.push(format!("{} * @throws {}", indent, display));
         }
     }
 
@@ -1483,7 +1601,7 @@ fn build_property_plain(
     indent: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
-    let var_type = property_var_type_plain(&sym.type_hint, class_loader);
+    let var_type = property_var_type_plain(sym.type_hint.as_ref(), class_loader);
     format!("{indent}/** @var {var_type} */\n")
 }
 
@@ -1495,7 +1613,7 @@ fn build_constant_plain(
     indent: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
-    let var_type = property_var_type_plain(&sym.type_hint, class_loader);
+    let var_type = property_var_type_plain(sym.type_hint.as_ref(), class_loader);
     format!("{indent}/** @var {var_type} */\n")
 }
 
@@ -1562,7 +1680,7 @@ fn build_property_snippet(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
     let mut tab_stop = 1u32;
-    let var_type = property_var_type_snippet(&sym.type_hint, &mut tab_stop, class_loader);
+    let var_type = property_var_type_snippet(sym.type_hint.as_ref(), &mut tab_stop, class_loader);
     format!("/** @var {} */", var_type)
 }
 
@@ -1575,7 +1693,7 @@ fn build_constant_snippet(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
     let mut tab_stop = 1u32;
-    let var_type = property_var_type_snippet(&sym.type_hint, &mut tab_stop, class_loader);
+    let var_type = property_var_type_snippet(sym.type_hint.as_ref(), &mut tab_stop, class_loader);
     format!("/** @var {} */", var_type)
 }
 
@@ -1583,7 +1701,7 @@ fn build_constant_snippet(
 /// hover type-resolution pipeline.
 ///
 /// Given `$var = ['']`, this resolves to `list<string>` by delegating
-/// to the same `resolve_variable_type_string` that powers hover.
+/// to the same `resolve_variable_type` that powers hover.
 pub(crate) fn infer_inline_variable_type(
     sym: &SymbolInfo,
     content: &str,
@@ -1591,7 +1709,7 @@ pub(crate) fn infer_inline_variable_type(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoaderFn<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let var_name = sym.variable_name.as_deref()?;
 
     // The cursor is at the `/**` trigger, which is above the variable
@@ -1617,7 +1735,7 @@ pub(crate) fn infer_inline_variable_type(
 
     let current_class = crate::util::find_class_at_offset(all_classes, cursor_offset);
 
-    crate::hover::variable_type::resolve_variable_type_string(
+    crate::hover::variable_type::resolve_variable_type(
         var_name,
         effective_content,
         cursor_offset,
@@ -1673,7 +1791,7 @@ fn patch_docblock_trigger(content: &str, trigger_offset: usize) -> Option<String
 /// - Class with templates → `ClassName<${N:T1}, ...>` tab stops
 /// - Other → literal type string
 fn property_var_type_snippet(
-    type_hint: &Option<String>,
+    type_hint: Option<&PhpType>,
     tab_stop: &mut u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
@@ -1683,27 +1801,21 @@ fn property_var_type_snippet(
             *tab_stop += 1;
             s
         }
-        Some(th) if th == "array" => {
+        Some(th) if th.is_bare_array() => {
             let s = format!("${{{}:array}}", *tab_stop);
             *tab_stop += 1;
             s
         }
         Some(th) => {
-            let clean = th.trim_start_matches('\\');
+            let shortened = th.shorten();
             // Callable types get a signature placeholder.
-            if CALLABLE_TYPES.iter().any(|s| s.eq_ignore_ascii_case(clean)) {
-                let s = format!("(${{{}:{}()}})", *tab_stop, clean);
+            if th.is_callable() {
+                let s = format!("(${{{}:{}()}})", *tab_stop, shortened);
                 *tab_stop += 1;
                 return s;
             }
-            let parsed = PhpType::parse(th);
-            if !matches!(
-                parsed,
-                PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
-            ) && !NON_CLASS_TYPES
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(clean))
-                && let Some(cls) = class_loader(clean)
+            if let Some(name) = shortened.base_name()
+                && let Some(cls) = class_loader(name)
                 && !cls.template_params.is_empty()
             {
                 let mut parts = Vec::new();
@@ -1711,40 +1823,34 @@ fn property_var_type_snippet(
                     parts.push(format!("${{{}:{}}}", *tab_stop, tp));
                     *tab_stop += 1;
                 }
-                return format!("{}<{}>", clean, parts.join(", "));
+                return format!("{}<{}>", name, parts.join(", "));
             }
-            th.clone()
+            shortened.to_string()
         }
     }
 }
 
 /// Compute the `@var` type string for a property/constant in plain text.
 fn property_var_type_plain(
-    type_hint: &Option<String>,
+    type_hint: Option<&PhpType>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> String {
     match type_hint {
-        None => "mixed".to_string(),
-        Some(th) if th == "array" => "array".to_string(),
+        None => PhpType::mixed().to_string(),
+        Some(th) if th.is_bare_array() => "array".to_string(),
         Some(th) => {
-            let clean = th.trim_start_matches('\\');
-            if CALLABLE_TYPES.iter().any(|s| s.eq_ignore_ascii_case(clean)) {
-                return format!("({}())", clean);
+            let shortened = th.shorten();
+            if th.is_callable() {
+                return format!("({}())", shortened);
             }
-            let parsed = PhpType::parse(th);
-            if !matches!(
-                parsed,
-                PhpType::Union(_) | PhpType::Intersection(_) | PhpType::Nullable(_)
-            ) && !NON_CLASS_TYPES
-                .iter()
-                .any(|s| s.eq_ignore_ascii_case(clean))
-                && let Some(cls) = class_loader(clean)
+            if let Some(name) = shortened.base_name()
+                && let Some(cls) = class_loader(name)
                 && !cls.template_params.is_empty()
             {
                 let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
-                return format!("{}<{}>", clean, parts.join(", "));
+                return format!("{}<{}>", name, parts.join(", "));
             }
-            th.clone()
+            shortened.to_string()
         }
     }
 }
@@ -1769,6 +1875,8 @@ fn build_throws_import_edits(
     let throws_ctx = ThrowsContext {
         class_loader,
         function_loader,
+        use_map,
+        file_namespace,
     };
     let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
         content,
@@ -1783,8 +1891,10 @@ fn build_throws_import_edits(
     let mut edits = Vec::new();
 
     for exc in &uncaught {
-        if let Some(fqn) = throws_analysis::resolve_exception_fqn(exc, use_map, file_namespace)
-            && !throws_analysis::has_use_import(content, &fqn)
+        // Exception types are already resolved to FQNs by
+        // `find_uncaught_throw_types_with_context` — do not re-resolve.
+        let fqn = exc.to_string();
+        if !throws_analysis::has_use_import(content, &fqn)
             && let Some(edit) = build_use_edit(&fqn, &use_block, file_namespace)
         {
             edits.extend(edit);
@@ -1875,6 +1985,21 @@ mod tests {
             result.is_none(),
             "Should not trigger when code precedes /**"
         );
+    }
+
+    #[test]
+    fn no_panic_on_multibyte_characters() {
+        // "ń" is 2 bytes in UTF-8 but 1 UTF-16 code unit.
+        // The cursor is after the closing paren, UTF-16 column 32.
+        // Using that as a byte offset would land inside "ń" and panic.
+        let content = "<?php\n                $table->string(ń);";
+        let pos = Position {
+            line: 1,
+            character: 32,
+        };
+        // Must not panic — should simply return None.
+        let result = detect_docblock_trigger(content, pos);
+        assert!(result.is_none());
     }
 
     // ── Declaration classification ──────────────────────────────────────
@@ -1996,13 +2121,13 @@ mod tests {
         assert_eq!(info.params.len(), 2);
         assert_eq!(
             info.params[0],
-            (Some("string".to_string()), "$name".to_string())
+            (Some(PhpType::parse("string")), "$name".to_string())
         );
         assert_eq!(
             info.params[1],
-            (Some("int".to_string()), "$age".to_string())
+            (Some(PhpType::parse("int")), "$age".to_string())
         );
-        assert_eq!(info.return_type, Some("void".to_string()));
+        assert_eq!(info.return_type, Some(PhpType::parse("void")));
     }
 
     #[test]
@@ -2018,16 +2143,16 @@ mod tests {
     fn parses_nullable_type() {
         let text = "function test(?string $name): ?int {}";
         let info = parse_declaration_info(text);
-        assert_eq!(info.params[0].0, Some("?string".to_string()));
-        assert_eq!(info.return_type, Some("?int".to_string()));
+        assert_eq!(info.params[0].0, Some(PhpType::parse("?string")));
+        assert_eq!(info.return_type, Some(PhpType::parse("?int")));
     }
 
     #[test]
     fn parses_union_type() {
         let text = "function test(string|int $value): string|false {}";
         let info = parse_declaration_info(text);
-        assert_eq!(info.params[0].0, Some("string|int".to_string()));
-        assert_eq!(info.return_type, Some("string|false".to_string()));
+        assert_eq!(info.params[0].0, Some(PhpType::parse("string|int")));
+        assert_eq!(info.return_type, Some(PhpType::parse("string|false")));
     }
 
     #[test]
@@ -2037,7 +2162,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("string".to_string()), "$names".to_string())
+            (Some(PhpType::parse("string")), "$names".to_string())
         );
     }
 
@@ -2048,7 +2173,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("array".to_string()), "$data".to_string())
+            (Some(PhpType::parse("array")), "$data".to_string())
         );
     }
 
@@ -2059,7 +2184,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("string".to_string()), "$name".to_string())
+            (Some(PhpType::parse("string")), "$name".to_string())
         );
     }
 
@@ -2068,35 +2193,35 @@ mod tests {
         let text = "function test(): void {}";
         let info = parse_declaration_info(text);
         assert!(info.params.is_empty());
-        assert_eq!(info.return_type, Some("void".to_string()));
+        assert_eq!(info.return_type, Some(PhpType::parse("void")));
     }
 
     #[test]
     fn parses_property_type() {
         let text = "    public string $name;";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("string".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("string")));
     }
 
     #[test]
     fn parses_readonly_property_type() {
         let text = "    public readonly string $name;";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("string".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("string")));
     }
 
     #[test]
     fn parses_typed_constant_extracts_only_type() {
         let text = "    const int COW = 0;";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("int".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("int")));
     }
 
     #[test]
     fn parses_public_typed_constant_extracts_only_type() {
         let text = "    public const string NAME = 'foo';";
         let info = parse_declaration_info(text);
-        assert_eq!(info.type_hint, Some("string".to_string()));
+        assert_eq!(info.type_hint, Some(PhpType::parse("string")));
     }
 
     #[test]
@@ -2113,7 +2238,7 @@ mod tests {
         assert_eq!(info.params.len(), 1);
         assert_eq!(
             info.params[0],
-            (Some("bool".to_string()), "$selected".to_string())
+            (Some(PhpType::parse("bool")), "$selected".to_string())
         );
     }
 
@@ -2146,7 +2271,7 @@ mod tests {
     #[test]
     fn enrichment_missing_type_produces_mixed() {
         let mut ts = 1;
-        let result = enrichment_snippet(&None, &mut ts, &no_classes);
+        let result = enrichment_snippet(None, &mut ts, &no_classes);
         assert_eq!(result, Some("${1:mixed}".to_string()));
         assert_eq!(ts, 2);
     }
@@ -2154,7 +2279,8 @@ mod tests {
     #[test]
     fn enrichment_array_produces_array_tabstop() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("array".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("array");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert_eq!(result, Some("array<${1:mixed}>".to_string()));
         assert_eq!(ts, 2);
     }
@@ -2162,7 +2288,8 @@ mod tests {
     #[test]
     fn enrichment_scalar_returns_none() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("string".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("string");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert!(result.is_none());
         assert_eq!(ts, 1, "tab stop should not advance for skipped types");
     }
@@ -2170,42 +2297,48 @@ mod tests {
     #[test]
     fn enrichment_union_without_array_returns_none() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("string|int".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("string|int");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert!(result.is_none());
     }
 
     #[test]
     fn enrichment_union_with_array_enriches_parts() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("array|string".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("array|string");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert_eq!(result, Some("array<${1:mixed}>|string".to_string()));
     }
 
     #[test]
     fn enrichment_union_with_closure_enriches_parts() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("Closure|null".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("Closure|null");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert_eq!(result, Some("(Closure(): ${1:mixed})|null".to_string()));
     }
 
     #[test]
     fn enrichment_nullable_returns_none() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("?string".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("?string");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert!(result.is_none());
     }
 
     #[test]
     fn enrichment_void_returns_none() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("void".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("void");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert!(result.is_none());
     }
 
     #[test]
     fn enrichment_closure_produces_callable_placeholder() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("Closure".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("Closure");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert_eq!(result, Some("(Closure(): ${1:mixed})".to_string()));
         assert_eq!(ts, 2);
     }
@@ -2213,7 +2346,8 @@ mod tests {
     #[test]
     fn enrichment_callable_produces_callable_placeholder() {
         let mut ts = 1;
-        let result = enrichment_snippet(&Some("callable".to_string()), &mut ts, &no_classes);
+        let hint = PhpType::parse("callable");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &no_classes);
         assert_eq!(result, Some("(callable(): ${1:mixed})".to_string()));
         assert_eq!(ts, 2);
     }
@@ -2232,7 +2366,8 @@ mod tests {
                 None
             }
         };
-        let result = enrichment_snippet(&Some("User".to_string()), &mut ts, &loader);
+        let hint = PhpType::parse("User");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &loader);
         assert!(result.is_none());
     }
 
@@ -2250,7 +2385,8 @@ mod tests {
                 None
             }
         };
-        let result = enrichment_snippet(&Some("Collection".to_string()), &mut ts, &loader);
+        let hint = PhpType::parse("Collection");
+        let result = enrichment_snippet(Some(&hint), &mut ts, &loader);
         assert_eq!(
             result,
             Some("Collection<${1:TKey}, ${2:TValue}>".to_string())
@@ -2267,7 +2403,7 @@ mod tests {
         // match the text-edit range's start column.
         let sym = SymbolInfo {
             params: vec![(None, "$data".to_string())],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2304,7 +2440,7 @@ mod tests {
     fn snippet_escapes_dollar_in_param_names() {
         let sym = SymbolInfo {
             params: vec![(None, "$data".to_string())],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2344,10 +2480,10 @@ mod tests {
         // Only @return for User should be skipped (no templates).
         let sym = SymbolInfo {
             params: vec![
-                (Some("string".to_string()), "$name".to_string()),
-                (Some("int".to_string()), "$age".to_string()),
+                (Some(PhpType::parse("string")), "$name".to_string()),
+                (Some(PhpType::parse("int")), "$age".to_string()),
             ],
-            return_type: Some("User".to_string()),
+            return_type: Some(PhpType::parse("User")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2397,9 +2533,9 @@ mod tests {
         let sym = SymbolInfo {
             params: vec![
                 (None, "$data".to_string()),
-                (Some("string".to_string()), "$name".to_string()),
+                (Some(PhpType::parse("string")), "$name".to_string()),
             ],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2445,8 +2581,8 @@ mod tests {
     #[test]
     fn generates_function_snippet_for_array_param_and_return() {
         let sym = SymbolInfo {
-            params: vec![(Some("array".to_string()), "$items".to_string())],
-            return_type: Some("array".to_string()),
+            params: vec![(Some(PhpType::parse("array")), "$items".to_string())],
+            return_type: Some(PhpType::parse("array")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2477,7 +2613,7 @@ mod tests {
     fn generates_void_function_snippet_without_return() {
         let sym = SymbolInfo {
             params: vec![(None, "$name".to_string())],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2507,7 +2643,7 @@ mod tests {
     fn paramless_void_generates_summary_skeleton() {
         let sym = SymbolInfo {
             params: vec![],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2632,7 +2768,7 @@ mod tests {
     #[test]
     fn generates_property_snippet_always_has_var() {
         let sym = SymbolInfo {
-            type_hint: Some("string".to_string()),
+            type_hint: Some(PhpType::parse("string")),
             ..Default::default()
         };
         let snippet = build_property_snippet(&sym, "    ", &no_classes);
@@ -2663,7 +2799,7 @@ mod tests {
     #[test]
     fn generates_constant_snippet_with_type() {
         let sym = SymbolInfo {
-            type_hint: Some("int".to_string()),
+            type_hint: Some(PhpType::parse("int")),
             ..Default::default()
         };
         let snippet = build_constant_snippet(&sym, "    ", &no_classes);
@@ -2684,7 +2820,7 @@ mod tests {
                 (None, "$activeAlerts".to_string()),
                 (None, "$x".to_string()),
             ],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();
@@ -2733,9 +2869,12 @@ mod tests {
         let sym = SymbolInfo {
             params: vec![
                 (None, "$data".to_string()),
-                (Some("TypedCollection".to_string()), "$primary".to_string()),
+                (
+                    Some(PhpType::parse("TypedCollection")),
+                    "$primary".to_string(),
+                ),
             ],
-            return_type: Some("void".to_string()),
+            return_type: Some(PhpType::parse("void")),
             ..Default::default()
         };
         let use_map = HashMap::new();

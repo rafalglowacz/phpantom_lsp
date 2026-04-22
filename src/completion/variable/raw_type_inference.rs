@@ -12,7 +12,8 @@ use mago_syntax::ast::*;
 use super::{ARRAY_ELEMENT_FUNCS, ARRAY_PRESERVING_FUNCS};
 
 use crate::docblock;
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
+use crate::php_type::PhpType;
 use crate::types::ClassInfo;
 
 use crate::completion::resolver::VarResolutionCtx;
@@ -23,21 +24,22 @@ use crate::completion::resolver::VarResolutionCtx;
 pub(in crate::completion) fn infer_array_literal_raw_type<'b>(
     elements: impl Iterator<Item = &'b ArrayElement<'b>>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
-    let mut types: Vec<String> = Vec::new();
+) -> Option<PhpType> {
+    let mut types: Vec<PhpType> = Vec::new();
     let mut has_string_keys = false;
-    let mut shape_parts: Vec<String> = Vec::new();
+    let mut shape_entries: Vec<crate::php_type::ShapeEntry> = Vec::new();
 
     for elem in elements {
         match elem {
             ArrayElement::KeyValue(kv) => {
                 has_string_keys = true;
-                // Extract key text.
                 let key_text = extract_array_key_text(kv.key);
-                // Resolve value type.
-                let value_type =
-                    infer_element_type(kv.value, ctx).unwrap_or_else(|| "mixed".to_string());
-                shape_parts.push(format!("{}: {}", key_text, value_type));
+                let value_type = infer_element_type(kv.value, ctx).unwrap_or_else(PhpType::mixed);
+                shape_entries.push(crate::php_type::ShapeEntry {
+                    key: Some(key_text),
+                    value_type,
+                    optional: false,
+                });
             }
             ArrayElement::Value(v) => {
                 if let Some(t) = infer_element_type(v.value, ctx)
@@ -48,11 +50,8 @@ pub(in crate::completion) fn infer_array_literal_raw_type<'b>(
             }
             ArrayElement::Variadic(v) => {
                 // Spread: `...$other` — try to resolve iterable element type.
-                if let Some(raw) =
-                    super::foreach_resolution::resolve_expression_type_string(v.value, ctx)
-                    && let Some(elem) = crate::php_type::PhpType::parse(&raw)
-                        .extract_value_type(true)
-                        .map(|t| t.to_string())
+                if let Some(raw) = super::foreach_resolution::resolve_expression_type(v.value, ctx)
+                    && let Some(elem) = raw.extract_value_type(true).cloned()
                     && !types.contains(&elem)
                 {
                     types.push(elem);
@@ -62,16 +61,20 @@ pub(in crate::completion) fn infer_array_literal_raw_type<'b>(
         }
     }
 
-    if has_string_keys && !shape_parts.is_empty() {
-        return Some(format!("array{{{}}}", shape_parts.join(", ")));
+    if has_string_keys && !shape_entries.is_empty() {
+        return Some(PhpType::ArrayShape(shape_entries));
     }
 
     if types.is_empty() {
         return None;
     }
 
-    let union = types.join("|");
-    Some(format!("list<{}>", union))
+    let elem_type = if types.len() == 1 {
+        types.into_iter().next().unwrap()
+    } else {
+        PhpType::Union(types)
+    };
+    Some(PhpType::list(elem_type))
 }
 
 /// Extract a string representation of an array key expression.
@@ -86,34 +89,41 @@ fn extract_array_key_text<'b>(key: &'b Expression<'b>) -> String {
             })
         }
         Expression::Literal(Literal::Integer(i)) => i.raw.to_string(),
-        _ => "mixed".to_string(),
+        _ => PhpType::mixed().to_string(),
     }
 }
 
 /// Infer the type of a single array element value expression.
-fn infer_element_type<'b>(value: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>) -> Option<String> {
+fn infer_element_type<'b>(
+    value: &'b Expression<'b>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<PhpType> {
     match value {
         // ── Scalar literals ──
-        Expression::Literal(Literal::String(_)) => Some("string".to_string()),
-        Expression::Literal(Literal::Integer(_)) => Some("int".to_string()),
-        Expression::Literal(Literal::Float(_)) => Some("float".to_string()),
-        Expression::Literal(Literal::True(_) | Literal::False(_)) => Some("bool".to_string()),
-        Expression::Literal(Literal::Null(_)) => Some("null".to_string()),
+        Expression::Literal(Literal::String(_)) => Some(PhpType::string()),
+        Expression::Literal(Literal::Integer(_)) => Some(PhpType::int()),
+        Expression::Literal(Literal::Float(_)) => Some(PhpType::float()),
+        Expression::Literal(Literal::True(_) | Literal::False(_)) => Some(PhpType::bool()),
+        Expression::Literal(Literal::Null(_)) => Some(PhpType::null()),
         // ── Nested array literals ──
         Expression::Array(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx)
-            .or_else(|| Some("array".to_string())),
+            .or_else(|| Some(PhpType::array())),
         Expression::LegacyArray(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx)
-            .or_else(|| Some("array".to_string())),
+            .or_else(|| Some(PhpType::array())),
         // ── Object instantiation ──
         Expression::Instantiation(inst) => match inst.class {
-            Expression::Identifier(ident) => Some(ident.value().to_string()),
-            Expression::Self_(_) => Some(ctx.current_class.name.clone()),
-            Expression::Static(_) => Some(ctx.current_class.name.clone()),
+            Expression::Identifier(ident) => {
+                let name = ident.value().to_string();
+                let fqn = crate::util::resolve_name_via_loader(&name, ctx.class_loader);
+                Some(PhpType::Named(fqn))
+            }
+            Expression::Self_(_) => Some(PhpType::Named(ctx.current_class.name.clone())),
+            Expression::Static(_) => Some(PhpType::Named(ctx.current_class.name.clone())),
             _ => None,
         },
         Expression::Call(_) => {
             // Resolve call return type via the unified pipeline.
-            super::foreach_resolution::resolve_expression_type_string(value, ctx)
+            super::foreach_resolution::resolve_expression_type(value, ctx)
         }
         Expression::Variable(Variable::Direct(dv)) => {
             let var_text = dv.name.to_string();
@@ -134,7 +144,7 @@ fn infer_element_type<'b>(value: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>)
                 .iter()
                 .find(|c| c.name == ctx.current_class.name)
                 .map(|c| c.as_ref());
-            crate::hover::variable_type::resolve_variable_type_string(
+            crate::hover::variable_type::resolve_variable_type(
                 &var_text,
                 ctx.content,
                 offset as u32,
@@ -151,7 +161,7 @@ fn infer_element_type<'b>(value: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>)
         // Delegate to the unified pipeline which resolves property
         // type hints and method return types through the class
         // hierarchy.
-        _ => super::foreach_resolution::resolve_expression_type_string(value, ctx),
+        _ => super::foreach_resolution::resolve_expression_type(value, ctx),
     }
 }
 
@@ -164,7 +174,7 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
     func_name: &str,
     args: &ArgumentList<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Type-preserving functions: output array has same element type.
     if ARRAY_PRESERVING_FUNCS
         .iter()
@@ -176,10 +186,7 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
         // so downstream `PhpType::extract_value_type` can extract the
         // element type.  Otherwise it's a plain class name and we
         // can't infer element type.
-        if crate::php_type::PhpType::parse(&raw)
-            .extract_value_type(true)
-            .is_some()
-        {
+        if raw.extract_value_type(true).is_some() {
             return Some(raw);
         }
     }
@@ -189,7 +196,7 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
     if func_name.eq_ignore_ascii_case("array_map")
         && let Some(element_type) = extract_array_map_element_type(args, ctx)
     {
-        return Some(format!("list<{}>", element_type));
+        return Some(PhpType::list(element_type));
     }
 
     // iterator_to_array: converts an iterator to an array, preserving
@@ -198,10 +205,7 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
     if func_name.eq_ignore_ascii_case("iterator_to_array") {
         let iter_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(iter_expr, ctx)?;
-        if crate::php_type::PhpType::parse(&raw)
-            .extract_value_type(true)
-            .is_some()
-        {
+        if raw.extract_value_type(true).is_some() {
             return Some(raw);
         }
     }
@@ -214,10 +218,7 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
     {
         let arr_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-        if crate::php_type::PhpType::parse(&raw)
-            .extract_value_type(true)
-            .is_some()
-        {
+        if raw.extract_value_type(true).is_some() {
             return Some(raw);
         }
     }
@@ -241,7 +242,7 @@ pub(in crate::completion) fn resolve_array_func_element_type(
     func_name: &str,
     args: &ArgumentList<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Element-extracting functions: return the element type directly.
     if ARRAY_ELEMENT_FUNCS
         .iter()
@@ -249,29 +250,38 @@ pub(in crate::completion) fn resolve_array_func_element_type(
     {
         let arr_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-        return crate::php_type::PhpType::parse(&raw)
-            .extract_value_type(true)
-            .map(|t| t.to_string());
+        return raw.extract_value_type(true).cloned();
     }
 
     None
 }
 
-/// Extract the raw text of a function/method argument list from source.
+/// Extract per-argument source text from a parsed `ArgumentList`.
 ///
-/// Returns the text between the parentheses (exclusive), trimmed.
-/// For example, an argument list `($user, $role)` returns `"$user, $role"`.
-pub(in crate::completion) fn extract_argument_text(
+/// Returns one `String` per argument by walking the AST nodes and
+/// extracting their spans. This avoids serialising the argument list
+/// to a flat string and then re-splitting with `split_text_args`.
+pub(in crate::completion) fn extract_arg_texts_from_ast(
     argument_list: &mago_syntax::ast::ArgumentList<'_>,
     content: &str,
-) -> String {
-    let left = argument_list.left_parenthesis.span().end.offset as usize;
-    let right = argument_list.right_parenthesis.span().start.offset as usize;
-    if right > left && right <= content.len() {
-        content[left..right].trim().to_string()
-    } else {
-        String::new()
-    }
+) -> Vec<String> {
+    argument_list
+        .arguments
+        .iter()
+        .map(|arg| {
+            let span = match arg {
+                mago_syntax::ast::argument::Argument::Positional(pos) => pos.value.span(),
+                mago_syntax::ast::argument::Argument::Named(named) => named.value.span(),
+            };
+            let start = span.start.offset as usize;
+            let end = span.end.offset as usize;
+            if end <= content.len() {
+                content[start..end].to_string()
+            } else {
+                String::new()
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -320,7 +330,7 @@ mod extract_argument_text_tests {
 fn extract_array_map_element_type(
     args: &ArgumentList<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let callback_expr = super::resolution::first_arg_expr(args)?;
 
     // Try to get the callback's return type hint.
@@ -328,27 +338,24 @@ fn extract_array_map_element_type(
         Expression::Closure(closure) => closure
             .return_type_hint
             .as_ref()
-            .map(|rth| extract_hint_string(&rth.hint)),
+            .map(|rth| extract_hint_type(&rth.hint)),
         Expression::ArrowFunction(arrow) => arrow
             .return_type_hint
             .as_ref()
-            .map(|rth| extract_hint_string(&rth.hint)),
+            .map(|rth| extract_hint_type(&rth.hint)),
         _ => None,
     };
 
-    if let Some(hint) = return_hint {
-        let parsed = crate::php_type::PhpType::parse(&hint);
-        if let Some(name) = parsed.base_name() {
-            return Some(name.to_string());
-        }
+    if let Some(ref parsed) = return_hint
+        && parsed.base_name().is_some()
+    {
+        return return_hint;
     }
 
     // Fallback: use the input array's element type.
     let arr_expr = super::resolution::nth_arg_expr(args, 1)?;
     let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-    crate::php_type::PhpType::parse(&raw)
-        .extract_value_type(true)
-        .map(|t| t.to_string())
+    raw.extract_value_type(true).cloned()
 }
 
 /// Reverse-infer a variable's type from `yield $var` statements when
@@ -364,12 +371,12 @@ fn extract_array_map_element_type(
 /// using a variable that is yielded but was not explicitly typed via
 /// an assignment or parameter.
 pub(in crate::completion) fn try_infer_from_generator_yield(
-    return_type: &str,
+    return_type: &PhpType,
     ctx: &VarResolutionCtx<'_>,
 ) -> Vec<ClassInfo> {
     // Only applies to Generator return types.
-    let value_type = match crate::php_type::PhpType::parse(return_type).extract_value_type(false) {
-        Some(vt) => vt.to_string(),
+    let value_type = match return_type.extract_value_type(false) {
+        Some(vt) => vt,
         None => return vec![],
     };
 
@@ -445,8 +452,8 @@ pub(in crate::completion) fn try_infer_from_generator_yield(
         return vec![];
     }
 
-    crate::completion::type_resolution::type_hint_to_classes(
-        &value_type,
+    crate::completion::type_resolution::type_hint_to_classes_typed(
+        value_type,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,

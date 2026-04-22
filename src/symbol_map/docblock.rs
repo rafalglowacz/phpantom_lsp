@@ -20,93 +20,28 @@ use mago_type_syntax::ast as type_ast;
 
 use crate::docblock::parser::parse_docblock;
 use crate::docblock::types::split_type_token;
+use crate::php_type::PhpType;
 use crate::types::TemplateVariance;
 
-use super::{SymbolKind, SymbolSpan};
+use super::{ClassRefContext, SelfStaticParentKind, SymbolKind, SymbolSpan};
 use crate::util::strip_fqn_prefix;
 
 // ─── Navigability filter ────────────────────────────────────────────────────
 
-/// Non-navigable type names (scalars, pseudo-types, PHPStan utility types).
-/// Types in this list are skipped when extracting docblock symbol spans.
-const NON_NAVIGABLE: &[&str] = &[
-    "int",
-    "integer",
-    "float",
-    "double",
-    "string",
-    "bool",
-    "boolean",
-    "array",
-    "object",
-    "mixed",
-    "void",
-    "null",
-    "true",
-    "false",
-    "never",
-    "resource",
-    "callable",
-    "iterable",
-    "static",
-    "self",
-    "parent",
-    "class-string",
-    "positive-int",
-    "negative-int",
-    "non-empty-string",
-    "non-empty-array",
-    "non-empty-list",
-    "numeric-string",
-    "numeric",
-    "scalar",
-    "list",
-    "non-falsy-string",
-    "literal-string",
-    "callable-string",
-    "array-key",
-    "value-of",
-    "key-of",
-    "int-mask",
-    "int-mask-of",
-    "no-return",
-    "empty",
-    "number",
-    "non-positive-int",
-    "non-negative-int",
-    "non-zero-int",
-    "truthy-string",
-    "lowercase-string",
-    "uppercase-string",
-    "non-empty-lowercase-string",
-    "non-empty-uppercase-string",
-    "non-empty-literal-string",
-    "associative-array",
-    "interface-string",
-    "trait-string",
-    "enum-string",
-    "empty-scalar",
-    "non-empty-scalar",
-    "non-empty-mixed",
-    "callable-object",
-    "callable-array",
-    "closed-resource",
-    "open-resource",
-    "never-return",
-    "never-returns",
-    "noreturn",
-];
-
 /// Returns `true` when a type name refers to a class/interface that the
 /// user should be able to navigate to.
+///
+/// Uses simple string splitting instead of `PhpType::parse()` + `base_name()`
+/// because this is called for every type span during symbol-map extraction
+/// and must stay allocation-free.
 pub(crate) fn is_navigable_type(name: &str) -> bool {
     let base = name.split('<').next().unwrap_or(name);
     let base = base.split('{').next().unwrap_or(base);
-    let lower = base.trim().to_ascii_lowercase();
-    if lower.is_empty() {
+    let base = base.trim();
+    if base.is_empty() {
         return false;
     }
-    !NON_NAVIGABLE.contains(&lower.as_str())
+    !crate::php_type::is_keyword_type(base)
 }
 
 // ─── Span construction helpers ──────────────────────────────────────────────
@@ -122,7 +57,31 @@ pub(super) fn class_ref_span(start: u32, end: u32, raw_name: &str) -> SymbolSpan
     SymbolSpan {
         start,
         end,
-        kind: SymbolKind::ClassReference { name, is_fqn },
+        kind: SymbolKind::ClassReference {
+            name,
+            is_fqn,
+            context: ClassRefContext::Other,
+        },
+    }
+}
+
+/// Like [`class_ref_span`] but with an explicit [`ClassRefContext`].
+pub(super) fn class_ref_span_ctx(
+    start: u32,
+    end: u32,
+    raw_name: &str,
+    ctx: ClassRefContext,
+) -> SymbolSpan {
+    let is_fqn = raw_name.starts_with('\\');
+    let name = strip_fqn_prefix(raw_name).to_string();
+    SymbolSpan {
+        start,
+        end,
+        kind: SymbolKind::ClassReference {
+            name,
+            is_fqn,
+            context: ctx,
+        },
     }
 }
 
@@ -191,6 +150,9 @@ const TYPE_FIRST_KINDS: &[TagKind] = &[
     TagKind::PhpstanReturn,
     TagKind::PhpstanParam,
     TagKind::PhpstanVar,
+    TagKind::PsalmReturn,
+    TagKind::PsalmParam,
+    TagKind::PsalmVar,
     TagKind::PhpstanAssert,
     TagKind::PhpstanAssertIfTrue,
     TagKind::PhpstanAssertIfFalse,
@@ -200,7 +162,12 @@ const TYPE_FIRST_KINDS: &[TagKind] = &[
 ];
 
 /// Tag names (for `TagKind::Other`) whose description starts with a type.
-const TYPE_FIRST_OTHER_NAMES: &[&str] = &["psalm-return", "psalm-param", "psalm-var"];
+///
+/// Note: `@psalm-return`, `@psalm-param`, and `@psalm-var` are no longer
+/// listed here because `mago-docblock` now maps them to dedicated
+/// `TagKind::PsalmReturn` / `PsalmParam` / `PsalmVar` variants (handled
+/// in `TYPE_FIRST_KINDS` above).
+const TYPE_FIRST_OTHER_NAMES: &[&str] = &[];
 
 use crate::docblock::templates::{TEMPLATE_KINDS, variance_for};
 
@@ -230,7 +197,7 @@ pub(super) fn extract_docblock_symbols(
     docblock: &str,
     base_offset: u32,
     spans: &mut Vec<SymbolSpan>,
-) -> Vec<(String, u32, Option<String>, TemplateVariance)> {
+) -> Vec<(String, u32, Option<PhpType>, TemplateVariance)> {
     // ── Inline `{@see ...}` references ──────────────────────────────
     // These appear in free-text, not as top-level tags, so we scan the
     // raw docblock text for them.
@@ -246,7 +213,7 @@ pub(super) fn extract_docblock_symbols(
         return Vec::new();
     };
 
-    let mut template_params: Vec<(String, u32, Option<String>, TemplateVariance)> = Vec::new();
+    let mut template_params: Vec<(String, u32, Option<PhpType>, TemplateVariance)> = Vec::new();
 
     for tag in &info.tags {
         let desc_file_offset = tag.description_span.start.offset;
@@ -351,8 +318,10 @@ pub(super) fn extract_param_var_spans(docblock: &str, base_offset: u32) -> Vec<(
     let mut results = Vec::new();
 
     for tag in &info.tags {
-        let is_param = matches!(tag.kind, TagKind::Param | TagKind::PhpstanParam)
-            || (tag.kind == TagKind::Other && tag.name == "psalm-param");
+        let is_param = matches!(
+            tag.kind,
+            TagKind::Param | TagKind::PhpstanParam | TagKind::PsalmParam
+        );
         if !is_param {
             continue;
         }
@@ -557,7 +526,11 @@ pub(super) fn emit_type_spans(
                 spans.push(SymbolSpan {
                     start: token_file_offset,
                     end: token_file_offset + trimmed.len() as u32,
-                    kind: SymbolKind::ClassReference { name, is_fqn },
+                    kind: SymbolKind::ClassReference {
+                        name,
+                        is_fqn,
+                        context: ClassRefContext::Other,
+                    },
                 });
             }
         }
@@ -866,9 +839,7 @@ fn emit_type_spans_from_ast(
                 spans.push(SymbolSpan {
                     start,
                     end,
-                    kind: SymbolKind::SelfStaticParent {
-                        keyword: "static".to_string(),
-                    },
+                    kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::This),
                 });
             }
             // Other variables (parameter names leaked from @param) are skipped.
@@ -922,12 +893,16 @@ fn emit_type_spans_from_ast(
             if name == "static" || name == "self" || name == "parent" {
                 let start = base_offset + k.span.start.offset;
                 let end = base_offset + k.span.end.offset;
+                let ssp_kind = match name {
+                    "self" => SelfStaticParentKind::Self_,
+                    "static" => SelfStaticParentKind::Static,
+                    "parent" => SelfStaticParentKind::Parent,
+                    _ => unreachable!(),
+                };
                 spans.push(SymbolSpan {
                     start,
                     end,
-                    kind: SymbolKind::SelfStaticParent {
-                        keyword: name.to_string(),
-                    },
+                    kind: SymbolKind::SelfStaticParent(ssp_kind),
                 });
             }
             // All other keywords (int, string, void, etc.) are non-navigable.
@@ -958,12 +933,16 @@ fn emit_identifier_span(name: &str, start: u32, end: u32, spans: &mut Vec<Symbol
     // Handle `self`, `static`, `parent` — they're class-like but get
     // a special span kind.
     if name == "static" || name == "self" || name == "parent" {
+        let ssp_kind = match name {
+            "self" => SelfStaticParentKind::Self_,
+            "static" => SelfStaticParentKind::Static,
+            "parent" => SelfStaticParentKind::Parent,
+            _ => unreachable!(),
+        };
         spans.push(SymbolSpan {
             start,
             end,
-            kind: SymbolKind::SelfStaticParent {
-                keyword: name.to_string(),
-            },
+            kind: SymbolKind::SelfStaticParent(ssp_kind),
         });
         return;
     }
@@ -979,6 +958,7 @@ fn emit_identifier_span(name: &str, start: u32, end: u32, spans: &mut Vec<Symbol
             kind: SymbolKind::ClassReference {
                 name: display_name,
                 is_fqn,
+                context: ClassRefContext::Other,
             },
         });
     }
@@ -1011,7 +991,7 @@ fn extract_template_tag_symbols(
     desc_start_in_docblock: usize,
     base_offset: u32,
     spans: &mut Vec<SymbolSpan>,
-) -> Option<(String, u32, Option<String>)> {
+) -> Option<(String, u32, Option<PhpType>)> {
     let desc = docblock.get(desc_start_in_docblock..)?;
     // Take only the first line of the description (template tags are
     // always single-line).
@@ -1056,7 +1036,7 @@ fn extract_template_tag_symbols(
             base_offset + bound_start_in_docblock as u32,
             spans,
         );
-        Some(type_token.to_string())
+        Some(PhpType::parse(type_token))
     } else {
         None
     };

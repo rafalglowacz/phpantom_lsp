@@ -6,22 +6,22 @@
 //! virtual instance and static methods with the `scope` prefix stripped
 //! and the first `$query` parameter removed.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, MethodInfo};
+use crate::util::short_name;
 
+use super::ELOQUENT_BUILDER_FQN;
 use super::helpers::extends_eloquent_model;
 
 /// Build the default return type for scope methods that don't declare a return
 /// type or return `void`.
-fn default_scope_return_type() -> String {
+fn default_scope_return_type() -> PhpType {
     PhpType::Generic(
         "Illuminate\\Database\\Eloquent\\Builder".to_string(),
-        vec![PhpType::Named("static".to_string())],
+        vec![PhpType::static_()],
     )
-    .to_string()
 }
 
 /// Determine whether a method is an Eloquent scope.
@@ -79,10 +79,11 @@ pub(super) fn scope_name(method_name: &str) -> String {
 /// Uses the scope method's declared return type.  If the return type is
 /// `void` or absent, defaults to
 /// `\Illuminate\Database\Eloquent\Builder<static>`.
-pub(super) fn scope_return_type(method: &MethodInfo) -> String {
-    match method.return_type_str().as_deref() {
-        Some("void") | None => default_scope_return_type(),
-        Some(rt) => rt.to_string(),
+pub(super) fn scope_return_type(method: &MethodInfo) -> PhpType {
+    match &method.return_type {
+        Some(t) if t.is_void() => default_scope_return_type(),
+        Some(t) => t.clone(),
+        None => default_scope_return_type(),
     }
 }
 
@@ -95,7 +96,7 @@ pub(super) fn scope_return_type(method: &MethodInfo) -> String {
 /// `User::active()` (static) and `$user->active()` (instance).
 pub(super) fn build_scope_methods(method: &MethodInfo) -> [MethodInfo; 2] {
     let name = scope_name_for(method);
-    let return_type = Some(scope_return_type(method));
+    let return_type = scope_return_type(method);
 
     // Strip the first parameter ($query / $builder) that Laravel injects.
     let parameters: Vec<_> = if method.parameters.is_empty() {
@@ -107,14 +108,16 @@ pub(super) fn build_scope_methods(method: &MethodInfo) -> [MethodInfo; 2] {
     let instance_method = MethodInfo {
         parameters: parameters.clone(),
         deprecation_message: method.deprecation_message.clone(),
-        ..MethodInfo::virtual_method(&name, return_type.as_deref())
+        return_type: Some(return_type.clone()),
+        ..MethodInfo::virtual_method(&name, None)
     };
 
     let static_method = MethodInfo {
         parameters,
         is_static: true,
         deprecation_message: method.deprecation_message.clone(),
-        ..MethodInfo::virtual_method(&name, return_type.as_deref())
+        return_type: Some(return_type),
+        ..MethodInfo::virtual_method(&name, None)
     };
 
     [instance_method, static_method]
@@ -138,7 +141,9 @@ pub fn build_scope_methods_for_builder(
 ) -> Vec<MethodInfo> {
     let model_class = match class_loader(model_name) {
         Some(c) => c,
-        None => return Vec::new(),
+        None => {
+            return Vec::new();
+        }
     };
 
     // Only synthesize scopes for actual Eloquent models.
@@ -153,17 +158,13 @@ pub fn build_scope_methods_for_builder(
     // Using the pre-provider resolution preserves the raw methods.
     let resolved_model =
         crate::inheritance::resolve_class_with_inheritance(&model_class, class_loader);
-
     // Build a substitution map so that `static`, `$this`, and `self`
     // in scope return types resolve to the concrete model name.
     // The default scope return type is `\...\Builder<static>` where
     // `static` means the model, so substituting `static` → `User`
     // produces `\...\Builder<User>`, keeping the chain on the builder.
-    let model_type = PhpType::Named(model_name.to_string());
-    let mut subs = HashMap::new();
-    subs.insert("static".to_string(), model_type.clone());
-    subs.insert("$this".to_string(), model_type.clone());
-    subs.insert("self".to_string(), model_type);
+    let model_type = PhpType::Named(model_name.to_owned());
+    let subs = super::self_ref_subs(model_type);
 
     let mut methods = Vec::new();
 
@@ -183,12 +184,39 @@ pub fn build_scope_methods_for_builder(
         // Apply substitutions to the return type.
         if let Some(ref mut ret) = m.return_type {
             *ret = ret.substitute(&subs);
+
+            // When a scope method declares a bare `Builder` return type
+            // (without generic args), the chain loses track of the
+            // concrete model.  Subsequent calls on the returned Builder
+            // would not find model-specific scope methods because
+            // `type_hint_to_classes_typed` only injects scopes when
+            // generic args are present.  Wrap bare Builder return types
+            // as `Builder<ModelName>` to preserve the chain.
+            if is_bare_builder_type(ret) {
+                *ret = PhpType::Generic(
+                    ELOQUENT_BUILDER_FQN.to_string(),
+                    vec![PhpType::Named(model_name.to_string())],
+                );
+            }
         }
 
         methods.push(m);
     }
 
     methods
+}
+
+/// Check whether a `PhpType` is a bare Eloquent Builder reference
+/// without generic arguments.
+///
+/// Matches both the FQN (`Illuminate\Database\Eloquent\Builder`) and
+/// the short name (`Builder`) since scope methods in user code
+/// typically use the imported short name.
+fn is_bare_builder_type(ty: &PhpType) -> bool {
+    match ty {
+        PhpType::Named(name) => name == ELOQUENT_BUILDER_FQN || short_name(name) == "Builder",
+        _ => false,
+    }
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ use super::point_location;
 use crate::Backend;
 use crate::completion::resolver::ResolutionCtx;
 use crate::docblock;
+use crate::types::ResolvedType;
 use crate::types::*;
 use crate::util::{find_class_at_offset, position_to_offset};
 use crate::virtual_members::laravel::{
@@ -134,8 +135,9 @@ impl Backend {
             function_loader: Some(&function_loader),
             phpstorm_meta: Some(&meta_guard),
         };
-        let candidates =
-            crate::completion::resolver::resolve_target_classes(subject, access_kind, &rctx);
+        let candidates = ResolvedType::into_arced_classes(
+            crate::completion::resolver::resolve_target_classes(subject, access_kind, &rctx),
+        );
 
         if candidates.is_empty() {
             return None;
@@ -147,7 +149,7 @@ impl Backend {
             // Candidates from resolve_target_classes may be fully-resolved
             // (merged) classes that include virtual/mixin members directly
             // in their methods list (e.g. when generic args triggered
-            // resolve_class_fully inside type_hint_to_classes).
+            // resolve_class_fully inside type_hint_to_classes_typed).
             // find_declaring_class needs the raw (unmerged) class so it
             // can trace the member to the actual declaring class through
             // the real inheritance/mixin chain.
@@ -755,10 +757,7 @@ impl Backend {
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     ) -> Option<(ClassInfo, String, String)> {
         // Only applies to the Eloquent Builder class.
-        let raw_fqn = match &raw_class.file_namespace {
-            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, raw_class.name),
-            _ => raw_class.name.clone(),
-        };
+        let raw_fqn = raw_class.fqn();
         if raw_fqn != ELOQUENT_BUILDER_FQN {
             return None;
         }
@@ -777,15 +776,14 @@ impl Backend {
         // We specifically look for return types whose base type is
         // the Eloquent Builder and extract the first generic arg as
         // the model name.
-        let extract_model_from_builder_ret = |ret: &str| -> Option<String> {
-            let parsed = crate::php_type::PhpType::parse(ret);
-            match &parsed {
+        let extract_model_from_builder_ret = |ret: &crate::php_type::PhpType| -> Option<String> {
+            match ret {
                 crate::php_type::PhpType::Generic(base, args) if !args.is_empty() => {
                     // Check that the base type is the Eloquent Builder.
                     if base != ELOQUENT_BUILDER_FQN && base != "Builder" {
                         return None;
                     }
-                    Some(args[0].to_string())
+                    args[0].base_name().map(|s| s.to_string())
                 }
                 _ => None,
             }
@@ -798,17 +796,18 @@ impl Backend {
         // the model name.  All scope methods on the same
         // Builder<Model> instance share the same model, so any match
         // is valid.
-        let scope_ret_str = scope_method.return_type_str();
-        let model_name = scope_ret_str
-            .as_deref()
+        let model_name = scope_method
+            .return_type
+            .as_ref()
             .and_then(&extract_model_from_builder_ret)
             .or_else(|| {
                 resolved_candidate.methods.iter().find_map(|m| {
                     if m.is_static {
                         return None;
                     }
-                    let ret_str = m.return_type_str();
-                    ret_str.as_deref().and_then(&extract_model_from_builder_ret)
+                    m.return_type
+                        .as_ref()
+                        .and_then(&extract_model_from_builder_ret)
                 })
             })?;
 

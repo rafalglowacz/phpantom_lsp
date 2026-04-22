@@ -1,5 +1,3 @@
-use mago_span::HasSpan;
-use mago_syntax::ast::*;
 /// Type narrowing for variable resolution.
 ///
 /// This module contains the logic for narrowing a variable's type based on
@@ -22,13 +20,58 @@ use mago_syntax::ast::*;
 ///     `return`, `throw`, `continue`, or `break`.
 ///   - `in_array($var, $haystack, true)` — narrows `$var` to the
 ///     haystack's element type when the third argument is `true`.
-use std::sync::Arc;
-
+///   - `is_array($var)` — narrows to only the array-like members of a
+///     union type, preserving generic element types from PHPDoc.
+///   - `is_string($var)`, `is_int($var)`, `is_bool($var)`, etc. —
+///     narrows to the corresponding scalar type.
 use crate::php_type::PhpType;
 use crate::types::{AssertionKind, ClassInfo, ParameterInfo, ResolvedType, TypeAssertion};
+use mago_span::HasSpan;
+use mago_syntax::ast::*;
 
 use super::conditional::extract_class_string_from_expr;
 use crate::completion::resolver::VarResolutionCtx;
+
+/// Resolve the `class_type` inside an `InstanceofExtraction` to its FQN.
+///
+/// When the extractor returns a short class name (e.g. `Foo`), the
+/// `class_loader` may know the fully-qualified name (`App\Foo`).
+/// Resolving early ensures that downstream comparisons (e.g.
+/// `out.contains(&cls_type)`) and `ResolvedType` hints carry the FQN
+/// rather than the short name.
+fn resolve_extraction_to_fqn(
+    extraction: &mut InstanceofExtraction,
+    class_loader: &dyn Fn(&str) -> Option<std::sync::Arc<ClassInfo>>,
+) {
+    if let PhpType::Named(ref name) = extraction.class_type {
+        let resolved = crate::util::resolve_name_via_loader(name, class_loader);
+        if resolved != *name {
+            extraction.class_type = PhpType::Named(resolved);
+        }
+    }
+}
+
+/// Resolve a list of `PhpType` values into a deduplicated `Vec<ClassInfo>`.
+///
+/// This is a shared helper for the compound instanceof/assert narrowing
+/// patterns that produce a union of classes from multiple branches.
+fn resolve_class_names_to_union(classes: &[PhpType], ctx: &VarResolutionCtx<'_>) -> Vec<ClassInfo> {
+    let mut union = Vec::new();
+    for ty in classes {
+        let resolved = super::resolution::type_hint_to_classes_typed(
+            ty,
+            &ctx.current_class.name,
+            ctx.all_classes,
+            ctx.class_loader,
+        );
+        for cls in resolved {
+            if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
+                union.push(cls);
+            }
+        }
+    }
+    union
+}
 
 /// Convert an AST expression to a subject key string for narrowing comparison.
 ///
@@ -90,20 +133,7 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
     if let Some(classes) = try_extract_compound_or_instanceof(condition, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -118,20 +148,7 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
     if let Some(classes) = try_extract_compound_and_instanceof(condition, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -139,11 +156,12 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing(
         return;
     }
 
-    if let Some(extraction) = try_extract_instanceof_with_negation(condition, ctx.var_name) {
+    if let Some(mut extraction) = try_extract_instanceof_with_negation(condition, ctx.var_name) {
+        resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
         if extraction.negated {
-            apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+            apply_instanceof_exclusion(&extraction.class_type, ctx, results);
         } else {
-            apply_instanceof_inclusion(&extraction.class_name, extraction.exact, ctx, results);
+            apply_instanceof_inclusion(&extraction.class_type, extraction.exact, ctx, results);
         }
     }
 }
@@ -169,8 +187,8 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing_inverse(
     if let Some(classes) = try_extract_compound_or_instanceof(condition, ctx.var_name)
         && !classes.is_empty()
     {
-        for cls_name in &classes {
-            apply_instanceof_exclusion(cls_name, ctx, results);
+        for cls_type in &classes {
+            apply_instanceof_exclusion(cls_type, ctx, results);
         }
         return;
     }
@@ -179,13 +197,14 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing_inverse(
     // In the else branch, at least one doesn't hold.  Since we can't
     // precisely model "not (A and B)", we don't narrow.  Fall through.
 
-    if let Some(extraction) = try_extract_instanceof_with_negation(condition, ctx.var_name) {
+    if let Some(mut extraction) = try_extract_instanceof_with_negation(condition, ctx.var_name) {
+        resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
         // Flip the polarity: positive condition → exclude in else,
         // negated condition → include in else.
         if extraction.negated {
-            apply_instanceof_inclusion(&extraction.class_name, extraction.exact, ctx, results);
+            apply_instanceof_inclusion(&extraction.class_type, extraction.exact, ctx, results);
         } else {
-            apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+            apply_instanceof_exclusion(&extraction.class_type, ctx, results);
         }
     }
 }
@@ -204,18 +223,29 @@ pub(in crate::completion) fn try_apply_instanceof_narrowing_inverse(
 /// `$x::class === Foo::class`), the variable is narrowed to exactly
 /// that class regardless of the current results.
 pub(in crate::completion) fn apply_instanceof_inclusion(
-    cls_name: &str,
+    ty: &PhpType,
     exact: bool,
     ctx: &VarResolutionCtx<'_>,
     results: &mut Vec<ClassInfo>,
 ) {
-    let narrowed = super::resolution::type_hint_to_classes(
-        cls_name,
+    let narrowed = super::resolution::type_hint_to_classes_typed(
+        ty,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,
     );
     if narrowed.is_empty() {
+        // The instanceof target class could not be resolved (e.g. it
+        // lives inside a phar that we cannot index).  The developer
+        // wrote an explicit instanceof guard, so they clearly expect
+        // the variable to have that type in this branch.  Rather than
+        // keeping the un-narrowed type (which would cause false-
+        // positive "unknown member" diagnostics for members that only
+        // exist on the unresolvable subclass), clear the results so
+        // the variable appears untyped.  Untyped subjects are
+        // suppressed by the diagnostic engine, eliminating the false
+        // positives without losing any information we actually had.
+        results.clear();
         return;
     }
 
@@ -229,7 +259,7 @@ pub(in crate::completion) fn apply_instanceof_inclusion(
             .filter(|r| {
                 narrowed
                     .iter()
-                    .any(|n| is_subtype_of(r, &n.fqn(), ctx.class_loader))
+                    .any(|n| crate::util::is_subtype_of_names(&r.fqn(), &n.fqn(), ctx.class_loader))
             })
             .cloned()
             .collect();
@@ -250,7 +280,7 @@ pub(in crate::completion) fn apply_instanceof_inclusion(
         let narrowed_is_more_specific = narrowed.iter().any(|n| {
             results
                 .iter()
-                .any(|r| is_subtype_of(n, &r.fqn(), ctx.class_loader))
+                .any(|r| crate::util::is_subtype_of_names(&n.fqn(), &r.fqn(), ctx.class_loader))
         });
 
         if !narrowed_is_more_specific && results.len() == 1 {
@@ -293,102 +323,14 @@ pub(in crate::completion) fn apply_instanceof_inclusion(
     }
 }
 
-/// Check whether `class` is a subtype of the class identified by
-/// `ancestor_name`.  Returns `true` when:
-///
-/// - `class.name` equals `ancestor_name` (same class), or
-/// - walking the `parent_class` chain reaches `ancestor_name`, or
-/// - `ancestor_name` appears in the `interfaces` list of `class` or any
-///   of its ancestors.
-///
-/// Both short names and fully-qualified names are compared so that
-/// cross-file relationships (where `parent_class` stores FQNs) work.
-pub(crate) fn is_subtype_of(
-    class: &ClassInfo,
-    ancestor_name: &str,
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> bool {
-    let ancestor_short = ancestor_name.rsplit('\\').next().unwrap_or(ancestor_name);
-
-    // Same class?  When the ancestor is a FQN, compare against the
-    // class's own FQN to avoid false positives when two classes share
-    // the same short name (e.g. `Contracts\Provider` vs
-    // `Concrete\Provider`).
-    if ancestor_name.contains('\\') {
-        if class.fqn() == ancestor_name {
-            return true;
-        }
-    } else if class.name == ancestor_name {
-        return true;
-    }
-
-    // When the ancestor is qualified, only match against normalised
-    // FQNs — never fall back to short-name comparison, which would
-    // produce false positives when two different classes share the
-    // same short name (e.g. `Contracts\Provider` vs
-    // `Concrete\Provider`).
-    let fqn_mode = ancestor_name.contains('\\');
-
-    // Check interfaces on the class itself.
-    for iface in &class.interfaces {
-        if iface == ancestor_name {
-            return true;
-        }
-        if !fqn_mode {
-            let iface_short = iface.rsplit('\\').next().unwrap_or(iface);
-            if iface_short == ancestor_short {
-                return true;
-            }
-        }
-    }
-
-    // Walk the parent chain.
-    let mut current_parent = class.parent_class.clone();
-    let mut depth = 0u32;
-    while let Some(ref name) = current_parent {
-        depth += 1;
-        if depth > 20 {
-            break;
-        }
-        if name == ancestor_name {
-            return true;
-        }
-        if !fqn_mode {
-            let short = name.rsplit('\\').next().unwrap_or(name);
-            if short == ancestor_short {
-                return true;
-            }
-        }
-        // Load the parent to check its interfaces and continue the chain.
-        if let Some(parent_info) = class_loader(name) {
-            for iface in &parent_info.interfaces {
-                if iface == ancestor_name {
-                    return true;
-                }
-                if !fqn_mode {
-                    let iface_short = iface.rsplit('\\').next().unwrap_or(iface);
-                    if iface_short == ancestor_short {
-                        return true;
-                    }
-                }
-            }
-            current_parent = parent_info.parent_class.clone();
-        } else {
-            break;
-        }
-    }
-
-    false
-}
-
-/// Remove the resolved classes for `cls_name` from `results`.
+/// Remove the resolved classes for `ty` from `results`.
 pub(in crate::completion) fn apply_instanceof_exclusion(
-    cls_name: &str,
+    ty: &PhpType,
     ctx: &VarResolutionCtx<'_>,
     results: &mut Vec<ClassInfo>,
 ) {
-    let excluded = super::resolution::type_hint_to_classes(
-        cls_name,
+    let excluded = super::resolution::type_hint_to_classes_typed(
+        ty,
         &ctx.current_class.name,
         ctx.all_classes,
         ctx.class_loader,
@@ -406,7 +348,7 @@ pub(in crate::completion) fn apply_instanceof_exclusion(
 pub(in crate::completion) fn try_extract_instanceof<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     match expr {
         Expression::Parenthesized(inner) => try_extract_instanceof(inner.expression, var_name),
         Expression::Binary(bin) if bin.operator.is_instanceof() => {
@@ -417,10 +359,10 @@ pub(in crate::completion) fn try_extract_instanceof<'b>(
             }
             // RHS is the class name
             match bin.rhs {
-                Expression::Identifier(ident) => Some(ident.value().to_string()),
-                Expression::Self_(_) => Some("self".to_string()),
-                Expression::Static(_) => Some("static".to_string()),
-                Expression::Parent(_) => Some("parent".to_string()),
+                Expression::Identifier(ident) => Some(PhpType::Named(ident.value().to_string())),
+                Expression::Self_(_) => Some(PhpType::Named("self".to_string())),
+                Expression::Static(_) => Some(PhpType::Named("static".to_string())),
+                Expression::Parent(_) => Some(PhpType::Named("parent".to_string())),
                 _ => None,
             }
         }
@@ -450,7 +392,8 @@ pub(in crate::completion) fn try_extract_instanceof<'b>(
 ///   `false` for `instanceof` / `is_a()` checks where a more-specific subtype
 ///   in the current results should be kept.
 pub(in crate::completion) struct InstanceofExtraction {
-    pub class_name: String,
+    /// The narrowed type (e.g. `PhpType::Named("ClassName".into())`).
+    pub class_type: PhpType,
     pub negated: bool,
     pub exact: bool,
 }
@@ -474,15 +417,15 @@ pub(in crate::completion) fn try_extract_instanceof_with_negation<'b>(
         }
         _ => {
             try_extract_instanceof(expr, var_name)
-                .map(|cls| InstanceofExtraction {
-                    class_name: cls,
+                .map(|cls_type| InstanceofExtraction {
+                    class_type: cls_type,
                     negated: false,
                     exact: false,
                 })
                 .or_else(|| {
                     // `is_a($var, ClassName::class)` — equivalent to instanceof
-                    try_extract_is_a(expr, var_name).map(|cls| InstanceofExtraction {
-                        class_name: cls,
+                    try_extract_is_a(expr, var_name).map(|cls_type| InstanceofExtraction {
+                        class_type: cls_type,
                         negated: false,
                         exact: false,
                     })
@@ -490,9 +433,9 @@ pub(in crate::completion) fn try_extract_instanceof_with_negation<'b>(
                 .or_else(|| {
                     // `get_class($var) === ClassName::class` or
                     // `$var::class === ClassName::class` — exact class match
-                    try_extract_class_identity_check(expr, var_name).map(|(cls, neg)| {
+                    try_extract_class_identity_check(expr, var_name).map(|(cls_type, neg)| {
                         InstanceofExtraction {
-                            class_name: cls,
+                            class_type: cls_type,
                             negated: neg,
                             exact: true,
                         }
@@ -506,7 +449,7 @@ pub(in crate::completion) fn try_extract_instanceof_with_negation<'b>(
 /// `$var instanceof ClassName`.
 ///
 /// Returns the class name if the pattern matches.
-fn try_extract_is_a<'b>(expr: &'b Expression<'b>, var_name: &str) -> Option<String> {
+fn try_extract_is_a<'b>(expr: &'b Expression<'b>, var_name: &str) -> Option<PhpType> {
     let expr = match expr {
         Expression::Parenthesized(inner) => inner.expression,
         other => other,
@@ -540,7 +483,7 @@ fn try_extract_is_a<'b>(expr: &'b Expression<'b>, var_name: &str) -> Option<Stri
             Argument::Positional(pos) => pos.value,
             Argument::Named(named) => named.value,
         };
-        extract_class_string_from_expr(second_expr)
+        extract_class_string_from_expr(second_expr).map(PhpType::Named)
     } else {
         None
     }
@@ -554,7 +497,7 @@ fn try_extract_is_a<'b>(expr: &'b Expression<'b>, var_name: &str) -> Option<Stri
 fn try_extract_class_identity_check<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-) -> Option<(String, bool)> {
+) -> Option<(PhpType, bool)> {
     let expr = match expr {
         Expression::Parenthesized(inner) => inner.expression,
         other => other,
@@ -586,13 +529,13 @@ fn match_class_identity_pair<'b>(
     lhs: &'b Expression<'b>,
     rhs: &'b Expression<'b>,
     var_name: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     let is_class_of_var =
         is_get_class_of_var(lhs, var_name) || is_var_class_constant(lhs, var_name);
     if !is_class_of_var {
         return None;
     }
-    extract_class_string_from_expr(rhs)
+    extract_class_string_from_expr(rhs).map(PhpType::Named)
 }
 
 /// Check if `expr` is `get_class($var)` where the variable matches.
@@ -765,7 +708,7 @@ pub(in crate::completion) fn try_apply_custom_assert_narrowing(
             // ExpectedType $actual`), substitute it using the call-site
             // argument bound via `class-string<T>`.
             let effective_type =
-                resolve_assertion_template_type(&assertion.asserted_type.to_string(), &info, ctx);
+                resolve_assertion_template_type(&assertion.asserted_type, &info, ctx);
 
             if assertion.negated {
                 apply_instanceof_exclusion(&effective_type, ctx, results);
@@ -795,45 +738,45 @@ pub(in crate::completion) fn try_apply_custom_assert_narrowing(
 /// Returns the original type unchanged when it is not a template param
 /// or when the concrete type cannot be determined.
 fn resolve_assertion_template_type(
-    asserted_type: &str,
+    asserted_type: &PhpType,
     info: &CallAssertionInfo<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> String {
+) -> PhpType {
     // Check if the asserted type is a template parameter.
-    if !info.template_params.iter().any(|t| t == asserted_type) {
-        return asserted_type.to_string();
-    }
+    let tpl_name = match asserted_type {
+        PhpType::Named(n) if info.template_params.iter().any(|t| t == n) => n.as_str(),
+        _ => return asserted_type.clone(),
+    };
 
     // Find the parameter name that binds this template param.
     let bound_param = info
         .template_bindings
         .iter()
-        .find(|(tpl, _)| tpl == asserted_type)
+        .find(|(tpl, _)| tpl == tpl_name)
         .map(|(_, param)| param.as_str());
 
     let bound_param = match bound_param {
         Some(p) => p,
-        None => return asserted_type.to_string(),
+        None => return asserted_type.clone(),
     };
 
     // Find the positional index of that parameter.
     let param_idx = match info.parameters.iter().position(|p| p.name == bound_param) {
         Some(idx) => idx,
-        None => return asserted_type.to_string(),
+        None => return asserted_type.clone(),
     };
 
     // Get the call-site argument at that position.
     let arg_expr = match info.argument_list.arguments.iter().nth(param_idx) {
         Some(Argument::Positional(pos)) => pos.value,
         Some(Argument::Named(named)) => named.value,
-        None => return asserted_type.to_string(),
+        None => return asserted_type.clone(),
     };
 
     // Try to extract a class name from the argument expression.
-    // Handles `Foo::class` and `\Foo\Bar::class`.
-    // Reuses the existing helper from the conditional module.
     if let Some(class_name) = extract_class_string_from_expr(arg_expr) {
-        return class_name;
+        let fqn = crate::util::resolve_name_via_loader(&class_name, ctx.class_loader);
+        return PhpType::Named(fqn);
     }
 
     // Try to resolve a variable argument's class-string type.
@@ -849,11 +792,11 @@ fn resolve_assertion_template_type(
                 ctx.class_loader,
             );
         if let Some(first) = targets.into_iter().next() {
-            return first.name;
+            return PhpType::Named(first.name);
         }
     }
 
-    asserted_type.to_string()
+    asserted_type.clone()
 }
 
 /// Apply narrowing from `@phpstan-assert-if-true` / `-if-false`
@@ -915,14 +858,9 @@ pub(in crate::completion) fn try_apply_assert_condition_narrowing(
                 // opposite + negated → include.
                 let should_exclude = assertion.negated ^ !applies_positively;
                 if should_exclude {
-                    apply_instanceof_exclusion(&assertion.asserted_type.to_string(), ctx, results);
+                    apply_instanceof_exclusion(&assertion.asserted_type, ctx, results);
                 } else {
-                    apply_instanceof_inclusion(
-                        &assertion.asserted_type.to_string(),
-                        false,
-                        ctx,
-                        results,
-                    );
+                    apply_instanceof_inclusion(&assertion.asserted_type, false, ctx, results);
                 }
             }
         }
@@ -1009,11 +947,10 @@ fn apply_this_assert_condition_narrowing(
     }
 
     for (asserted_type, should_exclude) in to_apply {
-        let type_str = asserted_type.to_string();
         if should_exclude {
-            apply_instanceof_exclusion(&type_str, ctx, results);
+            apply_instanceof_exclusion(&asserted_type, ctx, results);
         } else {
-            apply_instanceof_inclusion(&type_str, false, ctx, results);
+            apply_instanceof_inclusion(&asserted_type, false, ctx, results);
         }
     }
 }
@@ -1077,20 +1014,7 @@ pub(in crate::completion) fn try_apply_assert_instanceof_narrowing(
     if let Some(classes) = try_extract_assert_compound_or_instanceof(expr, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -1098,11 +1022,12 @@ pub(in crate::completion) fn try_apply_assert_instanceof_narrowing(
         return;
     }
 
-    if let Some(extraction) = try_extract_assert_instanceof(expr, ctx.var_name) {
+    if let Some(mut extraction) = try_extract_assert_instanceof(expr, ctx.var_name) {
+        resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
         if extraction.negated {
-            apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+            apply_instanceof_exclusion(&extraction.class_type, ctx, results);
         } else {
-            apply_instanceof_inclusion(&extraction.class_name, extraction.exact, ctx, results);
+            apply_instanceof_inclusion(&extraction.class_type, extraction.exact, ctx, results);
         }
     }
 }
@@ -1122,11 +1047,12 @@ fn try_extract_assert_instanceof<'b>(
         other => other,
     };
     if let Expression::Call(Call::Function(func_call)) = expr {
-        let func_name = match func_call.function {
-            Expression::Identifier(ident) => ident.value().to_string(),
+        let func_name_raw = match func_call.function {
+            Expression::Identifier(ident) => ident.value(),
             _ => return None,
         };
-        if func_name != "assert" {
+        let func_name = func_name_raw.strip_prefix('\\').unwrap_or(func_name_raw);
+        if !func_name.eq_ignore_ascii_case("assert") {
             return None;
         }
         // The first argument should be the instanceof expression
@@ -1150,17 +1076,18 @@ fn try_extract_assert_instanceof<'b>(
 fn try_extract_assert_compound_or_instanceof<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     let expr = match expr {
         Expression::Parenthesized(inner) => inner.expression,
         other => other,
     };
     if let Expression::Call(Call::Function(func_call)) = expr {
-        let func_name = match func_call.function {
-            Expression::Identifier(ident) => ident.value().to_string(),
+        let func_name_raw = match func_call.function {
+            Expression::Identifier(ident) => ident.value(),
             _ => return None,
         };
-        if func_name != "assert" {
+        let func_name = func_name_raw.strip_prefix('\\').unwrap_or(func_name_raw);
+        if !func_name.eq_ignore_ascii_case("assert") {
             return None;
         }
         if let Some(first_arg) = func_call.argument_list.arguments.iter().next() {
@@ -1221,14 +1148,15 @@ pub(in crate::completion) fn try_apply_match_true_narrowing(
             }
             // Check each condition in this arm (comma-separated)
             for condition in expr_arm.conditions.iter() {
-                if let Some(extraction) =
+                if let Some(mut extraction) =
                     try_extract_instanceof_with_negation(condition, ctx.var_name)
                 {
+                    resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
                     if extraction.negated {
-                        apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+                        apply_instanceof_exclusion(&extraction.class_type, ctx, results);
                     } else {
                         apply_instanceof_inclusion(
-                            &extraction.class_name,
+                            &extraction.class_type,
                             extraction.exact,
                             ctx,
                             results,
@@ -1271,14 +1199,15 @@ pub(in crate::completion) fn try_apply_ternary_instanceof_narrowing(
             };
 
             if in_then {
-                if let Some(extraction) =
+                if let Some(mut extraction) =
                     try_extract_instanceof_with_negation(cond_expr.condition, ctx.var_name)
                 {
+                    resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
                     if extraction.negated {
-                        apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+                        apply_instanceof_exclusion(&extraction.class_type, ctx, results);
                     } else {
                         apply_instanceof_inclusion(
-                            &extraction.class_name,
+                            &extraction.class_type,
                             extraction.exact,
                             ctx,
                             results,
@@ -1286,19 +1215,20 @@ pub(in crate::completion) fn try_apply_ternary_instanceof_narrowing(
                     }
                 }
             } else if in_else
-                && let Some(extraction) =
+                && let Some(mut extraction) =
                     try_extract_instanceof_with_negation(cond_expr.condition, ctx.var_name)
             {
+                resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
                 // Flip polarity for the else branch.
                 if extraction.negated {
                     apply_instanceof_inclusion(
-                        &extraction.class_name,
+                        &extraction.class_type,
                         extraction.exact,
                         ctx,
                         results,
                     );
                 } else {
-                    apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+                    apply_instanceof_exclusion(&extraction.class_type, ctx, results);
                 }
             }
 
@@ -1477,17 +1407,35 @@ fn apply_and_lhs_narrowing(
         }
         _ => {
             // Try to extract a single instanceof / is_a / class-identity check.
-            if let Some(extraction) = try_extract_instanceof_with_negation(expr, ctx.var_name) {
+            if let Some(mut extraction) = try_extract_instanceof_with_negation(expr, ctx.var_name) {
+                resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
                 if extraction.negated {
-                    apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+                    apply_instanceof_exclusion(&extraction.class_type, ctx, results);
                 } else {
                     apply_instanceof_inclusion(
-                        &extraction.class_name,
+                        &extraction.class_type,
                         extraction.exact,
                         ctx,
                         results,
                     );
                 }
+                return;
+            }
+
+            // Try type-guard functions (`is_object`, `is_array`, etc.).
+            // When `is_object($var)` appears in the LHS of `&&` and
+            // the variable has no resolved type yet, inject a synthetic
+            // `stdClass` so that downstream member-access diagnostics
+            // are suppressed (stdClass permits arbitrary properties).
+            if let Some((kind, negated)) = try_extract_type_guard(expr, ctx.var_name)
+                && !negated
+                && kind == TypeGuardKind::Object
+                && results.is_empty()
+            {
+                results.push(ClassInfo {
+                    name: "stdClass".to_string(),
+                    ..ClassInfo::default()
+                });
             }
         }
     }
@@ -1608,9 +1556,7 @@ fn apply_and_lhs_null_narrowing(
                 // The LHS proved the variable is non-null → remove null.
                 results.retain(|rt| !rt.type_string.is_null());
                 for rt in results.iter_mut() {
-                    if let Some(non_null) = rt.type_string.non_null_type() {
-                        rt.type_string = non_null;
-                    }
+                    rt.strip_null();
                 }
             }
         }
@@ -1750,8 +1696,8 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
     if let Some(classes) = try_extract_compound_or_instanceof(if_stmt.condition, ctx.var_name)
         && !classes.is_empty()
     {
-        for cls_name in &classes {
-            apply_instanceof_exclusion(cls_name, ctx, results);
+        for cls_type in &classes {
+            apply_instanceof_exclusion(cls_type, ctx, results);
         }
         return;
     }
@@ -1764,20 +1710,7 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
         try_extract_compound_negated_and_instanceof(if_stmt.condition, ctx.var_name)
         && !classes.is_empty()
     {
-        let mut union = Vec::new();
-        for cls_name in &classes {
-            let resolved = super::resolution::type_hint_to_classes(
-                cls_name,
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            for cls in resolved {
-                if !union.iter().any(|c: &ClassInfo| c.name == cls.name) {
-                    union.push(cls);
-                }
-            }
-        }
+        let union = resolve_class_names_to_union(&classes, ctx);
         if !union.is_empty() {
             results.clear();
             *results = union;
@@ -1788,14 +1721,16 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
     // ── instanceof / is_a / get_class / ::class narrowing ──
     // The then-body exits, so subsequent code is the "else" — apply
     // the inverse of the condition.
-    if let Some(extraction) = try_extract_instanceof_with_negation(if_stmt.condition, ctx.var_name)
+    if let Some(mut extraction) =
+        try_extract_instanceof_with_negation(if_stmt.condition, ctx.var_name)
     {
+        resolve_extraction_to_fqn(&mut extraction, ctx.class_loader);
         // Positive instanceof + exit → exclude after (var is NOT that class)
         // Negated instanceof + exit → include after (var IS that class)
         if extraction.negated {
-            apply_instanceof_inclusion(&extraction.class_name, extraction.exact, ctx, results);
+            apply_instanceof_inclusion(&extraction.class_type, extraction.exact, ctx, results);
         } else {
-            apply_instanceof_exclusion(&extraction.class_name, ctx, results);
+            apply_instanceof_exclusion(&extraction.class_type, ctx, results);
         }
     }
 
@@ -1827,14 +1762,9 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
             {
                 let should_exclude = assertion.negated ^ !applies_positively;
                 if should_exclude {
-                    apply_instanceof_exclusion(&assertion.asserted_type.to_string(), ctx, results);
+                    apply_instanceof_exclusion(&assertion.asserted_type, ctx, results);
                 } else {
-                    apply_instanceof_inclusion(
-                        &assertion.asserted_type.to_string(),
-                        false,
-                        ctx,
-                        results,
-                    );
+                    apply_instanceof_inclusion(&assertion.asserted_type, false, ctx, results);
                 }
             }
         }
@@ -1851,7 +1781,7 @@ pub(in crate::completion) fn apply_guard_clause_narrowing(
 fn try_extract_compound_or_instanceof<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     match expr {
         Expression::Parenthesized(inner) => {
             try_extract_compound_or_instanceof(inner.expression, var_name)
@@ -1879,7 +1809,7 @@ fn try_extract_compound_or_instanceof<'b>(
 fn collect_or_instanceof_classes<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-    out: &mut Vec<String>,
+    out: &mut Vec<PhpType>,
 ) {
     match expr {
         Expression::Parenthesized(inner) => {
@@ -1895,10 +1825,10 @@ fn collect_or_instanceof_classes<'b>(
             collect_or_instanceof_classes(bin.rhs, var_name, out);
         }
         _ => {
-            if let Some(cls_name) = try_extract_instanceof(expr, var_name)
-                && !out.contains(&cls_name)
+            if let Some(cls_type) = try_extract_instanceof(expr, var_name)
+                && !out.contains(&cls_type)
             {
-                out.push(cls_name);
+                out.push(cls_type);
             }
         }
     }
@@ -1912,7 +1842,7 @@ fn collect_or_instanceof_classes<'b>(
 fn try_extract_compound_and_instanceof<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     match expr {
         Expression::Parenthesized(inner) => {
             try_extract_compound_and_instanceof(inner.expression, var_name)
@@ -1940,7 +1870,7 @@ fn try_extract_compound_and_instanceof<'b>(
 fn collect_and_instanceof_classes<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-    out: &mut Vec<String>,
+    out: &mut Vec<PhpType>,
 ) {
     match expr {
         Expression::Parenthesized(inner) => {
@@ -1956,10 +1886,10 @@ fn collect_and_instanceof_classes<'b>(
             collect_and_instanceof_classes(bin.rhs, var_name, out);
         }
         _ => {
-            if let Some(cls_name) = try_extract_instanceof(expr, var_name)
-                && !out.contains(&cls_name)
+            if let Some(cls_type) = try_extract_instanceof(expr, var_name)
+                && !out.contains(&cls_type)
             {
-                out.push(cls_name);
+                out.push(cls_type);
             }
         }
     }
@@ -1974,7 +1904,7 @@ fn collect_and_instanceof_classes<'b>(
 fn try_extract_compound_negated_and_instanceof<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     match expr {
         Expression::Parenthesized(inner) => {
             try_extract_compound_negated_and_instanceof(inner.expression, var_name)
@@ -2005,7 +1935,7 @@ fn try_extract_compound_negated_and_instanceof<'b>(
 fn collect_negated_and_instanceof_classes<'b>(
     expr: &'b Expression<'b>,
     var_name: &str,
-    out: &mut Vec<String>,
+    out: &mut Vec<PhpType>,
 ) -> bool {
     match expr {
         Expression::Parenthesized(inner) => {
@@ -2025,8 +1955,8 @@ fn collect_negated_and_instanceof_classes<'b>(
             if let Some(extraction) = try_extract_instanceof_with_negation(expr, var_name)
                 && extraction.negated
             {
-                if !out.contains(&extraction.class_name) {
-                    out.push(extraction.class_name);
+                if !out.contains(&extraction.class_type) {
+                    out.push(extraction.class_type);
                 }
                 true
             } else {
@@ -2104,7 +2034,7 @@ fn try_extract_in_array<'b>(
 }
 
 /// Resolve the haystack expression's iterable element type and return
-/// it as a type string suitable for [`apply_instanceof_inclusion`].
+/// it as a [`PhpType`] suitable for [`apply_instanceof_inclusion`].
 ///
 /// Handles `$variable` (via docblock + assignment chasing) as well as
 /// method calls, property access, and other expressions supported by
@@ -2112,12 +2042,10 @@ fn try_extract_in_array<'b>(
 fn resolve_in_array_element_type(
     haystack_expr: &Expression<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let raw_type =
         crate::completion::variable::resolution::resolve_arg_raw_type(haystack_expr, ctx)?;
-    crate::php_type::PhpType::parse(&raw_type)
-        .extract_element_type()
-        .map(|t| t.to_string())
+    raw_type.extract_element_type().cloned()
 }
 
 /// Apply `in_array($var, $haystack, true)` narrowing when the call
@@ -2140,6 +2068,9 @@ pub(in crate::completion) fn try_apply_in_array_narrowing(
         && let Some(element_type) = resolve_in_array_element_type(haystack_expr, ctx)
     {
         if negated {
+            if !results.is_empty() && would_exclude_all_results(&element_type, results, ctx) {
+                return;
+            }
             apply_instanceof_exclusion(&element_type, ctx, results);
         } else {
             apply_instanceof_inclusion(&element_type, false, ctx, results);
@@ -2170,9 +2101,42 @@ pub(in crate::completion) fn try_apply_in_array_narrowing_inverse(
         if negated {
             apply_instanceof_inclusion(&element_type, false, ctx, results);
         } else {
+            if !results.is_empty() && would_exclude_all_results(&element_type, results, ctx) {
+                return;
+            }
             apply_instanceof_exclusion(&element_type, ctx, results);
         }
     }
+}
+
+/// Check whether excluding `element_type` from `results` would remove
+/// every entry, leaving the variable completely untyped.
+///
+/// `in_array($var, $haystack)` checks whether a *value* is present in
+/// the array, not whether the *type* matches.  When the haystack's
+/// element type is the same as (or a supertype of) every entry in
+/// `results`, exclusion would incorrectly wipe out all type information.
+/// For example, `in_array($item, $exclude)` where both `$item` and
+/// `$exclude`'s elements are `BackedEnum` should not remove
+/// `BackedEnum` from the resolved types — the variable is still a
+/// `BackedEnum`, just not one of the excluded values.
+fn would_exclude_all_results(
+    element_type: &PhpType,
+    results: &[ClassInfo],
+    ctx: &VarResolutionCtx<'_>,
+) -> bool {
+    let excluded = super::resolution::type_hint_to_classes_typed(
+        element_type,
+        &ctx.current_class.name,
+        ctx.all_classes,
+        ctx.class_loader,
+    );
+    if excluded.is_empty() {
+        return false;
+    }
+    results
+        .iter()
+        .all(|r| excluded.iter().any(|e| e.name == r.name))
 }
 
 /// Apply `in_array` guard clause narrowing after an `if` statement
@@ -2206,6 +2170,15 @@ pub(in crate::completion) fn apply_guard_clause_in_array_narrowing(
         if condition_negated {
             apply_instanceof_inclusion(&element_type, false, ctx, results);
         } else {
+            // Skip exclusion when it would remove ALL type information.
+            // `in_array($item, $exclude)` where both `$item` and the
+            // elements of `$exclude` are the same type (e.g. both are
+            // `BackedEnum`) only narrows which *value* of that type the
+            // variable holds, not the type itself.  Excluding would
+            // incorrectly wipe out the variable's type entirely.
+            if !results.is_empty() && would_exclude_all_results(&element_type, results, ctx) {
+                return;
+            }
             apply_instanceof_exclusion(&element_type, ctx, results);
         }
     }
@@ -2379,9 +2352,7 @@ pub(in crate::completion) fn apply_guard_clause_null_narrowing(
             results.retain(|rt| !rt.type_string.is_null());
             // Also strip `null` from union types (e.g. `Foo|null` → `Foo`).
             for rt in results.iter_mut() {
-                if let Some(non_null) = rt.type_string.non_null_type() {
-                    rt.type_string = non_null;
-                }
+                rt.strip_null();
             }
         }
         // The "exits when non-null" case (condition_checks_null == true)
@@ -2416,9 +2387,7 @@ pub(in crate::completion) fn try_apply_if_body_null_narrowing(
     if condition_checks_non_null(condition, ctx.var_name) {
         results.retain(|rt| !rt.type_string.is_null());
         for rt in results.iter_mut() {
-            if let Some(non_null) = rt.type_string.non_null_type() {
-                rt.type_string = non_null;
-            }
+            rt.strip_null();
         }
     }
 }
@@ -2455,9 +2424,7 @@ pub(in crate::completion) fn try_apply_if_body_null_narrowing_inverse(
         // else-body sees non-null.
         results.retain(|rt| !rt.type_string.is_null());
         for rt in results.iter_mut() {
-            if let Some(non_null) = rt.type_string.non_null_type() {
-                rt.type_string = non_null;
-            }
+            rt.strip_null();
         }
     }
 }
@@ -2481,5 +2448,291 @@ fn condition_checks_non_null(condition: &Expression<'_>, var_name: &str) -> bool
         }
         Expression::Parenthesized(inner) => condition_checks_non_null(inner.expression, var_name),
         _ => matches!(try_extract_null_check(condition, var_name), Some(true)),
+    }
+}
+
+// ── PHP type-guard function narrowing (`is_array`, `is_string`, …) ──────
+
+/// The category of a PHP type-checking function like `is_array`, `is_string`, etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeGuardKind {
+    Array,
+    String,
+    Int,
+    Float,
+    Bool,
+    Object,
+    Numeric,
+    Callable,
+}
+
+/// Return the canonical `PhpType` that a type-guard narrows `mixed` to.
+///
+/// When a variable has type `mixed` and a type-guard like `is_object()`
+/// succeeds, the variable should narrow to `object` (not stay `mixed`
+/// and not become empty).  This function maps each guard kind to the
+/// PHP type it asserts.
+fn guard_kind_to_narrowed_type(kind: TypeGuardKind) -> PhpType {
+    match kind {
+        TypeGuardKind::Array => PhpType::array(),
+        TypeGuardKind::String => PhpType::string(),
+        TypeGuardKind::Int => PhpType::int(),
+        TypeGuardKind::Float => PhpType::float(),
+        TypeGuardKind::Bool => PhpType::bool(),
+        TypeGuardKind::Object => PhpType::object(),
+        TypeGuardKind::Numeric => PhpType::numeric(),
+        TypeGuardKind::Callable => PhpType::callable(),
+    }
+}
+
+/// Try to extract a type-guard function call on a variable.
+///
+/// Matches `is_array($var)`, `is_string($var)`, etc. (with optional
+/// parenthesisation and negation).
+///
+/// Returns `Some((kind, negated))` when the expression is a recognised
+/// type-guard call on `var_name`.
+fn try_extract_type_guard(expr: &Expression<'_>, var_name: &str) -> Option<(TypeGuardKind, bool)> {
+    match expr {
+        Expression::Parenthesized(inner) => try_extract_type_guard(inner.expression, var_name),
+        Expression::UnaryPrefix(prefix) if prefix.operator.is_not() => {
+            try_extract_type_guard(prefix.operand, var_name).map(|(kind, neg)| (kind, !neg))
+        }
+        Expression::Call(Call::Function(fc)) => {
+            let func_name = match &fc.function {
+                Expression::Identifier(ident) => ident.value(),
+                _ => return None,
+            };
+            let kind = match func_name {
+                "is_array" => TypeGuardKind::Array,
+                "is_string" => TypeGuardKind::String,
+                "is_int" | "is_integer" | "is_long" => TypeGuardKind::Int,
+                "is_float" | "is_double" | "is_real" => TypeGuardKind::Float,
+                "is_bool" => TypeGuardKind::Bool,
+                "is_object" => TypeGuardKind::Object,
+                "is_numeric" => TypeGuardKind::Numeric,
+                "is_callable" => TypeGuardKind::Callable,
+                _ => return None,
+            };
+            let args = &fc.argument_list.arguments;
+            if args.len() != 1 {
+                return None;
+            }
+            let arg_expr = match args.first() {
+                Some(Argument::Positional(pos)) => pos.value,
+                Some(Argument::Named(named)) => named.value,
+                _ => return None,
+            };
+            let arg_name = expr_to_subject_key(arg_expr)?;
+            if arg_name != var_name {
+                return None;
+            }
+            Some((kind, false))
+        }
+        _ => None,
+    }
+}
+
+/// Check whether a `PhpType` matches a given type-guard kind.
+///
+/// For `TypeGuardKind::Array`, returns `true` for array-like types
+/// (`array`, `list<T>`, `T[]`, `array{…}`, `iterable`, etc.).
+fn type_matches_guard(ty: &PhpType, kind: TypeGuardKind) -> bool {
+    match kind {
+        TypeGuardKind::Array => ty.is_array_like(),
+        TypeGuardKind::String => ty.is_subtype_of(&PhpType::string()),
+        TypeGuardKind::Int => ty.is_subtype_of(&PhpType::int()),
+        TypeGuardKind::Float => ty.is_subtype_of(&PhpType::float()),
+        TypeGuardKind::Bool => ty.is_subtype_of(&PhpType::bool()),
+        TypeGuardKind::Numeric => ty.is_subtype_of(&PhpType::numeric()),
+        TypeGuardKind::Callable => ty.is_callable(),
+        TypeGuardKind::Object => ty.is_object_like(),
+    }
+}
+
+/// Narrow `results` to only the union members that match the given
+/// type-guard kind.
+///
+/// For example, when `kind` is `Array` and the type string is
+/// `null|list<Request>|Request`, the result is narrowed to
+/// `list<Request>`.
+fn apply_type_guard_inclusion(kind: TypeGuardKind, results: &mut Vec<ResolvedType>) {
+    for rt in results.iter_mut() {
+        let filtered = filter_type_by_guard(&rt.type_string, kind, true);
+        if let Some(narrowed) = filtered {
+            rt.replace_type(narrowed);
+        }
+    }
+    // Remove entries that became empty (no union member matched).
+    results.retain(|rt| !rt.type_string.is_empty_sentinel());
+}
+
+/// Narrow `results` to only the union members that do NOT match the
+/// given type-guard kind (inverse / else-body narrowing).
+fn apply_type_guard_exclusion(kind: TypeGuardKind, results: &mut Vec<ResolvedType>) {
+    for rt in results.iter_mut() {
+        let filtered = filter_type_by_guard(&rt.type_string, kind, false);
+        if let Some(narrowed) = filtered {
+            rt.replace_type(narrowed);
+        }
+    }
+    results.retain(|rt| !rt.type_string.is_empty_sentinel());
+}
+
+/// Filter a `PhpType` to keep only members that match (or don't match)
+/// the given type-guard kind.
+///
+/// When `keep_matching` is `true`, keeps only members where
+/// `type_matches_guard` returns `true` (then-body semantics).
+/// When `false`, keeps only members where it returns `false`
+/// (else-body semantics).
+///
+/// Returns `None` when no filtering is needed (non-union type that
+/// already satisfies the predicate).  Returns `Some(Named("__empty"))`
+/// when all members are filtered out.
+fn filter_type_by_guard(ty: &PhpType, kind: TypeGuardKind, keep_matching: bool) -> Option<PhpType> {
+    match ty {
+        PhpType::Union(members) => {
+            let filtered: Vec<PhpType> = members
+                .iter()
+                .filter(|m| type_matches_guard(m, kind) == keep_matching)
+                .cloned()
+                .collect();
+            if filtered.len() == members.len() {
+                // Nothing was filtered out.
+                None
+            } else if filtered.is_empty() {
+                Some(PhpType::empty_sentinel())
+            } else if filtered.len() == 1 {
+                Some(filtered.into_iter().next().unwrap())
+            } else {
+                Some(PhpType::Union(filtered))
+            }
+        }
+        PhpType::Nullable(inner) => {
+            // `?T` is `T|null`.  For `is_array`, null doesn't match,
+            // so we keep only the inner type (if it matches) or only
+            // null (if it doesn't).
+            let inner_matches = type_matches_guard(inner, kind);
+            let null_matches = type_matches_guard(&PhpType::null(), kind);
+            match (
+                inner_matches == keep_matching,
+                null_matches == keep_matching,
+            ) {
+                (true, true) => None, // keep both → no change
+                (true, false) => Some(inner.as_ref().clone()),
+                (false, true) => Some(PhpType::null()),
+                (false, false) => Some(PhpType::empty_sentinel()),
+            }
+        }
+        other => {
+            // `mixed` includes all types.  When narrowing in the
+            // then-body (`keep_matching = true`), replace `mixed`
+            // with the canonical type for the guard kind (e.g.
+            // `is_object($mixed)` → `object`).  In the else-body
+            // (`keep_matching = false`), `mixed` minus one kind is
+            // still effectively `mixed`, so leave it unchanged.
+            if other.is_mixed() {
+                return if keep_matching {
+                    Some(guard_kind_to_narrowed_type(kind))
+                } else {
+                    None // mixed minus one kind ≈ mixed
+                };
+            }
+            // Non-union type: if it matches the predicate, keep it.
+            if type_matches_guard(other, kind) == keep_matching {
+                None // no change needed
+            } else {
+                Some(PhpType::empty_sentinel())
+            }
+        }
+    }
+}
+
+/// Apply type-guard narrowing (`is_array`, `is_string`, etc.) when the
+/// cursor is inside the then-body of an `if` whose condition is a
+/// type-guard call on the resolved variable.
+///
+/// Works on `Vec<ResolvedType>` directly (like null narrowing) because
+/// the narrowing modifies `type_string` rather than `class_info`.
+pub(in crate::completion) fn try_apply_type_guard_narrowing(
+    condition: &Expression<'_>,
+    body_span: mago_span::Span,
+    ctx: &VarResolutionCtx<'_>,
+    results: &mut Vec<ResolvedType>,
+) {
+    if ctx.cursor_offset < body_span.start.offset || ctx.cursor_offset > body_span.end.offset {
+        return;
+    }
+
+    // ── Compound `&&` / `and` ───────────────────────────────────────
+    // `if (is_object($x) && is_string($y))` — both sides are true
+    // inside the then-body.  Decompose and apply each guard found.
+    if let Expression::Binary(bin) = condition
+        && matches!(
+            bin.operator,
+            BinaryOperator::And(_) | BinaryOperator::LowAnd(_)
+        )
+    {
+        try_apply_type_guard_narrowing(bin.lhs, body_span, ctx, results);
+        try_apply_type_guard_narrowing(bin.rhs, body_span, ctx, results);
+        return;
+    }
+
+    if let Some((kind, negated)) = try_extract_type_guard(condition, ctx.var_name) {
+        if negated {
+            apply_type_guard_exclusion(kind, results);
+        } else {
+            apply_type_guard_inclusion(kind, results);
+        }
+    }
+}
+
+/// Inverse of [`try_apply_type_guard_narrowing`] — used for the `else`
+/// branch of an `if (is_array($var))` check.
+pub(in crate::completion) fn try_apply_type_guard_narrowing_inverse(
+    condition: &Expression<'_>,
+    body_span: mago_span::Span,
+    ctx: &VarResolutionCtx<'_>,
+    results: &mut Vec<ResolvedType>,
+) {
+    if ctx.cursor_offset < body_span.start.offset || ctx.cursor_offset > body_span.end.offset {
+        return;
+    }
+    if let Some((kind, negated)) = try_extract_type_guard(condition, ctx.var_name) {
+        // Flip polarity for else-body.
+        if negated {
+            apply_type_guard_inclusion(kind, results);
+        } else {
+            apply_type_guard_exclusion(kind, results);
+        }
+    }
+}
+
+/// Apply type-guard narrowing after a guard clause (`if (is_array($x))
+/// { return; }`).  The then-body exits, so code after the if sees the
+/// inverse narrowing.
+pub(in crate::completion) fn apply_guard_clause_type_guard_narrowing(
+    if_stmt: &If<'_>,
+    ctx: &VarResolutionCtx<'_>,
+    results: &mut Vec<ResolvedType>,
+) {
+    if !then_body_unconditionally_exits(&if_stmt.body) {
+        return;
+    }
+    if if_stmt.body.has_else_clause() || if_stmt.body.has_else_if_clauses() {
+        return;
+    }
+    let (inner, condition_negated) = unwrap_condition_negation(if_stmt.condition);
+    if let Some((kind, negated)) = try_extract_type_guard(inner, ctx.var_name) {
+        let effectively_negated = negated ^ condition_negated;
+        // Then-body exits, so post-if sees the inverse.
+        if effectively_negated {
+            // Guard was `!is_array($x) { return; }` → after if, $x IS array.
+            apply_type_guard_inclusion(kind, results);
+        } else {
+            // Guard was `is_array($x) { return; }` → after if, $x is NOT array.
+            apply_type_guard_exclusion(kind, results);
+        }
     }
 }

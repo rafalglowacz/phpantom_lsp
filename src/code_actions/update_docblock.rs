@@ -25,14 +25,15 @@ use tower_lsp::lsp_types::*;
 use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
 use crate::Backend;
 use crate::code_actions::phpstan::fix_return_type::enrichment_return_type;
-use crate::completion::phpdoc::generation::enrichment_plain;
+use crate::completion::phpdoc::generation::{enrichment_plain, enrichment_plain_typed};
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::docblock::is_compatible_refinement_typed;
 use crate::docblock::parser::{DocblockInfo, parse_docblock_for_tags};
 use crate::docblock::type_strings::split_type_token;
+use crate::parser::extract_hint_type;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, FunctionLoader};
-use crate::util::offset_to_position;
+use crate::util::{offset_to_position, short_name};
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
@@ -41,8 +42,8 @@ use crate::util::offset_to_position;
 struct SigParam {
     /// Parameter name including `$` prefix.
     name: String,
-    /// Native type hint (e.g. `string`, `?int`, `Foo|Bar`), if present.
-    type_hint: Option<String>,
+    /// Native type hint as a structured type, if present.
+    type_hint: Option<PhpType>,
     /// Whether the parameter is variadic (`...$args`).
     is_variadic: bool,
 }
@@ -50,8 +51,10 @@ struct SigParam {
 /// A `@param` tag parsed from an existing docblock.
 #[derive(Debug, Clone)]
 struct DocParam {
-    /// The full type string from the tag.
-    type_str: String,
+    /// The original type string from the tag, preserved for docblock output.
+    type_str_raw: String,
+    /// The parsed type, constructed once from `type_str_raw`.
+    type_parsed: PhpType,
     /// Parameter name including `$` prefix (and optional `...` prefix for variadic).
     name: String,
     /// Description text after the `$name`.
@@ -61,8 +64,8 @@ struct DocParam {
 /// A `@return` tag parsed from an existing docblock.
 #[derive(Debug, Clone)]
 struct DocReturn {
-    /// The type string from the tag.
-    type_str: String,
+    /// The parsed type, constructed once from the raw tag string.
+    type_parsed: PhpType,
     /// Description text after the type.
     description: String,
 }
@@ -78,7 +81,7 @@ struct FunctionWithDocblock {
     /// Parameters from the signature.
     sig_params: Vec<SigParam>,
     /// Return type from the signature (if any).
-    sig_return: Option<String>,
+    sig_return: Option<PhpType>,
     /// `@param` tags from the docblock.
     doc_params: Vec<DocParam>,
     /// `@return` tag from the docblock (if any).
@@ -89,6 +92,36 @@ struct FunctionWithDocblock {
     indent: String,
     /// LSP position of the docblock start (for throws analysis).
     docblock_position: Position,
+}
+
+/// Resolve a type name to its FQN, using the class loader as the
+/// source of truth.
+///
+/// Resolution order:
+/// 1. Try `resolve_to_fqn` (use-map → namespace prefix → bare name).
+/// 2. If the result can be loaded by the class loader, use the loaded FQN.
+/// 3. Otherwise, try loading the original name directly (handles root-
+///    namespace classes like `RuntimeException` that have no `use` import).
+/// 4. Fall back to the `resolve_to_fqn` result.
+fn resolve_type_name_to_fqn(
+    name: &str,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> String {
+    let resolved = crate::util::resolve_to_fqn(name, use_map, file_namespace);
+    // If the class loader recognises the resolved name, use its canonical FQN.
+    if let Some(cls) = class_loader(&resolved) {
+        return cls.fqn();
+    }
+    // The resolved name wasn't found — try the original name directly.
+    // This handles root-namespace classes (e.g. `RuntimeException`) when
+    // the file has a namespace but no explicit `use` import.
+    if let Some(cls) = class_loader(name) {
+        return cls.fqn();
+    }
+    // Neither worked — return the best guess.
+    resolved
 }
 
 impl Backend {
@@ -138,6 +171,8 @@ impl Backend {
             &ctx.classes,
             &class_loader,
             Some(&function_loader),
+            &ctx.use_map,
+            &ctx.namespace,
         );
         if !needs_update {
             return;
@@ -150,6 +185,8 @@ impl Backend {
             &ctx.classes,
             &class_loader,
             Some(&function_loader),
+            &ctx.use_map,
+            &ctx.namespace,
         );
         if new_docblock == info.docblock_text {
             return;
@@ -323,14 +360,6 @@ fn cursor_on_docblock(
     false
 }
 
-/// Extract the hint string from a type hint node.
-fn extract_hint_string_local(hint: &Hint<'_>, content: &str) -> String {
-    let span = hint.span();
-    let start = span.start.offset as usize;
-    let end = span.end.offset as usize;
-    content.get(start..end).unwrap_or("").to_string()
-}
-
 /// Build a `FunctionWithDocblock` from a function-like AST node.
 fn build_info_for_function_like<'a>(
     node_start: u32,
@@ -385,10 +414,7 @@ fn build_info_for_function_like<'a>(
         .iter()
         .map(|p| {
             let name = p.variable.name.to_string();
-            let type_hint = p
-                .hint
-                .as_ref()
-                .map(|h| extract_hint_string_local(h, content));
+            let type_hint = p.hint.as_ref().map(|h| extract_hint_type(h));
             let is_variadic = p.ellipsis.is_some();
             SigParam {
                 name,
@@ -399,7 +425,7 @@ fn build_info_for_function_like<'a>(
         .collect();
 
     // Extract return type.
-    let sig_return = return_type_hint.map(|rth| extract_hint_string_local(&rth.hint, content));
+    let sig_return = return_type_hint.map(|rth| extract_hint_type(&rth.hint));
 
     // Parse existing docblock tags with a single parse pass.
     let docblock_info = parse_docblock_for_tags(&docblock_text);
@@ -479,7 +505,8 @@ fn parse_doc_params_from_info(info: &DocblockInfo) -> Vec<DocParam> {
             .join(" ");
 
         results.push(DocParam {
-            type_str: type_str.to_string(),
+            type_parsed: PhpType::parse(type_str),
+            type_str_raw: type_str.to_string(),
             name,
             description,
         });
@@ -505,7 +532,7 @@ fn parse_doc_return_from_info(info: &DocblockInfo) -> Option<DocReturn> {
         let description = remainder.trim().to_string();
 
         return Some(DocReturn {
-            type_str: type_str.to_string(),
+            type_parsed: PhpType::parse(type_str),
             description,
         });
     }
@@ -547,6 +574,8 @@ fn check_needs_update(
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
 ) -> bool {
     // Build a map of existing doc param names.
     let doc_param_names: Vec<&str> = info
@@ -581,7 +610,7 @@ fn check_needs_update(
         let needs_enrichment = info
             .sig_params
             .iter()
-            .any(|sp| enrichment_plain(&sp.type_hint, class_loader).is_some());
+            .any(|sp| enrichment_plain(sp.type_hint.as_ref(), class_loader).is_some());
         if needs_enrichment {
             return true;
         }
@@ -595,7 +624,7 @@ fn check_needs_update(
                 let n = n.strip_prefix("...").unwrap_or(n);
                 n == sig_param.name
             })
-            && is_type_contradiction(&doc_param.type_str, native_type)
+            && is_type_contradiction(&doc_param.type_parsed, native_type)
         {
             return true;
         }
@@ -612,11 +641,12 @@ fn check_needs_update(
         }) {
             // If the doc type already carries generic params or a callable
             // signature, it is already enriched — no update needed.
-            if PhpType::parse(&doc_param.type_str).has_type_structure() {
+            if doc_param.type_parsed.has_type_structure() {
                 continue;
             }
-            if let Some(enriched) = enrichment_plain(&sig_param.type_hint, class_loader)
-                && enriched != doc_param.type_str
+            if let Some(enriched) =
+                enrichment_plain_typed(sig_param.type_hint.as_ref(), class_loader)
+                && !enriched.equivalent(&doc_param.type_parsed)
             {
                 return true;
             }
@@ -628,24 +658,22 @@ fn check_needs_update(
         && let Some(doc_ret) = &info.doc_return
     {
         // Remove `@return void` if the signature also has `: void`.
-        let sig_lower = sig_ret.to_lowercase();
-        let doc_lower = doc_ret.type_str.to_lowercase();
-        if sig_lower == "void" && doc_lower == "void" {
+        if sig_ret.is_void() && doc_ret.type_parsed.is_void() {
             return true;
         }
-        if is_type_contradiction(&doc_ret.type_str, sig_ret) {
+        if is_type_contradiction(&doc_ret.type_parsed, sig_ret) {
             return true;
         }
     }
 
     // Check if the @return tag needs body-based enrichment.
     if let Some(sig_ret) = &info.sig_return
-        && sig_ret.to_lowercase() != "void"
+        && !sig_ret.is_void()
     {
         let doc_already_rich = info
             .doc_return
             .as_ref()
-            .is_some_and(|dr| dr.type_str.contains('<') || dr.type_str.contains("[]"));
+            .is_some_and(|dr| dr.type_parsed.has_type_structure());
         if !doc_already_rich
             && let Some(enriched) = enrichment_return_type(
                 content,
@@ -654,16 +682,16 @@ fn check_needs_update(
                 class_loader,
                 function_loader,
             )
+            && !enriched.is_void()
+            && !enriched.is_mixed()
+            && !enriched.equivalent(sig_ret)
         {
-            let enriched_lower = enriched.to_lowercase();
-            if enriched_lower != "void" && enriched_lower != "mixed" && enriched != *sig_ret {
-                let differs_from_doc = info
-                    .doc_return
-                    .as_ref()
-                    .is_none_or(|dr| dr.type_str != enriched);
-                if differs_from_doc {
-                    return true;
-                }
+            let differs_from_doc = info
+                .doc_return
+                .as_ref()
+                .is_none_or(|dr| !dr.type_parsed.equivalent(&enriched));
+            if differs_from_doc {
+                return true;
             }
         }
     }
@@ -675,26 +703,20 @@ fn check_needs_update(
         Some(&ThrowsContext {
             class_loader,
             function_loader,
+            use_map,
+            file_namespace,
         }),
     );
-    let existing_lower: Vec<String> = info
+    let existing_fqns: Vec<String> = info
         .doc_throws
         .iter()
-        .map(|t| {
-            t.trim_start_matches('\\')
-                .rsplit('\\')
-                .next()
-                .unwrap_or(t)
-                .to_lowercase()
-        })
+        .map(|t| resolve_type_name_to_fqn(t, use_map, file_namespace, class_loader).to_lowercase())
         .collect();
     for exc in &uncaught {
-        let short = exc
-            .trim_start_matches('\\')
-            .rsplit('\\')
-            .next()
-            .unwrap_or(exc);
-        if !existing_lower.contains(&short.to_lowercase()) {
+        let exc_str = exc.to_string();
+        let exc_fqn = resolve_type_name_to_fqn(&exc_str, use_map, file_namespace, class_loader)
+            .to_lowercase();
+        if !existing_fqns.contains(&exc_fqn) {
             return true;
         }
     }
@@ -708,15 +730,12 @@ fn check_needs_update(
 /// type. For example, docblock says `string` but native says `int` is a
 /// contradiction. But docblock says `non-empty-string` while native says
 /// `string` is a refinement (not a contradiction).
-fn is_type_contradiction(doc_type: &str, native_type: &str) -> bool {
-    let doc_parsed = PhpType::parse(doc_type);
-    let native_parsed = PhpType::parse(native_type);
-
+fn is_type_contradiction(doc_type: &PhpType, native_type: &PhpType) -> bool {
     // `PhpType::equivalent` handles `?T` ↔ `T|null`, order-independent
     // unions, and FQN shortening.  It does not do case-insensitive
     // comparison, but PHP class names in practice come from the same
     // source so casing matches.
-    if doc_parsed.equivalent(&native_parsed) {
+    if doc_type.equivalent(native_type) {
         return false;
     }
 
@@ -725,29 +744,24 @@ fn is_type_contradiction(doc_type: &str, native_type: &str) -> bool {
     // `list<User>` refines `array`, `positive-int` refines `int`).
     // This uses the shared refinement checker that also guards
     // `resolve_effective_type`.
-    let native_core = native_parsed
+    let native_core = native_type
         .non_null_type()
-        .unwrap_or_else(|| native_parsed.clone());
-    let doc_core = doc_parsed
-        .non_null_type()
-        .unwrap_or_else(|| doc_parsed.clone());
-    if is_compatible_refinement_typed(&doc_core, &native_core.to_string().to_ascii_lowercase()) {
+        .unwrap_or_else(|| native_type.clone());
+    let doc_core = doc_type.non_null_type().unwrap_or_else(|| doc_type.clone());
+    if is_compatible_refinement_typed(&doc_core, &native_core) {
         return false;
     }
 
     // For single-member types, compare base names directly.  If they
     // differ and neither is a refinement of the other, it is a
     // contradiction.
-    let doc_bases = doc_parsed.union_members();
-    let native_bases = native_parsed.union_members();
+    let doc_bases = doc_type.union_members();
+    let native_bases = native_type.union_members();
 
     if doc_bases.len() == 1
         && native_bases.len() == 1
         && !doc_bases[0].equivalent(native_bases[0])
-        && !is_compatible_refinement_typed(
-            doc_bases[0],
-            &native_bases[0].to_string().to_ascii_lowercase(),
-        )
+        && !is_compatible_refinement_typed(doc_bases[0], native_bases[0])
     {
         return true;
     }
@@ -762,6 +776,8 @@ fn build_updated_docblock(
     local_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoader<'_>,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
 ) -> String {
     let indent = &info.indent;
 
@@ -810,39 +826,51 @@ fn build_updated_docblock(
             let type_str = if let Some(existing) = existing {
                 // If the existing type is a refinement, keep it.
                 if let Some(native) = &sig.type_hint {
-                    if is_type_contradiction(&existing.type_str, native) {
+                    let native_str = native.to_string();
+                    if is_type_contradiction(&existing.type_parsed, native) {
                         // Type is contradicted — try enrichment first, fall
                         // back to the raw native hint.
-                        enrichment_plain(&sig.type_hint, class_loader)
-                            .unwrap_or_else(|| native.clone())
-                    } else if PhpType::parse(&existing.type_str).has_type_structure() {
+                        {
+                            enrichment_plain(sig.type_hint.as_ref(), class_loader)
+                                .unwrap_or(native_str)
+                        }
+                    } else if existing.type_parsed.has_type_structure() {
                         // Doc already has generics / callable / shape — keep it.
-                        existing.type_str.clone()
+                        existing.type_str_raw.clone()
                     } else {
                         // Check if enrichment would upgrade the type (e.g.
                         // bare `Closure` → `(Closure(): mixed)`).
-                        if let Some(enriched) = enrichment_plain(&sig.type_hint, class_loader) {
-                            if enriched != existing.type_str {
-                                enriched
+                        if let Some(enriched) =
+                            enrichment_plain_typed(sig.type_hint.as_ref(), class_loader)
+                        {
+                            if !enriched.equivalent(&existing.type_parsed) {
+                                enrichment_plain(sig.type_hint.as_ref(), class_loader)
+                                    .unwrap_or_else(|| existing.type_str_raw.clone())
                             } else {
-                                existing.type_str.clone()
+                                existing.type_str_raw.clone()
                             }
                         } else {
-                            existing.type_str.clone()
+                            existing.type_str_raw.clone()
                         }
                     }
                 } else {
-                    existing.type_str.clone()
+                    existing.type_str_raw.clone()
                 }
             } else if has_any_doc_params {
                 // The docblock already documents some params, so add this
                 // missing one — use enrichment or fall back to raw hint / mixed.
-                enrichment_plain(&sig.type_hint, class_loader)
-                    .unwrap_or_else(|| sig.type_hint.clone().unwrap_or_else(|| "mixed".to_string()))
+                {
+                    enrichment_plain(sig.type_hint.as_ref(), class_loader).unwrap_or_else(|| {
+                        sig.type_hint
+                            .as_ref()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| PhpType::mixed().to_string())
+                    })
+                }
             } else {
                 // No @param tags at all — only add a tag when the native
                 // type needs enrichment, matching generate-docblock behaviour.
-                enrichment_plain(&sig.type_hint, class_loader)?
+                enrichment_plain(sig.type_hint.as_ref(), class_loader)?
             };
 
             let description = existing.map(|e| e.description.clone()).unwrap_or_default();
@@ -887,29 +915,25 @@ fn build_updated_docblock(
         Some(&ThrowsContext {
             class_loader,
             function_loader,
+            use_map,
+            file_namespace,
         }),
     );
-    let existing_throws_lower: Vec<String> = info
+    let existing_fqns: Vec<String> = info
         .doc_throws
         .iter()
-        .map(|t| {
-            t.trim_start_matches('\\')
-                .rsplit('\\')
-                .next()
-                .unwrap_or(t)
-                .to_lowercase()
-        })
+        .map(|t| resolve_type_name_to_fqn(t, use_map, file_namespace, class_loader).to_lowercase())
         .collect();
 
     let mut new_throws: Vec<String> = Vec::new();
     for exc in &uncaught {
-        let short = exc
-            .trim_start_matches('\\')
-            .rsplit('\\')
-            .next()
-            .unwrap_or(exc);
-        if !existing_throws_lower.contains(&short.to_lowercase()) {
-            new_throws.push(short.to_string());
+        let exc_str = exc.to_string();
+        let exc_fqn = resolve_type_name_to_fqn(&exc_str, use_map, file_namespace, class_loader)
+            .to_lowercase();
+        if !existing_fqns.contains(&exc_fqn) {
+            // Use the short name in the generated @throws tag for readability
+            let display_name = short_name(&exc_str);
+            new_throws.push(display_name.to_string());
         }
     }
 
@@ -930,14 +954,15 @@ fn build_updated_docblock(
         && let Some(sig_ret) = &info.sig_return
         && let Some(doc_ret) = &info.doc_return
     {
+        let sig_ret_str = sig_ret.to_string();
         // Find and update the return line.
         for line in &mut lines {
             if let DocLine::Return(text) = line {
                 let description = &doc_ret.description;
                 if description.is_empty() {
-                    *text = format!("@return {}", sig_ret);
+                    *text = format!("@return {}", sig_ret_str);
                 } else {
-                    *text = format!("@return {} {}", sig_ret, description);
+                    *text = format!("@return {} {}", sig_ret_str, description);
                 }
                 break;
             }
@@ -946,15 +971,12 @@ fn build_updated_docblock(
 
     // Body-based @return enrichment.
     if let Some(sig_ret) = &info.sig_return
-        && sig_ret.to_lowercase() != "void"
+        && !sig_ret.is_void()
     {
-        let has_rich_return = lines.iter().any(|l| {
-            if let DocLine::Return(text) = l {
-                text.contains('<') || text.contains("[]")
-            } else {
-                false
-            }
-        });
+        let has_rich_return = info
+            .doc_return
+            .as_ref()
+            .is_some_and(|dr| dr.type_parsed.has_type_structure());
         if !has_rich_return
             && let Some(enriched) = enrichment_return_type(
                 content,
@@ -963,41 +985,41 @@ fn build_updated_docblock(
                 class_loader,
                 function_loader,
             )
+            && !enriched.is_void()
+            && !enriched.is_mixed()
+            && !enriched.equivalent(sig_ret)
         {
-            let enriched_lower = enriched.to_lowercase();
-            if enriched_lower != "void" && enriched_lower != "mixed" && enriched != *sig_ret {
-                let differs_from_doc = info
-                    .doc_return
-                    .as_ref()
-                    .is_none_or(|dr| dr.type_str != enriched);
-                if differs_from_doc {
-                    // Update existing @return line or insert a new one.
-                    let mut updated_existing = false;
-                    for line in &mut lines {
-                        if let DocLine::Return(text) = line {
-                            // Preserve any description text after the type.
-                            let desc = info
-                                .doc_return
-                                .as_ref()
-                                .map(|dr| dr.description.as_str())
-                                .unwrap_or("");
-                            if desc.is_empty() {
-                                *text = format!("@return {}", enriched);
-                            } else {
-                                *text = format!("@return {} {}", enriched, desc);
-                            }
-                            updated_existing = true;
-                            break;
+            let differs_from_doc = info
+                .doc_return
+                .as_ref()
+                .is_none_or(|dr| !dr.type_parsed.equivalent(&enriched));
+            if differs_from_doc {
+                // Update existing @return line or insert a new one.
+                let mut updated_existing = false;
+                for line in &mut lines {
+                    if let DocLine::Return(text) = line {
+                        // Preserve any description text after the type.
+                        let desc = info
+                            .doc_return
+                            .as_ref()
+                            .map(|dr| dr.description.as_str())
+                            .unwrap_or("");
+                        if desc.is_empty() {
+                            *text = format!("@return {}", enriched);
+                        } else {
+                            *text = format!("@return {} {}", enriched, desc);
                         }
+                        updated_existing = true;
+                        break;
                     }
-                    if !updated_existing {
-                        // Insert before the closing `*/`.
-                        let close_pos = lines
-                            .iter()
-                            .position(|l| matches!(l, DocLine::Close))
-                            .unwrap_or(lines.len());
-                        lines.insert(close_pos, DocLine::Return(format!("@return {}", enriched)));
-                    }
+                }
+                if !updated_existing {
+                    // Insert before the closing `*/`.
+                    let close_pos = lines
+                        .iter()
+                        .position(|l| matches!(l, DocLine::Close))
+                        .unwrap_or(lines.len());
+                    lines.insert(close_pos, DocLine::Return(format!("@return {}", enriched)));
                 }
             }
         }
@@ -1228,8 +1250,8 @@ fn find_throws_insert_position(lines: &[DocLine]) -> usize {
 fn should_remove_return(info: &FunctionWithDocblock) -> bool {
     if let Some(sig_ret) = &info.sig_return
         && let Some(doc_ret) = &info.doc_return
-        && sig_ret.to_lowercase() == "void"
-        && doc_ret.type_str.to_lowercase() == "void"
+        && sig_ret.is_void()
+        && doc_ret.type_parsed.is_void()
         && doc_ret.description.is_empty()
     {
         return true;
@@ -1241,7 +1263,7 @@ fn should_remove_return(info: &FunctionWithDocblock) -> bool {
 fn should_update_return(info: &FunctionWithDocblock) -> bool {
     if let Some(sig_ret) = &info.sig_return
         && let Some(doc_ret) = &info.doc_return
-        && is_type_contradiction(&doc_ret.type_str, sig_ret)
+        && is_type_contradiction(&doc_ret.type_parsed, sig_ret)
     {
         return true;
     }
@@ -1394,7 +1416,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1417,7 +1441,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1440,7 +1466,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1463,7 +1491,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1485,7 +1515,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1507,7 +1539,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1529,7 +1563,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1551,7 +1587,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1585,7 +1623,9 @@ function bar(string $a, int $b, bool $c): void {}
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1604,7 +1644,15 @@ class Foo {
         let pos = php.find("@param string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             updated.contains("The first param"),
             "Should preserve description: {}",
@@ -1636,7 +1684,15 @@ class Foo {
         let pos = php.find("@param string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             !updated.contains("$old"),
             "Should remove old param: {}",
@@ -1659,7 +1715,15 @@ class Foo {
         let pos = php.find("@return string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             updated.contains("@return int Some description"),
             "Should update return type: {}",
@@ -1682,7 +1746,15 @@ class Foo {
         let pos = php.find("@return void").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             !updated.contains("@return"),
             "Should remove @return void: {}",
@@ -1709,7 +1781,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1732,7 +1806,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1753,7 +1829,15 @@ class Foo {
         let pos = php.find("@template T").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             updated.contains("@template T"),
             "Should preserve @template: {}",
@@ -1773,17 +1857,35 @@ class Foo {
 
     #[test]
     fn is_contradiction_basic() {
-        assert!(is_type_contradiction("string", "int"));
-        assert!(!is_type_contradiction("string", "string"));
-        assert!(!is_type_contradiction("non-empty-string", "string"));
-        assert!(!is_type_contradiction("array<int, string>", "array"));
+        assert!(is_type_contradiction(
+            &PhpType::parse("string"),
+            &PhpType::parse("int")
+        ));
+        assert!(!is_type_contradiction(
+            &PhpType::parse("string"),
+            &PhpType::parse("string")
+        ));
+        assert!(!is_type_contradiction(
+            &PhpType::parse("non-empty-string"),
+            &PhpType::parse("string")
+        ));
+        assert!(!is_type_contradiction(
+            &PhpType::parse("array<int, string>"),
+            &PhpType::parse("array")
+        ));
     }
 
     #[test]
     fn is_contradiction_nullable() {
         // ?string and string|null are equivalent.
-        assert!(!is_type_contradiction("?string", "?string"));
-        assert!(!is_type_contradiction("string|null", "?string"));
+        assert!(!is_type_contradiction(
+            &PhpType::parse("?string"),
+            &PhpType::parse("?string")
+        ));
+        assert!(!is_type_contradiction(
+            &PhpType::parse("string|null"),
+            &PhpType::parse("?string")
+        ));
     }
 
     #[test]
@@ -1805,7 +1907,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -1822,7 +1926,15 @@ class Foo {
         let pos = php.find("@param string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         // All $names should be aligned at the same column.
         assert!(
             updated.contains("@param string       $a"),
@@ -1857,7 +1969,15 @@ class Foo {
         let pos = php.find("@param string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         // Should NOT have a blank line between /** and the first @param.
         let lines: Vec<&str> = updated.lines().collect();
         assert_eq!(
@@ -1886,7 +2006,15 @@ class Foo {
         let pos = php.find("@param string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             updated.contains("(Closure(): mixed)"),
             "Should enrich Closure: {}",
@@ -1916,7 +2044,15 @@ class Foo {
         let pos = php.find("@param string").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &[], &cl, no_function_loader());
+        let updated = build_updated_docblock(
+            &info,
+            php,
+            &[],
+            &cl,
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
+        );
         assert!(
             updated.contains("@throws RuntimeException"),
             "Should add missing @throws: {}",
@@ -1944,7 +2080,15 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            !check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            !check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "Should not need update when throws already documented"
         );
     }
@@ -1972,7 +2116,9 @@ class Foo {
             php,
             &[],
             &cl,
-            no_function_loader()
+            no_function_loader(),
+            &HashMap::new(),
+            &None,
         ));
     }
 
@@ -2034,7 +2180,7 @@ class Foo {
         let params = test_parse_params(docblock);
         assert_eq!(params.len(), 1, "should parse one param: {:?}", params);
         assert_eq!(params[0].name, "$name");
-        assert_eq!(params[0].type_str, "");
+        assert_eq!(params[0].type_str_raw, "");
         assert_eq!(params[0].description, "The user name");
     }
 
@@ -2046,7 +2192,7 @@ class Foo {
         let params = test_parse_params(docblock);
         assert_eq!(params.len(), 1, "should parse one param: {:?}", params);
         assert_eq!(params[0].name, "...$args");
-        assert_eq!(params[0].type_str, "");
+        assert_eq!(params[0].type_str_raw, "");
         assert_eq!(params[0].description, "The arguments");
     }
 
@@ -2058,7 +2204,7 @@ class Foo {
         let params = test_parse_params(docblock);
         assert_eq!(params.len(), 1, "should parse one param: {:?}", params);
         assert_eq!(params[0].name, "$name");
-        assert_eq!(params[0].type_str, "");
+        assert_eq!(params[0].type_str_raw, "");
     }
 
     #[test]
@@ -2071,12 +2217,12 @@ class Foo {
         let params = test_parse_params(docblock);
         assert_eq!(params.len(), 3, "should parse three params: {:?}", params);
         assert_eq!(params[0].name, "$a");
-        assert_eq!(params[0].type_str, "string");
+        assert_eq!(params[0].type_str_raw, "string");
         assert_eq!(params[1].name, "$b");
-        assert_eq!(params[1].type_str, "");
+        assert_eq!(params[1].type_str_raw, "");
         assert_eq!(params[1].description, "Second");
         assert_eq!(params[2].name, "$c");
-        assert_eq!(params[2].type_str, "int");
+        assert_eq!(params[2].type_str_raw, "int");
     }
 
     #[test]
@@ -2095,13 +2241,21 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "should need update to add `mixed` type to @param $name"
         );
         // The param must still be recognised (not duplicated).
         assert_eq!(info.doc_params.len(), 1);
         assert_eq!(info.doc_params[0].name, "$name");
-        assert_eq!(info.doc_params[0].type_str, "");
+        assert_eq!(info.doc_params[0].type_str_raw, "");
         assert_eq!(info.doc_params[0].description, "The user name");
     }
 
@@ -2119,7 +2273,15 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "should need update because $b is missing"
         );
         assert_eq!(info.doc_params.len(), 1);
@@ -2144,7 +2306,15 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            !check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            !check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "should not suggest adding @param for a fully-typed non-templated class param"
         );
     }
@@ -2163,7 +2333,15 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            !check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            !check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "should not suggest adding @param for scalar-typed params"
         );
     }
@@ -2184,7 +2362,15 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "should suggest adding @param for an untyped param"
         );
     }
@@ -2205,7 +2391,15 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &[], &cl, no_function_loader()),
+            check_needs_update(
+                &info,
+                php,
+                &[],
+                &cl,
+                no_function_loader(),
+                &HashMap::new(),
+                &None
+            ),
             "should suggest adding @param for an array param"
         );
     }

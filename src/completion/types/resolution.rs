@@ -1,17 +1,17 @@
 /// Type-hint resolution to concrete `ClassInfo` values.
 ///
-/// This module contains the logic for mapping type-hint strings (as they
-/// appear in return types, property annotations, and PHPDoc tags) to
-/// resolved `ClassInfo` values that the completion, hover, and definition
-/// engines can work with.
+/// This module contains the logic for mapping parsed [`PhpType`] values
+/// (as they appear in return types, property annotations, and PHPDoc
+/// tags) to resolved `ClassInfo` values that the completion, hover, and
+/// definition engines can work with.
 ///
 /// Split from [`super::resolver`] for navigability.  The entry points are:
 ///
-/// - [`type_hint_to_classes`]: the public facade that maps a
-///   type-hint string to all matching `ClassInfo` values (handles unions,
-///   intersections, generics, `self`/`static`/`$this`, nullable types,
-///   object shapes, and type alias expansion).
-/// - [`resolve_type_alias`]: fully expands a type alias defined
+/// - [`type_hint_to_classes_typed`]: maps a parsed [`PhpType`] to all
+///   matching `ClassInfo` values (handles unions, intersections, generics,
+///   `self`/`static`/`$this`, nullable types, object shapes, and type
+///   alias expansion).
+/// - [`resolve_type_alias_typed`]: fully expands a type alias defined
 ///   via `@phpstan-type` / `@psalm-type` / `@phpstan-import-type`.
 /// - [`resolve_property_types`]: resolves a property's type hint
 ///   on a class to all candidate `ClassInfo` values.
@@ -44,15 +44,15 @@ pub(crate) fn resolve_property_types(
             Some(h) => h,
             None => return vec![],
         };
-    type_hint_to_classes_typed(&type_hint, &class_info.name, all_classes, class_loader)
+    let owner_fqn = class_info.fqn();
+    type_hint_to_classes_typed(&type_hint, &owner_fqn, all_classes, class_loader)
 }
 
-/// Map a type-hint string to all matching `ClassInfo` values.
+/// Map a parsed [`PhpType`] to all matching `ClassInfo` values.
 ///
 /// Handles:
 ///   - Nullable types: `?Foo` → strips `?`, resolves `Foo`
 ///   - Union types: `A|B|C` → resolves each part independently
-///     (respects `<…>` nesting so `Collection<int|string>` is not split)
 ///   - Intersection types: `A&B` → resolves each part independently
 ///   - Generic types: `Collection<int, User>` → resolves `Collection`,
 ///     then applies generic substitution (`TKey→int`, `TValue→User`)
@@ -62,18 +62,9 @@ pub(crate) fn resolve_property_types(
 ///     `false`, `true`) → skipped (not class types)
 ///
 /// Each resolvable class-like part is returned as a separate entry.
-pub(crate) fn type_hint_to_classes(
-    type_hint: &str,
-    owning_class_name: &str,
-    all_classes: &[Arc<ClassInfo>],
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Vec<ClassInfo> {
-    type_hint_to_classes_depth(type_hint, owning_class_name, all_classes, class_loader, 0)
-}
-
-/// Like [`type_hint_to_classes`], but accepts a pre-parsed [`PhpType`]
-/// to avoid a parse→stringify→reparse round-trip when the caller already
-/// has a structured type.
+///
+/// Callers that start with a raw type string should parse it with
+/// `PhpType::parse()` first.
 pub(crate) fn type_hint_to_classes_typed(
     ty: &PhpType,
     owning_class_name: &str,
@@ -83,55 +74,8 @@ pub(crate) fn type_hint_to_classes_typed(
     type_hint_to_classes_typed_depth(ty, owning_class_name, all_classes, class_loader, 0)
 }
 
-/// Inner implementation of [`type_hint_to_classes`] with a recursion
-/// depth guard to prevent infinite loops from circular type aliases.
-fn type_hint_to_classes_depth(
-    type_hint: &str,
-    owning_class_name: &str,
-    all_classes: &[Arc<ClassInfo>],
-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    depth: u8,
-) -> Vec<ClassInfo> {
-    if depth > MAX_ALIAS_DEPTH {
-        return vec![];
-    }
-
-    let hint = crate::util::strip_nullable(type_hint);
-
-    // Strip surrounding parentheses that appear in DNF types like `(A&B)|C`.
-    let hint = hint
-        .strip_prefix('(')
-        .and_then(|h| h.strip_suffix(')'))
-        .unwrap_or(hint);
-
-    // ── Type alias resolution ──────────────────────────────────────
-    // Check if `hint` is a type alias defined on the owning class
-    // (via `@phpstan-type` / `@psalm-type` / `@phpstan-import-type`).
-    // If so, expand the alias and resolve the underlying definition.
-    //
-    // This runs before union/intersection splitting because the alias
-    // itself may expand to a union or intersection type.
-    if let Some(alias_def) = resolve_type_alias(hint, owning_class_name, all_classes, class_loader)
-    {
-        return type_hint_to_classes_depth(
-            &alias_def,
-            owning_class_name,
-            all_classes,
-            class_loader,
-            depth + 1,
-        );
-    }
-
-    // Parse and delegate to the typed implementation.
-    let parsed = PhpType::parse(hint);
-    type_hint_to_classes_typed_depth(&parsed, owning_class_name, all_classes, class_loader, depth)
-}
-
-/// Inner implementation that operates on a pre-parsed [`PhpType`].
-///
-/// Union and intersection members are recursed directly without
-/// stringifying and re-parsing.  Named types still go through
-/// string-based alias resolution when necessary.
+/// Inner implementation with a recursion depth guard to prevent
+/// infinite loops from circular type aliases.
 fn type_hint_to_classes_typed_depth(
     ty: &PhpType,
     owning_class_name: &str,
@@ -224,17 +168,14 @@ fn type_hint_to_classes_typed_depth(
         ),
 
         // ── Generic type ───────────────────────────────────────────
-        PhpType::Generic(name, args) => {
-            let arg_strings: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-            resolve_named_type(
-                name,
-                &arg_strings,
-                owning_class_name,
-                all_classes,
-                class_loader,
-                depth,
-            )
-        }
+        PhpType::Generic(name, args) => resolve_named_type(
+            name,
+            args,
+            owning_class_name,
+            all_classes,
+            class_loader,
+            depth,
+        ),
 
         // ── Array slice (T[]) ──────────────────────────────────────
         // Not a class type itself; skip.
@@ -260,17 +201,21 @@ fn type_hint_to_classes_typed_depth(
 /// substitution.
 fn resolve_named_type(
     name: &str,
-    generic_arg_strings: &[String],
+    generic_args: &[PhpType],
     owning_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     depth: u8,
 ) -> Vec<ClassInfo> {
     // ── Type alias resolution ──────────────────────────────────────
-    if let Some(alias_def) = resolve_type_alias(name, owning_class_name, all_classes, class_loader)
-    {
-        return type_hint_to_classes_depth(
-            &alias_def,
+    if let Some(alias_type) = resolve_type_alias_typed(
+        &PhpType::Named(name.to_string()),
+        owning_class_name,
+        all_classes,
+        class_loader,
+    ) {
+        return type_hint_to_classes_typed_depth(
+            &alias_type,
             owning_class_name,
             all_classes,
             class_loader,
@@ -279,12 +224,16 @@ fn resolve_named_type(
     }
 
     // ── self / static / $this ──────────────────────────────────────
-    if matches!(name, "self" | "static" | "$this") {
-        if !generic_arg_strings.is_empty() {
+    // These names come from pre-parsed PhpType values; PHP treats them
+    // case-insensitively (e.g. `Self::`, `STATIC::` are valid).
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "self" | "static" | "$this"
+    ) {
+        if !generic_args.is_empty() {
             // `self<RuleError>` → rewrite to `OwningClass<RuleError>`.
-            let args_str = generic_arg_strings.join(", ");
-            let rewritten = format!("{}<{}>", owning_class_name, args_str);
-            return type_hint_to_classes_depth(
+            let rewritten = PhpType::Generic(owning_class_name.to_string(), generic_args.to_vec());
+            return type_hint_to_classes_typed_depth(
                 &rewritten,
                 owning_class_name,
                 all_classes,
@@ -292,9 +241,7 @@ fn resolve_named_type(
                 depth,
             );
         }
-        return all_classes
-            .iter()
-            .find(|c| c.name == owning_class_name)
+        return find_class_by_name(all_classes, owning_class_name)
             .map(|c| ClassInfo::clone(c))
             .or_else(|| class_loader(owning_class_name).map(Arc::unwrap_or_clone))
             .into_iter()
@@ -302,16 +249,13 @@ fn resolve_named_type(
     }
 
     // ── parent ─────────────────────────────────────────────────────
-    if name == "parent" {
-        let parent_name = all_classes
-            .iter()
-            .find(|c| c.name == owning_class_name)
+    // Case-insensitive to match PHP behaviour (`Parent::`, `PARENT::` are valid).
+    if name.eq_ignore_ascii_case("parent") {
+        let parent_name = find_class_by_name(all_classes, owning_class_name)
             .and_then(|c| c.parent_class.clone())
             .or_else(|| class_loader(owning_class_name).and_then(|c| c.parent_class.clone()));
         if let Some(parent) = parent_name {
-            return all_classes
-                .iter()
-                .find(|c| c.name == parent)
+            return find_class_by_name(all_classes, &parent)
                 .map(|c| ClassInfo::clone(c))
                 .or_else(|| class_loader(&parent).map(Arc::unwrap_or_clone))
                 .into_iter()
@@ -321,20 +265,22 @@ fn resolve_named_type(
     }
 
     // ── Resolve static/self/$this inside generic arguments ────────
-    let resolved_generic_args: Vec<String> = generic_arg_strings
-        .iter()
-        .map(|arg| {
-            let trimmed = arg.trim();
-            if trimmed == "static" || trimmed == "self" || trimmed == "$this" {
-                owning_class_name.to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-        .collect();
-    let generic_args: Vec<&str> = resolved_generic_args.iter().map(|s| s.as_str()).collect();
-
-    let short = short_name(name);
+    let resolved_generic_args: Vec<PhpType>;
+    let generic_args: &[PhpType] = if generic_args.iter().any(|a| a.is_self_ref()) {
+        resolved_generic_args = generic_args
+            .iter()
+            .map(|arg| {
+                if arg.is_self_ref() {
+                    PhpType::Named(owning_class_name.to_string())
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect();
+        &resolved_generic_args
+    } else {
+        generic_args
+    };
 
     // ── Class lookup ───────────────────────────────────────────────
     let found = find_class_by_name(all_classes, name)
@@ -347,7 +293,7 @@ fn resolve_named_type(
             let cls = laravel::try_swap_custom_collection(
                 cls,
                 name,
-                &generic_args,
+                generic_args,
                 all_classes,
                 class_loader,
             );
@@ -355,12 +301,25 @@ fn resolve_named_type(
             // Apply generic substitution if the type hint carried
             // generic arguments and the class has template parameters.
             if !generic_args.is_empty() && !cls.template_params.is_empty() {
+                let generic_arg_strings: Vec<String> =
+                    generic_args.iter().map(|a| a.to_string()).collect();
                 let resolved = if let Some(cache) = virtual_members::active_resolved_class_cache() {
-                    virtual_members::resolve_class_fully_cached(&cls, class_loader, cache)
+                    virtual_members::resolve_class_fully_with_generics(
+                        &cls,
+                        class_loader,
+                        Some(cache),
+                        &generic_arg_strings,
+                        generic_args,
+                    )
                 } else {
-                    virtual_members::resolve_class_fully(&cls, class_loader)
+                    let base = virtual_members::resolve_class_fully(&cls, class_loader);
+                    if !base.template_params.is_empty() {
+                        std::sync::Arc::new(apply_generic_args(&base, generic_args))
+                    } else {
+                        base
+                    }
                 };
-                let mut result = apply_generic_args(&resolved, &generic_args);
+                let mut result = std::sync::Arc::unwrap_or_clone(resolved);
 
                 // ── Template-param mixin resolution ────────────────
                 // When a class declares `@mixin TParam` where `TParam`
@@ -369,7 +328,7 @@ fn resolve_named_type(
                 // is not yet known.  Now that generic args are concrete,
                 // resolve those mixins and merge their members.
                 if cls.mixins.iter().any(|m| cls.template_params.contains(m)) {
-                    let subs = build_generic_subs(&cls, &generic_args);
+                    let subs = build_generic_subs(&cls, generic_args);
                     if !subs.is_empty() {
                         let mixin_members = virtual_members::phpdoc::resolve_template_param_mixins(
                             &cls,
@@ -387,7 +346,7 @@ fn resolve_named_type(
                     &mut result,
                     &cls,
                     name,
-                    &generic_args,
+                    generic_args,
                     class_loader,
                 );
 
@@ -401,7 +360,7 @@ fn resolve_named_type(
                 laravel::try_inject_mixin_builder_scopes(
                     &mut result,
                     &cls,
-                    &generic_args,
+                    generic_args,
                     class_loader,
                 );
 
@@ -412,8 +371,9 @@ fn resolve_named_type(
         }
         None => {
             // ── Template parameter bound fallback ──────────────────
+            let short = short_name(name);
             let loaded;
-            let owning = match all_classes.iter().find(|c| c.name == owning_class_name) {
+            let owning = match find_class_by_name(all_classes, owning_class_name) {
                 Some(c) => Some(c.as_ref()),
                 None => {
                     loaded = class_loader(owning_class_name);
@@ -422,12 +382,11 @@ fn resolve_named_type(
             };
 
             if let Some(owner) = owning
-                && owner.template_params.contains(&short.to_string())
+                && owner.template_params.iter().any(|p| p == short)
                 && let Some(bound) = owner.template_param_bounds.get(short)
             {
-                let bound_str = bound.to_string();
-                return type_hint_to_classes_depth(
-                    &bound_str,
+                return type_hint_to_classes_typed_depth(
+                    bound,
                     owning_class_name,
                     all_classes,
                     class_loader,
@@ -459,19 +418,19 @@ fn resolve_named_type(
 ///
 /// Pass an empty `owning_class_name` to search all classes without
 /// priority (used by the array-key completion path).
-pub(crate) fn resolve_type_alias(
-    hint: &str,
+pub(crate) fn resolve_type_alias_typed(
+    ty: &PhpType,
     owning_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
-    let mut current = hint.to_string();
-    let mut resolved_any = false;
+) -> Option<PhpType> {
+    let mut current = ty.clone();
+    let mut last_resolved: Option<PhpType> = None;
 
     for _ in 0..10 {
         // Only bare identifiers can be type aliases.  Skip anything that
         // looks like a complex type expression to avoid false matches.
-        if !matches!(PhpType::parse(&current), PhpType::Named(_)) {
+        if !matches!(current, PhpType::Named(_)) {
             break;
         }
 
@@ -479,29 +438,34 @@ pub(crate) fn resolve_type_alias(
             resolve_type_alias_once(&current, owning_class_name, all_classes, class_loader);
 
         match expanded {
-            Some(def) => {
-                current = def;
-                resolved_any = true;
+            Some(php_type) => {
+                current = php_type.clone();
+                last_resolved = Some(php_type);
             }
             None => break,
         }
     }
 
-    if resolved_any { Some(current) } else { None }
+    last_resolved
 }
 
 /// Single-level alias lookup (no chaining).
 fn resolve_type_alias_once(
-    hint: &str,
+    hint: &PhpType,
     owning_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
+    let name = match hint {
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
+
     // Find the owning class to check its type_aliases.
     let owning_class = all_classes.iter().find(|c| c.name == owning_class_name);
 
     if let Some(cls) = owning_class
-        && let Some(def) = cls.type_aliases.get(hint)
+        && let Some(def) = cls.type_aliases.get(name)
     {
         return expand_type_alias_def(def, all_classes, class_loader);
     }
@@ -516,7 +480,7 @@ fn resolve_type_alias_once(
         if cls.name == owning_class_name {
             continue; // Already checked above.
         }
-        if let Some(def) = cls.type_aliases.get(hint) {
+        if let Some(def) = cls.type_aliases.get(name) {
             return expand_type_alias_def(def, all_classes, class_loader);
         }
     }
@@ -524,18 +488,18 @@ fn resolve_type_alias_once(
     None
 }
 
-/// Expand a [`TypeAliasDef`] into a type definition string.
+/// Expand a [`TypeAliasDef`] into a resolved [`PhpType`].
 ///
-/// For local aliases, returns the `PhpType`'s string representation.
+/// For local aliases, returns the `PhpType` directly.
 /// For imports, loads the source class and returns the original alias
 /// definition.
 fn expand_type_alias_def(
     def: &TypeAliasDef,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match def {
-        TypeAliasDef::Local(php_type) => Some(php_type.to_string()),
+        TypeAliasDef::Local(php_type) => Some(php_type.clone()),
         TypeAliasDef::Import {
             source_class,
             original_name,
@@ -552,7 +516,7 @@ pub(crate) fn resolve_imported_type_alias(
     original_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Try to find the source class.
     let lookup = source_class_name
         .rsplit('\\')
@@ -569,7 +533,7 @@ pub(crate) fn resolve_imported_type_alias(
 
     // Don't follow nested imports — just return the local definition.
     match def {
-        TypeAliasDef::Local(php_type) => Some(php_type.to_string()),
+        TypeAliasDef::Local(php_type) => Some(php_type.clone()),
         TypeAliasDef::Import { .. } => None,
     }
 }

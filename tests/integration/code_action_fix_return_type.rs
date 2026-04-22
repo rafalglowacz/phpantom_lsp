@@ -298,8 +298,8 @@ class Foo {
     );
 
     let actions = get_code_actions_on_line(&backend, uri, content, 3);
-    let action = find_action(&actions, "Change return type to int")
-        .expect("should offer 'Change return type to int'");
+    let action =
+        find_action(&actions, "Update return type").expect("should offer 'Update return type'");
 
     assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
     // return.type is not preferred — the right fix might be to change the code
@@ -317,7 +317,10 @@ class Foo {
 }
 
 #[test]
-fn return_type_handles_union() {
+fn return_type_uses_own_inference_when_it_differs() {
+    // Our inference sees `return 'hello'` → `string`.  The current
+    // declared type is `int`.  They differ, so we use our inference
+    // rather than the PHPStan tip (`int|string`).
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let content = r#"<?php
@@ -336,16 +339,18 @@ function foo(): int {
     );
 
     let actions = get_code_actions_on_line(&backend, uri, content, 2);
-    let action = find_action(&actions, "Change return type to int|string")
-        .expect("should offer union type fix");
+    let action =
+        find_action(&actions, "Update return type").expect("should offer update return type");
 
     let resolved = resolve_action(&backend, uri, content, action);
     let edits = extract_edits(&resolved);
     let result = apply_edits(content, &edits);
 
+    // Our inference is `string` (from the literal), not the PHPStan
+    // union `int|string`.
     assert!(
-        result.contains("): int|string {"),
-        "return type should be the union:\n{}",
+        result.contains("): string {"),
+        "should use our inference (string), not PHPStan tip:\n{}",
         result
     );
 }
@@ -1059,6 +1064,350 @@ class Foo {
         result
     );
 }
+
+// ── return.type — update @return tag ────────────────────────────────────────
+
+#[test]
+fn return_type_offers_single_update_action() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Foo {
+    public function run(): string {
+        return 42;
+    }
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        3,
+        "Method Foo::run() should return string but returns int.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 3);
+
+    // A single "Update return type" action should be offered.
+    let action =
+        find_action(&actions, "Update return type").expect("should offer 'Update return type'");
+
+    // Not preferred — the right fix might be to change the code.
+    assert_eq!(action.is_preferred, Some(false));
+
+    // There should be no separate "Change return type" or "@return tag" actions.
+    assert!(
+        find_action(&actions, "Change return type to int").is_none(),
+        "should NOT offer separate 'Change return type' action"
+    );
+    assert!(
+        find_action(&actions, "Update @return tag to int").is_none(),
+        "should NOT offer separate '@return tag' action"
+    );
+}
+
+#[test]
+fn return_type_update_replaces_existing_return_tag() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Foo {
+    /**
+     * @return string The result
+     */
+    public function run(): string {
+        return 42;
+    }
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        6,
+        "Method Foo::run() should return string but returns int.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 6);
+    let action =
+        find_action(&actions, "Update return type").expect("should offer update return type");
+
+    let resolved = resolve_action(&backend, uri, content, action);
+    let edits = extract_edits(&resolved);
+    let result = apply_edits(content, &edits);
+
+    assert!(
+        result.contains("@return int"),
+        "should update @return type to int:\n{}",
+        result
+    );
+    assert!(
+        result.contains("The result"),
+        "should preserve description:\n{}",
+        result
+    );
+    // Native type already matches base type — should remain unchanged.
+    assert!(
+        result.contains("): int {"),
+        "native type should be updated to int:\n{}",
+        result
+    );
+}
+
+#[test]
+fn return_type_update_no_docblock_change_for_simple_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Foo {
+    /**
+     * Does something.
+     */
+    public function run(): string {
+        return 42;
+    }
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        6,
+        "Method Foo::run() should return string but returns int.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 6);
+    let action =
+        find_action(&actions, "Update return type").expect("should offer update return type");
+
+    let resolved = resolve_action(&backend, uri, content, action);
+    let edits = extract_edits(&resolved);
+    let result = apply_edits(content, &edits);
+
+    // Native type should be changed.
+    assert!(
+        result.contains("): int {"),
+        "native type should be changed to int:\n{}",
+        result
+    );
+    // No @return tag should be added for a simple type without generics.
+    assert!(
+        !result.contains("@return int"),
+        "should NOT insert @return for simple type:\n{}",
+        result
+    );
+    assert!(
+        result.contains("Does something."),
+        "should preserve existing docblock content:\n{}",
+        result
+    );
+}
+
+#[test]
+fn return_type_update_generic_creates_docblock() {
+    // Current: native `array`, no @return tag.  Our inference sees
+    // `$frogs = [1, 2, 3]` → effective `list<int>`, native `array`.
+    // `list<int>` != `array` → use our inference.
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Foo {
+    public function run(): array {
+        $frogs = [1, 2, 3];
+        return $frogs;
+    }
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        4,
+        "Method Foo::run() should return array<string> but returns array<int, int>.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 4);
+    let action =
+        find_action(&actions, "Update return type").expect("should offer update return type");
+
+    let resolved = resolve_action(&backend, uri, content, action);
+    let edits = extract_edits(&resolved);
+    let result = apply_edits(content, &edits);
+
+    assert!(
+        result.contains("/**"),
+        "should create docblock:\n{}",
+        result
+    );
+    // Our inference produces `list<int>`, not PHPStan's `array<int, int>`.
+    assert!(
+        result.contains("@return list<int>"),
+        "should have @return tag with our inferred type:\n{}",
+        result
+    );
+    assert!(result.contains("*/"), "should close docblock:\n{}", result);
+    // Native type should remain `array`.
+    assert!(
+        result.contains("): array {"),
+        "native type should remain array:\n{}",
+        result
+    );
+}
+
+#[test]
+fn return_type_update_standalone_function() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+function foo(): int {
+    return 'hello';
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        2,
+        "Function foo() should return int but returns string.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 2);
+    let action = find_action(&actions, "Update return type")
+        .expect("should offer update return type for standalone function");
+
+    let resolved = resolve_action(&backend, uri, content, action);
+    let edits = extract_edits(&resolved);
+    let result = apply_edits(content, &edits);
+
+    // Native type should change to string.
+    assert!(
+        result.contains("): string {"),
+        "native type should be changed to string:\n{}",
+        result
+    );
+    // No docblock needed for simple type.
+    assert!(
+        !result.contains("@return"),
+        "should NOT create @return for simple type:\n{}",
+        result
+    );
+}
+
+#[test]
+fn return_type_update_generic_replaces_existing_return_tag() {
+    // Current: native `array`, @return `array<int, string>`.  Our
+    // inference sees `$frogs = [1, 2, 3]` → effective `list<int>`.
+    // `list<int>` != `array<int, string>` → use our inference.
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @return array<int, string>
+ */
+function foo(): array {
+    $frogs = [1, 2, 3];
+    return $frogs;
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        6,
+        "Function foo() should return array<int, string> but returns array<int, int>.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 6);
+    let action =
+        find_action(&actions, "Update return type").expect("should offer update return type");
+
+    let resolved = resolve_action(&backend, uri, content, action);
+    let edits = extract_edits(&resolved);
+    let result = apply_edits(content, &edits);
+
+    // Our inference produces `list<int>`, not PHPStan's `array<int, int>`.
+    assert!(
+        result.contains("@return list<int>"),
+        "should replace @return with our inferred type:\n{}",
+        result
+    );
+    // The old generic type should be fully replaced.
+    assert!(
+        !result.contains("array<int, string>"),
+        "old @return type should be gone:\n{}",
+        result
+    );
+    // Native type should remain `array`.
+    assert!(
+        result.contains("): array {"),
+        "native type should remain array:\n{}",
+        result
+    );
+}
+
+#[test]
+fn return_type_tip_fallback_with_generics() {
+    // Current @return is `list<int>` which matches our inference
+    // exactly.  PHPStan says the actual return type is
+    // `array<int, int>`.  Since our inference agrees with the
+    // declaration, we trust the PHPStan tip.
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @return list<int>
+ */
+function foo(): array {
+    $frogs = [1, 2, 3];
+    return $frogs;
+}
+"#;
+    backend.update_ast(uri, content);
+
+    inject_phpstan_diag(
+        &backend,
+        uri,
+        6,
+        "Function foo() should return array<string, int> but returns array<int, int>.",
+        "return.type",
+    );
+
+    let actions = get_code_actions_on_line(&backend, uri, content, 6);
+    let action =
+        find_action(&actions, "Update return type").expect("should offer update return type");
+
+    let resolved = resolve_action(&backend, uri, content, action);
+    let edits = extract_edits(&resolved);
+    let result = apply_edits(content, &edits);
+
+    // Our inference matches the current @return (`list<int>`), so we
+    // trust the PHPStan tip: `array<int, int>`.
+    assert!(
+        result.contains("@return array<int, int>"),
+        "should use PHPStan tip when our inference matches current:\n{}",
+        result
+    );
+    // Native type should remain `array`.
+    assert!(
+        result.contains("): array {"),
+        "native type should remain array:\n{}",
+        result
+    );
+}
+
+// ── missing return type — simple type (no docblock) ─────────────────────────
 
 #[test]
 fn missing_return_type_simple_type_no_docblock() {

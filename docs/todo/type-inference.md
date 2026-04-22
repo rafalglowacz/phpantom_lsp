@@ -327,40 +327,6 @@ $one->  // should see Foo members
 
 ---
 
-## T12. Intersection types flattened to unions by `type_strings_joined`
-**Impact: Low-Medium · Effort: Low (after M4)**
-
-`ResolvedType::type_strings_joined` joins all resolved type entries
-with `|`. When a variable has an intersection type (`A&B`), the
-resolution pipeline produces separate `ResolvedType` entries for each
-part, and the join produces `A|B` instead of `A&B`.
-
-This affects any consumer that reads the joined type string, including
-hover display, extract function parameter types, and docblock
-generation on extracted methods.
-
-**Example:**
-
-```php
-function measure(Countable&Serializable $thing): void {
-    // Select and extract:
-    echo $thing->count();
-}
-// Extracted method gets `Countable|Serializable $thing` instead of
-// `Countable&Serializable $thing`.
-```
-
-**Blocked by M4.** The fix requires `PhpType::Intersection` from the
-mago-type-syntax migration. The current `Vec<ResolvedType>` has no way
-to distinguish "these types form an intersection" from "these types
-form a union". With `PhpType`, the intersection is a single tree node.
-
-**After fixing:** verify that extract function docblock generation
-preserves intersection types in both the native hint and the `@param`
-tag.
-
----
-
 ## T13. Closure variables lose callable signature detail
 **Impact: Low-Medium · Effort: Medium**
 
@@ -412,44 +378,6 @@ emits the concrete callable signature in the `@param` tag.
 
 ---
 
-## T19. Structured type representation
-**Impact: High · Effort: Very High**
-
-PHPantom represents types as strings (e.g. `"Collection<string>|null"`)
-and manipulates them via string splitting, regex, and concatenation.
-PHPStan, Psalm, and Mago all use structured type trees (enums/classes)
-where each type is a node with typed children. This causes:
-
-- Fragile parsing on every type comparison or manipulation
-- No proper subtype checking (can't answer "is `Cat` a subtype of
-  `Animal`?")
-- String-based template substitution that breaks on nested generics
-- No union simplification (`string|string` stays as-is, `true|false`
-  doesn't merge to `bool`)
-- Intersection types can't be properly distributed over unions
-
-A structured type representation (a Rust `enum PhpType`) would
-eliminate these issues. PHPantom already has `PhpType` via
-`mago-type-syntax` for parsing. The gap is using it as the primary
-representation throughout the resolution pipeline instead of raw
-strings.
-
-**Migration path:** incremental. Start by making the hottest paths
-(template substitution, type narrowing) operate on `PhpType` values
-instead of strings, converting at the boundary. Expand outward over
-time.
-
-**Reference:** PHPStan's `Type` interface (~120 methods), Psalm's
-`Union`/`Atomic` hierarchy, Mago's `TUnion`/`TAtomic` enum. All three
-converge on the same architecture.
-
-**Note:** the `mago-type-syntax` integration tracked in `refactor.md`
-is a stepping stone toward this. The remaining items there
-(`ArrayShapeEntry.value_type` to `PhpType`, `split_type_token`
-replacement) should be completed first.
-
----
-
 ## T20. Type narrowing reconciliation engine
 **Impact: Medium-High · Effort: High**
 
@@ -483,34 +411,129 @@ NonEmptyCountable.
 `Psalm/Storage/Assertion/`. PHPStan's `TypeSpecifier` returns
 `SpecifiedTypes` with dual sure/sureNot maps.
 
-**Depends on:** T19 (structured types make reconciliation much
-simpler, but basic reconciliation can work with strings too).
+**Depends on:** The structured type representation (`PhpType`) has
+landed, which makes reconciliation much simpler than working with
+raw strings.
 
 ---
 
-## T21. Bidirectional template inference (upper/lower bounds)
-**Impact: Medium · Effort: Medium-High**
 
-PHPantom's template resolution only tracks one direction: matching
-template parameters against concrete types from extends clauses and
-direct argument positions. PHPStan and Psalm track both upper bounds
-(covariant positions like return types) and lower bounds (contravariant
-positions like parameter types).
-
-Key gaps:
-
-1. When `@param Closure(T): void $callback` receives a closure, `T`
-   should be inferred from the closure's parameter type
-   (contravariant).
-2. When multiple bounds exist for the same template, the most specific
-   one should win. Psalm uses `appearance_depth` to prefer direct
-   bindings over nested ones.
-3. No variance tracking. `@template-covariant T` vs `@template T`
-   affects whether `Container<Cat>` is assignable to
-   `Container<Animal>`.
-
-**Implementation:** add a `TemplateResolution` struct that accumulates
-lower and upper bounds during call-site analysis, with a `resolve()`
-method that picks the most specific bound.
 
 ---
+
+## T24. `stdClass` dynamic property access
+**Impact: Low-Medium · Effort: Low**
+
+`stdClass` is PHP's generic dynamic-property container. Accessing any
+property on a value known to be `stdClass` (or narrowed to `object`
+via `is_object()`) should not produce `unresolved_member_access`
+diagnostics, because `stdClass` permits arbitrary properties by
+design.
+
+**Partially resolved.** Three changes landed:
+
+1. `filter_type_by_guard` now narrows `mixed` → the canonical type
+   for each guard kind (e.g. `is_object()` → `object`) instead of
+   filtering `mixed` to empty.
+2. `resolve_subject_outcome_variable` returns a synthetic
+   `Resolved(stdClass)` when the resolved type is `object` or
+   `stdClass`, so the existing `check_member_on_resolved_classes`
+   suppression kicks in.
+3. `try_apply_type_guard_narrowing` decomposes compound `&&`
+   conditions so `if (is_object($x) && $x->prop)` narrows in both
+   the condition RHS and the if-body. `apply_and_lhs_narrowing` also
+   handles `is_object()` in `&&` inline narrowing.
+
+This fixed `Order:646,647` (`json_decode` → `mixed` → `is_object`
+guard → property access).
+
+**Remaining:** `instanceof` narrowing on array element access
+expressions (T20 concern). The narrowing system only matches bare
+variable names (`$var`), not subscript expressions (`$arr[0]`).
+The `PurchaseFileService` case that originally motivated this item
+is now resolved by the `DB::select()` return type patch (B14) combined
+with `stdClass` property access suppression, but the general gap
+remains for any `$arr[$i] instanceof Foo` pattern.
+
+---
+
+## T25. Forward-walking scope model for variable type resolution
+**Impact: High · Effort: Very High**
+
+PHPantom resolves variable types lazily: when the user triggers
+completion on `$x->`, it walks backward from the cursor to find
+where `$x` was assigned, then recursively resolves any variables
+referenced in the RHS. Each level of indirection adds a call to
+`resolve_variable_types`, which re-parses the file and re-walks the
+AST. A global depth counter (`MAX_VAR_RESOLUTION_DEPTH`, currently 4)
+caps the recursion to prevent stack overflows.
+
+PHPStan, Psalm, and Mago all use the opposite strategy: an eager,
+single-pass, forward-walking scope model. They walk statements
+top-to-bottom, carrying a mutable type map (`expressionTypes` in
+PHPStan, `locals` in Mago). When they encounter `$a = $b->prop`,
+they look up `$b` in the already-populated map, resolve the property,
+and store `$a`'s type. Variable lookup is a flat O(1) map fetch with
+zero recursion regardless of assignment chain depth.
+
+The backward-scanning approach causes several problems:
+
+- **Depth limit fragility.** Every real-world pattern that adds one
+  more level of indirection (e.g. array shape literals referencing
+  variables assigned from foreach bindings inside conditional
+  branches) requires bumping the limit. The limit was 3, then 4;
+  it will need to grow again.
+- **Redundant work.** Each recursive call re-parses the source and
+  re-walks the AST from the top. A forward pass would parse once and
+  walk once.
+- **No scope threading.** Narrowing, guard clauses, and branch-aware
+  resolution are bolted on as post-hoc corrections rather than
+  flowing naturally through the scope.
+
+**Depth limits eliminated by this item:**
+
+| Constant | Value | Location | Why it exists |
+|---|---|---|---|
+| `MAX_VAR_RESOLUTION_DEPTH` | 4 | `completion/variable/resolution.rs` | Each variable in an assignment chain triggers a full re-parse and re-walk. Was 3, bumped to 4 for array shapes in conditional loop branches. |
+| `MAX_CLOSURE_INFER_DEPTH` | 4 | `completion/variable/closure_resolution.rs` | `infer_callable_params_from_receiver` resolves the receiver type to infer closure parameter types, which can trigger another variable resolution cycle. |
+
+Both share the same root cause: resolving a variable's type triggers
+a full re-parse and re-walk from scratch, which recurses when the RHS
+references another variable. In a forward-walking model, both would
+be flat map lookups with zero recursion.
+
+The remaining depth limits (`MAX_INHERITANCE_DEPTH`,
+`MAX_TRAIT_DEPTH`, `MAX_MIXIN_DEPTH`, `MAX_ALIAS_DEPTH`) guard
+against walking PHP class/type hierarchies and are unrelated to the
+resolution architecture. They mirror limits that PHPStan and Mago
+also have and should stay as-is.
+
+A forward-walking scope model would:
+
+1. Parse the enclosing function body once.
+2. Walk statements in order, maintaining a `HashMap<VarName, PhpType>`
+   scope that is updated on each assignment, foreach binding, catch
+   clause, and narrowing point.
+3. At the cursor position, read the variable's type from the map.
+
+This eliminates the depth limit entirely and makes the resolution
+cost proportional to the number of statements before the cursor,
+not the depth of the assignment chain.
+
+**Note:** The structured type representation (`PhpType`) has landed,
+so the scope map can store `PhpType` values directly.
+
+**Migration path:** Start with a parallel implementation behind a
+feature flag. The existing backward-scanning resolver stays as a
+fallback. Migrate one resolution context at a time (completion,
+hover, diagnostics) once the forward walker covers enough cases.
+
+**Reference:** PHPStan's `MutatingScope.expressionTypes` +
+`NodeScopeResolver.processStmtNode`, Mago's `BlockContext.locals` +
+statement analyzers. Both converge on the same architecture: the
+scope is the single source of truth, populated eagerly as the walk
+progresses.
+
+
+
+

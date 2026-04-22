@@ -21,7 +21,7 @@ use super::member::{MemberAccessHint, MemberDefinitionCtx};
 use super::point_location;
 use crate::Backend;
 use crate::composer;
-use crate::symbol_map::SymbolKind;
+use crate::symbol_map::{SelfStaticParentKind, SymbolKind};
 use crate::types::{AccessKind, ClassInfo};
 use crate::util::{find_class_at_offset, position_to_offset, short_name};
 
@@ -40,46 +40,9 @@ impl Backend {
         // Consult precomputed symbol map (retries one byte earlier for
         // end-of-token edge cases).
         let symbol = self.lookup_symbol_at_position(uri, content, position);
-        let result = if let Some(ref symbol) = symbol {
-            self.resolve_from_symbol(&symbol.kind, uri, content, position, symbol.start)
-        } else {
-            None
-        };
-
-        // ── Self-reference guard ────────────────────────────────────
-        // When the resolved location points back to the same file and
-        // the cursor is already within (or touching) the target range,
-        // the user is at the definition site.  Suppress the jump so
-        // that Ctrl+Click doesn't navigate to itself.
-        //
-        // Special case: zero-width (point) locations arise from
-        // `offset_to_position` and similar helpers that return the
-        // start of a construct (e.g. the `define` keyword) but the
-        // cursor may be anywhere on the same line (e.g. on the
-        // constant name inside the string argument).  For these we
-        // expand the check to the entire line.
-        if let Some(ref loc) = result
-            && let Ok(parsed_uri) = Url::parse(uri)
-            && loc.uri == parsed_uri
-        {
-            let is_point = loc.range.start == loc.range.end;
-            let within = if is_point {
-                // Zero-width target: suppress when cursor is on the same line.
-                position.line == loc.range.start.line
-            } else {
-                position.line >= loc.range.start.line
-                    && position.line <= loc.range.end.line
-                    && (position.line != loc.range.start.line
-                        || position.character >= loc.range.start.character)
-                    && (position.line != loc.range.end.line
-                        || position.character <= loc.range.end.character)
-            };
-            if within {
-                return None;
-            }
-        }
-
-        result
+        symbol
+            .as_ref()
+            .and_then(|s| self.resolve_from_symbol(&s.kind, uri, content, position, s.start))
     }
 
     /// Look up the symbol at the given byte offset in the precomputed
@@ -165,7 +128,10 @@ impl Backend {
         let maps = self.symbol_maps.read();
         let map = maps.get(uri)?;
         let def = map.var_def_at(var_name, cursor_offset)?;
-        if matches!(def.kind, VarDefKind::Assignment) {
+        if matches!(
+            def.kind,
+            VarDefKind::Assignment | VarDefKind::CompoundAssignment
+        ) {
             Some(def.effective_from)
         } else {
             None
@@ -205,14 +171,19 @@ impl Backend {
                     // outer-scope lookup.
                     if def_kind != VarDefKind::ClosureCapture {
                         // The cursor is on a variable at its definition
-                        // site (assignment LHS, parameter, foreach
-                        // binding, catch binding, etc.).  GTD should not
-                        // trigger here — the user is already at the
-                        // definition.  Type hints next to the variable
-                        // (e.g. `Throwable` in `catch (Throwable $it)`)
-                        // are separate symbol spans that the user can
-                        // click directly.
-                        return None;
+                        // site.  Return the symbol's own location so
+                        // editors can fall back to Find References.
+                        let parsed_uri = Url::parse(uri).ok()?;
+                        let start =
+                            crate::util::offset_to_position(content, cursor_offset as usize);
+                        let end = crate::util::offset_to_position(
+                            content,
+                            cursor_offset as usize + 1 + name.len(),
+                        );
+                        return Some(Location {
+                            uri: parsed_uri,
+                            range: Range { start, end },
+                        });
                     }
                 }
 
@@ -267,19 +238,28 @@ impl Backend {
                 self.resolve_member_definition_with(uri, content, position, &mctx)
             }
 
-            SymbolKind::SelfStaticParent { keyword } => {
-                self.resolve_self_static_parent(uri, content, position, keyword)
+            SymbolKind::SelfStaticParent(ssp_kind) => {
+                self.resolve_self_static_parent(uri, content, position, *ssp_kind)
             }
 
-            SymbolKind::ClassReference { name, is_fqn } => {
+            SymbolKind::ClassReference { name, is_fqn, .. } => {
                 self.resolve_class_reference(uri, content, name, *is_fqn, cursor_offset)
             }
 
-            SymbolKind::ClassDeclaration { .. } | SymbolKind::MemberDeclaration { .. } => {
-                // The cursor is on a class/interface/trait/enum declaration
-                // name or a method/property/constant declaration name —
-                // the user is already at the definition site.
-                None
+            SymbolKind::ClassDeclaration { name } | SymbolKind::MemberDeclaration { name, .. } => {
+                // The cursor is on a declaration name.  Return the
+                // symbol's own location so that editors can detect
+                // "definition == current position" and fall back to
+                // Find References (e.g. VS Code's
+                // editor.gotoLocation.alternativeDefinitionCommand).
+                let parsed_uri = Url::parse(uri).ok()?;
+                let start = crate::util::offset_to_position(content, cursor_offset as usize);
+                let end =
+                    crate::util::offset_to_position(content, cursor_offset as usize + name.len());
+                Some(Location {
+                    uri: parsed_uri,
+                    range: Range { start, end },
+                })
             }
 
             SymbolKind::FunctionCall { name, .. } => {
@@ -682,11 +662,7 @@ impl Backend {
             if c.name != sn {
                 return false;
             }
-            let class_fqn = match &c.file_namespace {
-                Some(ns) => format!("{}\\{}", ns, c.name),
-                None => c.name.clone(),
-            };
-            class_fqn == fqn
+            c.fqn() == fqn
         })?;
 
         let content = self.get_file_content(target_uri)?;
@@ -762,7 +738,7 @@ impl Backend {
         uri: &str,
         content: &str,
         position: Position,
-        keyword: &str,
+        ssp_kind: SelfStaticParentKind,
     ) -> Option<Location> {
         let cursor_offset = position_to_offset(content, position);
 
@@ -771,7 +747,10 @@ impl Backend {
 
         let current_class = find_class_at_offset(&classes, cursor_offset)?;
 
-        if keyword == "self" || keyword == "static" {
+        if matches!(
+            ssp_kind,
+            SelfStaticParentKind::Self_ | SelfStaticParentKind::Static | SelfStaticParentKind::This
+        ) {
             // Jump to the enclosing class definition in the current file.
             if current_class.keyword_offset == 0 {
                 return None;
@@ -782,7 +761,7 @@ impl Backend {
             return Some(point_location(parsed_uri, target_position));
         }
 
-        // keyword == "parent"
+        // SelfStaticParentKind::Parent
         let parent_name = current_class.parent_class.as_ref()?;
 
         // Try to find the parent class in the current file first.

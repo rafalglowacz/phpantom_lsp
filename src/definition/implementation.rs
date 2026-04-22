@@ -38,8 +38,8 @@ use super::member::MemberKind;
 use super::point_location;
 use crate::Backend;
 use crate::completion::resolver::ResolutionCtx;
-use crate::symbol_map::SymbolKind;
-use crate::types::{ClassInfo, ClassLikeKind, FileContext, MAX_INHERITANCE_DEPTH};
+use crate::symbol_map::{SelfStaticParentKind, SymbolKind};
+use crate::types::{ClassInfo, ClassLikeKind, FileContext, MAX_INHERITANCE_DEPTH, ResolvedType};
 use crate::util::{collect_php_files, find_class_at_offset, position_to_offset, short_name};
 
 impl Backend {
@@ -79,12 +79,12 @@ impl Backend {
                 }
                 // self/static/parent — resolve the keyword to the current
                 // class and check whether it is an interface/abstract.
-                SymbolKind::SelfStaticParent { keyword } => {
+                SymbolKind::SelfStaticParent(ssp_kind) => {
                     let ctx = self.file_context(uri);
                     let class_loader = self.class_loader(&ctx);
                     let current_class = find_class_at_offset(&ctx.classes, sym.start);
-                    let target = match keyword.as_str() {
-                        "parent" => current_class
+                    let target = match ssp_kind {
+                        SelfStaticParentKind::Parent => current_class
                             .and_then(|cc| cc.parent_class.as_ref())
                             .and_then(|p| class_loader(p).map(Arc::unwrap_or_clone)),
                         _ => current_class.cloned(),
@@ -477,8 +477,9 @@ impl Backend {
             function_loader: Some(&function_loader),
             phpstorm_meta: Some(&meta_guard),
         };
-        let candidates =
-            crate::completion::resolver::resolve_target_classes(&subject, access_kind, &rctx);
+        let candidates = ResolvedType::into_arced_classes(
+            crate::completion::resolver::resolve_target_classes(&subject, access_kind, &rctx),
+        );
 
         if candidates.is_empty() {
             return None;
@@ -898,7 +899,14 @@ impl Backend {
         // ClassC.  Load each directly-implemented interface and
         // recursively check whether it extends the target.
         for iface in &cls.interfaces {
-            if Self::interface_extends_target(iface, target_short, target_fqn, class_loader, 0) {
+            if Self::interface_extends_target(
+                iface,
+                target_short,
+                target_fqn,
+                has_fqn,
+                class_loader,
+                0,
+            ) {
                 return true;
             }
         }
@@ -926,6 +934,7 @@ impl Backend {
                         iface,
                         target_short,
                         target_fqn,
+                        has_fqn,
                         class_loader,
                         0,
                     ) {
@@ -958,6 +967,7 @@ impl Backend {
         iface_name: &str,
         target_short: &str,
         target_fqn: &str,
+        has_fqn: bool,
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
         depth: u32,
     ) -> bool {
@@ -973,13 +983,14 @@ impl Backend {
         // backward compatibility).
         if let Some(ref parent) = iface_cls.parent_class {
             let parent_short = short_name(parent);
-            if parent_short == target_short || parent == target_fqn {
+            if parent == target_fqn || (!has_fqn && parent_short == target_short) {
                 return true;
             }
             if Self::interface_extends_target(
                 parent,
                 target_short,
                 target_fqn,
+                has_fqn,
                 class_loader,
                 depth + 1,
             ) {
@@ -991,13 +1002,14 @@ impl Backend {
         // interfaces that extend more than one parent).
         for parent_iface in &iface_cls.interfaces {
             let parent_short = short_name(parent_iface);
-            if parent_short == target_short || parent_iface == target_fqn {
+            if parent_iface == target_fqn || (!has_fqn && parent_short == target_short) {
                 return true;
             }
             if Self::interface_extends_target(
                 parent_iface,
                 target_short,
                 target_fqn,
+                has_fqn,
                 class_loader,
                 depth + 1,
             ) {

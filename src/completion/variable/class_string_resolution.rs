@@ -14,7 +14,7 @@ use mago_syntax::ast::*;
 
 use crate::parser::with_parsed_program;
 use crate::types::ClassInfo;
-use crate::util::short_name;
+use crate::util::{resolve_class_keyword, short_name};
 
 use crate::completion::conditional_resolution::extract_class_string_from_expr;
 use crate::completion::resolver::{Loaders, VarResolutionCtx};
@@ -53,6 +53,7 @@ pub(in crate::completion) fn resolve_class_string_targets(
                 enclosing_return_type: None,
                 branch_aware: false,
                 phpstorm_meta: None,
+                match_arm_narrowing: Default::default(),
             };
             resolve_class_string_in_statements(program.statements.iter(), &ctx)
         },
@@ -186,16 +187,12 @@ fn check_class_string_assignment(
     // Clear previous results — the last unconditional assignment wins.
     results.clear();
     for name in class_names {
-        let resolved_name = if name == "self" || name == "static" {
-            ctx.current_class.name.clone()
-        } else if name == "parent" {
-            match &ctx.current_class.parent_class {
-                Some(p) => short_name(p).to_string(),
-                None => continue,
-            }
-        } else {
-            name
-        };
+        let resolved_name =
+            if let Some(resolved) = resolve_class_keyword(&name, Some(ctx.current_class)) {
+                resolved
+            } else {
+                name
+            };
         let lookup = short_name(&resolved_name);
         if let Some(cls) = ctx.all_classes.iter().find(|c| c.name == lookup) {
             ClassInfo::push_unique(results, ClassInfo::clone(cls));

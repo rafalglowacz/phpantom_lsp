@@ -77,7 +77,7 @@ impl Backend {
         for span in &symbol_map.spans {
             match &span.kind {
                 // ── Class references (type hints, new Foo, extends, etc.) ─
-                SymbolKind::ClassReference { name, is_fqn } => {
+                SymbolKind::ClassReference { name, is_fqn, .. } => {
                     // Prefer mago-names byte-offset lookup when available —
                     // it applies PHP's full name resolution rules.  Fall
                     // back to the legacy resolve_to_fqn helper otherwise.
@@ -99,9 +99,10 @@ impl Backend {
                             span.end as usize,
                         )
                     {
+                        let class_fqn = cls.fqn();
                         out.push(deprecated_diagnostic(
                             range,
-                            &cls.name,
+                            &class_fqn,
                             None,
                             msg,
                             &cls.see_refs,
@@ -194,10 +195,11 @@ impl Backend {
                                 span.end as usize,
                             )
                         {
+                            let class_fqn = resolved.fqn();
                             out.push(deprecated_diagnostic(
                                 range,
                                 member_name,
-                                Some(&resolved.name),
+                                Some(&class_fqn),
                                 msg,
                                 &method.see_refs,
                             ));
@@ -218,10 +220,11 @@ impl Backend {
                                 span.end as usize,
                             )
                         {
+                            let class_fqn = resolved.fqn();
                             out.push(deprecated_diagnostic(
                                 range,
                                 member_name,
-                                Some(&resolved.name),
+                                Some(&class_fqn),
                                 msg,
                                 &prop.see_refs,
                             ));
@@ -239,10 +242,11 @@ impl Backend {
                                 span.end as usize,
                             )
                         {
+                            let class_fqn = resolved.fqn();
                             out.push(deprecated_diagnostic(
                                 range,
                                 member_name,
-                                Some(&resolved.name),
+                                Some(&class_fqn),
                                 msg,
                                 &constant.see_refs,
                             ));

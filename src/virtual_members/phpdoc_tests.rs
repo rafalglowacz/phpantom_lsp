@@ -208,7 +208,7 @@ fn nullable_type_preserved() {
     assert_eq!(
         result.properties[0].type_hint_str().as_deref(),
         Some("null|int"),
-        "null|int should be preserved (not stripped by clean_type)"
+        "null|int should be preserved in the type hint"
     );
 }
 

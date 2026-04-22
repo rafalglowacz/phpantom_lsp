@@ -175,6 +175,7 @@ async fn test_goto_definition_union_return_type_standalone_function() {
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    template_param_bounds: std::collections::HashMap::new(),
                     throws: vec![],
                     is_polyfill: false,
                 },

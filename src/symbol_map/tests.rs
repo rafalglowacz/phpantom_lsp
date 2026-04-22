@@ -11,6 +11,7 @@ fn make_span(start: u32, end: u32, name: &str) -> SymbolSpan {
         kind: SymbolKind::ClassReference {
             name: name.to_string(),
             is_fqn: false,
+            context: ClassRefContext::Other,
         },
     }
 }
@@ -171,7 +172,10 @@ fn extends_fqn_sets_is_fqn() {
     let fqn_offset = php.find("\\App\\Bar").unwrap() as u32;
     let hit = map.lookup(fqn_offset);
     assert!(hit.is_some(), "Should have a span at the FQN");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\Bar");
         assert!(is_fqn, "FQN should be marked as is_fqn");
     } else {
@@ -374,8 +378,8 @@ fn self_keyword_produces_self_static_parent() {
     let offset = php.find("self").unwrap() as u32;
     let hit = map.lookup(offset);
     assert!(hit.is_some());
-    if let SymbolKind::SelfStaticParent { ref keyword } = hit.unwrap().kind {
-        assert_eq!(keyword, "self");
+    if let SymbolKind::SelfStaticParent(kind) = &hit.unwrap().kind {
+        assert_eq!(*kind, SelfStaticParentKind::Self_);
     } else {
         panic!("Expected SelfStaticParent");
     }
@@ -705,7 +709,10 @@ fn docblock_fqn_type() {
     let user_offset = php.find("\\App\\Models\\User").unwrap() as u32;
     let hit = map.lookup(user_offset);
     assert!(hit.is_some(), "Should find FQN type in docblock");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\Models\\User");
         assert!(is_fqn, "Docblock FQN type should have is_fqn = true");
     } else {
@@ -728,8 +735,8 @@ fn docblock_this_produces_self_static_parent() {
     let this_offset = php.find("$this").unwrap() as u32;
     let hit = map.lookup(this_offset);
     assert!(hit.is_some(), "Should find $this in docblock generic arg");
-    if let SymbolKind::SelfStaticParent { ref keyword } = hit.unwrap().kind {
-        assert_eq!(keyword, "static");
+    if let SymbolKind::SelfStaticParent(kind) = &hit.unwrap().kind {
+        assert_eq!(*kind, SelfStaticParentKind::This);
     } else {
         panic!(
             "Expected SelfStaticParent for $this, got {:?}",
@@ -753,7 +760,10 @@ fn attribute_class_reference() {
         .unwrap() as u32;
     let hit = map.lookup(attr_offset);
     assert!(hit.is_some(), "Should find attribute class reference");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(
             name,
             "Illuminate\\Database\\Eloquent\\Attributes\\CollectedBy"
@@ -803,7 +813,10 @@ fn fqn_type_hint_in_parameter() {
     let fqn_offset = php.find("\\Illuminate\\Support\\Collection").unwrap() as u32;
     let hit = map.lookup(fqn_offset);
     assert!(hit.is_some(), "Should find FQN type hint in parameter");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Support\\Collection");
         assert!(is_fqn, "FQN parameter type hint should have is_fqn = true");
     } else {
@@ -821,7 +834,10 @@ fn fqn_extends_class_reference() {
     let fqn_offset = php.find("\\Illuminate\\Database\\Eloquent\\Model").unwrap() as u32;
     let hit = map.lookup(fqn_offset);
     assert!(hit.is_some(), "Should find FQN in extends clause");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Model");
         assert!(is_fqn, "FQN extends should have is_fqn = true");
     } else {
@@ -855,7 +871,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find attribute FQN when cursor is on 'CollectedBy'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(
             name,
             "Illuminate\\Database\\Eloquent\\Attributes\\CollectedBy"
@@ -873,7 +892,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find attribute FQN when cursor is on 'Database'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(
             name,
             "Illuminate\\Database\\Eloquent\\Attributes\\CollectedBy"
@@ -890,7 +912,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find extends FQN when cursor is on 'Model'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Model");
         assert!(is_fqn);
     } else {
@@ -907,7 +932,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find extends FQN when cursor is on 'Eloquent'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Model");
         assert!(is_fqn);
     } else {
@@ -921,7 +949,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find docblock FQN when cursor is on 'HasMany'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Relations\\HasMany");
         assert!(is_fqn);
     } else {
@@ -935,7 +966,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find docblock FQN when cursor is on 'Relations'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Relations\\HasMany");
         assert!(is_fqn);
     } else {
@@ -947,8 +981,8 @@ fn fqn_lookup_at_middle_of_name() {
     let this_in_doc = php[docblock_start..].find("$this").unwrap() + docblock_start;
     let hit = map.lookup(this_in_doc as u32);
     assert!(hit.is_some(), "Should find $this in docblock generic arg");
-    if let SymbolKind::SelfStaticParent { ref keyword } = hit.unwrap().kind {
-        assert_eq!(keyword, "static");
+    if let SymbolKind::SelfStaticParent(kind) = &hit.unwrap().kind {
+        assert_eq!(*kind, SelfStaticParentKind::This);
     } else {
         panic!(
             "Expected SelfStaticParent for $this, got {:?}",
@@ -975,7 +1009,10 @@ fn template_tag_bound_type_produces_class_reference() {
         hit.is_some(),
         "Should find bound type AstNode in @template tag"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "AstNode");
         assert!(!is_fqn);
     } else {
@@ -1018,7 +1055,10 @@ fn template_tag_fqn_bound() {
     let r_offset = php.find("\\App\\Contracts\\Renderable").unwrap() as u32;
     let hit = map.lookup(r_offset);
     assert!(hit.is_some(), "Should find FQN bound type");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\Contracts\\Renderable");
         assert!(is_fqn);
     } else {
@@ -1532,8 +1572,8 @@ fn template_param_def_recorded_for_class() {
         "name_offset should point to the TKey text"
     );
     assert_eq!(
-        tkey.bound.as_deref(),
-        Some("array-key"),
+        tkey.bound,
+        Some(crate::php_type::PhpType::parse("array-key")),
         "TKey should have bound 'array-key'"
     );
 
@@ -1698,8 +1738,12 @@ fn this_variable_emits_self_static_parent() {
     let hit = map.lookup(this_offset);
     assert!(hit.is_some(), "Should find a span at $this");
     match &hit.unwrap().kind {
-        SymbolKind::SelfStaticParent { keyword } => {
-            assert_eq!(keyword, "static", "$this should map to 'static' keyword");
+        SymbolKind::SelfStaticParent(kind) => {
+            assert_eq!(
+                *kind,
+                SelfStaticParentKind::This,
+                "$this should map to This variant"
+            );
         }
         other => panic!("Expected SelfStaticParent for $this, got {:?}", other),
     }
@@ -1722,8 +1766,8 @@ fn this_variable_standalone_emits_self_static_parent() {
     let hit = map.lookup(this_offset);
     assert!(hit.is_some(), "Should find a span at standalone $this");
     match &hit.unwrap().kind {
-        SymbolKind::SelfStaticParent { keyword } => {
-            assert_eq!(keyword, "static");
+        SymbolKind::SelfStaticParent(kind) => {
+            assert_eq!(*kind, SelfStaticParentKind::This);
         }
         other => panic!(
             "Expected SelfStaticParent for standalone $this, got {:?}",
@@ -2065,7 +2109,10 @@ fn docblock_closure_fqn_callable_produces_class_reference() {
     let closure_in_doc = php[docblock_start..].find("\\Closure").unwrap() + docblock_start;
     let hit = map.lookup(closure_in_doc as u32);
     assert!(hit.is_some(), "Should find \\Closure as a ClassReference");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Closure");
         assert!(is_fqn, "\\Closure should be FQN");
     } else {
@@ -2145,8 +2192,8 @@ fn static_keyword_in_generic_arg_produces_span() {
         "Should find `static` in generic arg in symbol map"
     );
     match &hit.unwrap().kind {
-        SymbolKind::SelfStaticParent { keyword } => {
-            assert_eq!(keyword, "static");
+        SymbolKind::SelfStaticParent(kind) => {
+            assert_eq!(*kind, SelfStaticParentKind::Static);
         }
         SymbolKind::ClassReference { name, .. } => {
             // `static` is in NON_NAVIGABLE, so it should NOT be a ClassReference.
@@ -2187,7 +2234,10 @@ fn docblock_parenthesized_callable_in_union_produces_class_reference() {
         hit.is_some(),
         "Should find \\Closure inside parenthesized callable as ClassReference"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Closure");
         assert!(is_fqn, "\\Closure should be FQN");
         // The span should cover exactly `\Closure`, not `(\Closure`.
@@ -2613,7 +2663,10 @@ fn static_class_constant_access_produces_class_reference() {
     let class_offset = php.find("\\App\\MyClass").unwrap() as u32;
     let hit = map.lookup(class_offset);
     assert!(hit.is_some(), "Should find \\App\\MyClass");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\MyClass");
         assert!(is_fqn);
     } else {
@@ -3380,7 +3433,10 @@ fn property_attribute_class_reference() {
         hit.is_some(),
         "Should find attribute class reference on property"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Assert\\NotBlank");
         assert!(is_fqn);
     } else {

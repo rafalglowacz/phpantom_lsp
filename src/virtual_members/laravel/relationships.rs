@@ -122,7 +122,7 @@ pub(super) enum RelationshipKind {
     MorphTo,
 }
 
-/// Try to classify a return type string as a known Eloquent relationship.
+/// Classify a relationship return type into its [`RelationshipKind`].
 ///
 /// Accepts both short names (`HasMany`) and fully-qualified names
 /// (`\Illuminate\Database\Eloquent\Relations\HasMany`).  Generic
@@ -138,13 +138,10 @@ pub(super) enum RelationshipKind {
 /// Unqualified names (no `\`) are matched by short name only, which
 /// is the common case for body-inferred types and docblock annotations
 /// that use `use` imports.
-pub(super) fn classify_relationship(return_type: &str) -> Option<RelationshipKind> {
-    let parsed = PhpType::parse(return_type);
-    let base = parsed.base_name().unwrap_or(return_type);
+pub(super) fn classify_relationship_typed(return_type: &PhpType) -> Option<RelationshipKind> {
+    let base = return_type.base_name()?;
     let sname = short_name(base);
 
-    // When the base type is qualified (contains `\`), verify it belongs
-    // to the Eloquent Relations namespace.
     if base.contains('\\') && !base.starts_with(ELOQUENT_RELATIONS_NS) {
         return None;
     }
@@ -165,22 +162,25 @@ pub(super) fn classify_relationship(return_type: &str) -> Option<RelationshipKin
 /// Extract the `TRelated` type from a relationship return type's
 /// generic parameters.
 ///
-/// Given `"HasMany<Post, $this>"`, returns `Some("Post")`.
-/// Given `"HasOne<\\App\\Models\\Post, $this>"`, returns
-/// `Some("\\App\\Models\\Post")`.
+/// Given `HasMany<Post, $this>`, returns `Some(&PhpType::Named("Post"))`.
+/// Given `HasOne<\App\Models\Profile, $this>`, returns
+/// `Some(&PhpType::Named("\App\Models\Profile"))`.
 ///
 /// Returns `None` if no generic parameters are present.
-pub(super) fn extract_related_type(return_type: &str) -> Option<String> {
-    let parsed = PhpType::parse(return_type);
-    if let PhpType::Generic(_, args) = &parsed {
+pub(super) fn extract_related_type_typed(return_type: &PhpType) -> Option<&PhpType> {
+    if let PhpType::Generic(_, args) = return_type {
         let first = args.first()?;
-        let s = first.to_string();
-        if s.is_empty() {
+        if first.is_empty() {
             return None;
         }
-        return Some(s);
+        return Some(first);
     }
     None
+}
+
+/// Pre-built `Illuminate\Database\Eloquent\Model` type for fallback related types.
+fn eloquent_model_type() -> PhpType {
+    PhpType::Named("Illuminate\\Database\\Eloquent\\Model".to_owned())
 }
 
 /// Build the property type string for a relationship.
@@ -191,23 +191,17 @@ pub(super) fn extract_related_type(return_type: &str) -> Option<String> {
 /// - MorphTo → `Illuminate\Database\Eloquent\Model`.
 pub(super) fn build_property_type(
     kind: RelationshipKind,
-    related_type: Option<&str>,
+    related_type: Option<&PhpType>,
     custom_collection: Option<&str>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match kind {
-        RelationshipKind::Singular => related_type.map(|t| t.to_string()),
+        RelationshipKind::Singular => related_type.cloned(),
         RelationshipKind::Collection => {
-            let inner = related_type.unwrap_or("Illuminate\\Database\\Eloquent\\Model");
+            let inner = related_type.cloned().unwrap_or_else(eloquent_model_type);
             let collection_class = custom_collection.unwrap_or(ELOQUENT_COLLECTION_FQN);
-            Some(
-                PhpType::Generic(
-                    collection_class.to_string(),
-                    vec![PhpType::Named(inner.to_string())],
-                )
-                .to_string(),
-            )
+            Some(PhpType::Generic(collection_class.to_string(), vec![inner]))
         }
-        RelationshipKind::MorphTo => Some("Illuminate\\Database\\Eloquent\\Model".to_string()),
+        RelationshipKind::MorphTo => Some(eloquent_model_type()),
     }
 }
 
@@ -229,8 +223,8 @@ pub(crate) fn count_property_to_relationship_method(
     }
     let method_name = snake_to_camel(base);
     let method = class.methods.iter().find(|m| m.name == method_name)?;
-    let return_type = method.return_type_str()?;
-    if classify_relationship(&return_type).is_some() {
+    let return_type = method.return_type.as_ref()?;
+    if classify_relationship_typed(return_type).is_some() {
         Some(method_name)
     } else {
         None
@@ -250,7 +244,7 @@ pub(crate) fn count_property_to_relationship_method(
 /// `hasManyThrough`, and `hasOneThrough`.
 ///
 /// Returns `None` if no recognisable pattern is found.
-pub fn infer_relationship_from_body(body_text: &str) -> Option<String> {
+pub fn infer_relationship_from_body(body_text: &str) -> Option<PhpType> {
     for &(method_name, fqn) in RELATIONSHIP_METHOD_FQN_MAP {
         // Look for `$this->methodName(` in the body text.
         let needle = format!("$this->{method_name}(");
@@ -267,7 +261,7 @@ pub fn infer_relationship_from_body(body_text: &str) -> Option<String> {
         // `resolve_name` will strip the leading `\` back to canonical
         // form during the resolution pass.
         if method_name == "morphTo" {
-            return Some(PhpType::Named(format!("\\{fqn}")).to_string());
+            return Some(PhpType::Named(format!("\\{fqn}")));
         }
 
         // Extract the first argument from the call.  We look for
@@ -276,15 +270,16 @@ pub fn infer_relationship_from_body(body_text: &str) -> Option<String> {
         let after_paren = &body_text[args_start..];
 
         if let Some(class_arg) = extract_class_argument(after_paren) {
-            return Some(
-                PhpType::Generic(format!("\\{fqn}"), vec![PhpType::Named(class_arg)]).to_string(),
-            );
+            return Some(PhpType::Generic(
+                format!("\\{fqn}"),
+                vec![PhpType::Named(class_arg)],
+            ));
         }
 
         // No `::class` argument found — return the bare relationship
         // name without generics.  The provider will handle it the same
         // way it handles annotated relationships without generics.
-        return Some(PhpType::Named(format!("\\{fqn}")).to_string());
+        return Some(PhpType::Named(format!("\\{fqn}")));
     }
 
     None
@@ -369,8 +364,8 @@ pub(crate) fn resolve_relation_chain(
         // Get the return type and extract the related model type.
         // Body-inferred relationship types are already stored in
         // `return_type` by the parser, so no fallback is needed.
-        let return_type_str = method.return_type_str()?;
-        let related_type = extract_related_type_for_chain(&return_type_str, &current_class)?;
+        let return_type = method.return_type.as_ref()?;
+        let related_type = extract_related_type_for_chain(return_type, &current_class)?;
 
         // Resolve the related type to a full class, trying the model's
         // namespace first (e.g. short name "Article" → "App\Models\Article").
@@ -391,21 +386,24 @@ fn resolve_class_with_inheritance(
 }
 
 /// Extract the related type from a relationship return type string,
-/// resolving `$this` to the declaring class.
+/// resolving `$this` / `static` to the declaring class.
 fn extract_related_type_for_chain(
-    return_type: &str,
+    return_type: &PhpType,
     declaring_class: &ClassInfo,
 ) -> Option<String> {
-    // First check that it's actually a relationship type.
-    classify_relationship(return_type)?;
-    let related = extract_related_type(return_type)?;
+    classify_relationship_typed(return_type)?;
 
-    // `$this` in generic args means the declaring class itself.
-    if related == "$this" || related == "static" {
-        return Some(declaring_class.fqn());
+    // Check the first generic arg directly as a PhpType before
+    // stringifying, so we can use the `is_self_ref()` predicate
+    // instead of comparing raw strings.
+    if let PhpType::Generic(_, args) = return_type {
+        let first = args.first()?;
+        if first.is_self_ref() {
+            return Some(declaring_class.fqn());
+        }
     }
 
-    Some(related)
+    extract_related_type_typed(return_type).and_then(|t| t.base_name().map(|s| s.to_string()))
 }
 
 /// Resolve a short or FQN related type to a loadable FQN.

@@ -42,6 +42,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
+use crate::php_type::PhpType;
 use crate::types::ClassInfo;
 
 /// Callback signature for resolving a class name to its [`ClassInfo`].
@@ -469,11 +470,11 @@ const PHPSTAN_PROPERTY_TAGS: &[TagDef] = &[];
 /// and `@return` tags with concrete type information.
 pub struct SmartContext<'a> {
     /// Pre-resolved type for an inline variable assignment (e.g.
-    /// `"list<int>"` when the next line is `$items = [1, 2, 3];`).
+    /// `list<int>` when the next line is `$items = [1, 2, 3];`).
     ///
     /// `None` when the type could not be inferred or the context is not
     /// an inline variable assignment.
-    pub inferred_inline_var_type: Option<&'a str>,
+    pub inferred_inline_var_type: Option<PhpType>,
 
     /// Callback that resolves a class name to its [`ClassInfo`], used
     /// to look up `@template` parameters for type enrichment.
@@ -568,6 +569,8 @@ pub fn build_phpdoc_completions(
                         Some(&ThrowsContext {
                             class_loader: cl,
                             function_loader: smart.function_loader,
+                            use_map,
+                            file_namespace,
                         }),
                     )
                 } else {
@@ -576,12 +579,14 @@ pub fn build_phpdoc_completions(
                 let existing_throws = find_existing_throws_tags(content, position);
 
                 // Filter out already-documented throws
-                let missing: Vec<&String> = uncaught
+                let missing: Vec<String> = uncaught
                     .iter()
+                    .map(|t| t.to_string())
                     .filter(|t| {
+                        let t_short = crate::util::short_name(t);
                         !existing_throws
                             .iter()
-                            .any(|e| e.eq_ignore_ascii_case(t.as_str()))
+                            .any(|e| e.eq_ignore_ascii_case(t_short))
                     })
                     .collect();
 
@@ -589,18 +594,18 @@ pub fn build_phpdoc_completions(
                     let use_block = analyze_use_block(content);
 
                     for (idx, exc_type) in missing.iter().enumerate() {
-                        let insert = format!("throws {}", exc_type);
-                        let label = format!("@throws {}", exc_type);
+                        let display_name = crate::util::short_name(exc_type);
+                        let insert = format!("throws {}", display_name);
+                        let label = format!("@throws {}", display_name);
 
-                        // Build an auto-import edit if the exception type
-                        // isn't already imported.
-                        let additional_edits = throws_analysis::resolve_exception_fqn(
-                            exc_type,
-                            use_map,
-                            file_namespace,
-                        )
-                        .filter(|fqn| !throws_analysis::has_use_import(content, fqn))
-                        .and_then(|fqn| build_use_edit(&fqn, &use_block, file_namespace));
+                        // Exception types are already resolved to FQNs by
+                        // the throws analysis — do not re-resolve.
+                        let additional_edits =
+                            if !throws_analysis::has_use_import(content, exc_type) {
+                                build_use_edit(exc_type, &use_block, file_namespace)
+                            } else {
+                                None
+                            };
 
                         items.push(CompletionItem {
                             label,
@@ -642,13 +647,13 @@ pub fn build_phpdoc_completions(
                             // Plain label for display.
                             let label_type = smart
                                 .class_loader
-                                .and_then(|cl| generation::enrichment_plain(&Some(th.clone()), cl))
-                                .unwrap_or_else(|| th.clone());
+                                .and_then(|cl| generation::enrichment_plain(Some(th), cl))
+                                .unwrap_or_else(|| th.to_string());
 
                             // Snippet insert text with tab stops on template params.
                             let mut tab_stop = 1u32;
                             let snippet_type = smart.class_loader.and_then(|cl| {
-                                generation::enrichment_snippet(&Some(th.clone()), &mut tab_stop, cl)
+                                generation::enrichment_snippet(Some(th), &mut tab_stop, cl)
                             });
 
                             if let Some(snippet) = snippet_type {
@@ -697,18 +702,18 @@ pub fn build_phpdoc_completions(
                     continue;
                 }
                 if let Some(ref ret) = sym.return_type
-                    && ret != "void"
+                    && !ret.is_void()
                 {
                     // Plain label for display.
                     let label_type = smart
                         .class_loader
-                        .and_then(|cl| generation::enrichment_plain(&Some(ret.clone()), cl))
-                        .unwrap_or_else(|| ret.clone());
+                        .and_then(|cl| generation::enrichment_plain(Some(ret), cl))
+                        .unwrap_or_else(|| ret.to_string());
 
                     // Snippet insert text with tab stops on template params.
                     let mut tab_stop = 1u32;
                     let snippet_type = smart.class_loader.and_then(|cl| {
-                        generation::enrichment_snippet(&Some(ret.clone()), &mut tab_stop, cl)
+                        generation::enrichment_snippet(Some(ret), &mut tab_stop, cl)
                     });
 
                     let (insert, fmt) = if let Some(snippet) = snippet_type {
@@ -733,7 +738,7 @@ pub fn build_phpdoc_completions(
                     // Smart item emitted — skip the generic fallback.
                     continue;
                 }
-                if sym.return_type.as_deref() == Some("void") {
+                if sym.return_type.as_ref().is_some_and(|t| t.is_void()) {
                     // Explicit `: void` type hint — the hint speaks for
                     // itself, no need to suggest @return in PHPDoc.
                     continue;
@@ -805,14 +810,14 @@ pub fn build_phpdoc_completions(
                 // Plain label for display.
                 let label_type = smart
                     .class_loader
-                    .and_then(|cl| generation::enrichment_plain(&Some(th.clone()), cl))
-                    .unwrap_or_else(|| th.clone());
+                    .and_then(|cl| generation::enrichment_plain(Some(th), cl))
+                    .unwrap_or_else(|| th.to_string());
 
                 // Snippet insert text with tab stops on template params.
                 let mut tab_stop = 1u32;
-                let snippet_type = smart.class_loader.and_then(|cl| {
-                    generation::enrichment_snippet(&Some(th.clone()), &mut tab_stop, cl)
-                });
+                let snippet_type = smart
+                    .class_loader
+                    .and_then(|cl| generation::enrichment_snippet(Some(th), &mut tab_stop, cl));
 
                 let (insert, fmt) = if let Some(snippet) = snippet_type {
                     (format!("var {}", snippet), Some(InsertTextFormat::SNIPPET))
@@ -839,21 +844,21 @@ pub fn build_phpdoc_completions(
             // quickly type the narrowing type.  When the type can be
             // inferred from the assignment, pre-fill it.
             if def.tag == "@var" && matches!(context, DocblockContext::Inline) {
-                if let Some(ty) = smart.inferred_inline_var_type {
+                if let Some(ref parsed_ty) = smart.inferred_inline_var_type {
                     // Build both a display label (plain) and insert text
                     // (snippet with tab stops on template parameters).
                     let label_type = smart
                         .class_loader
-                        .and_then(|cl| generation::enrichment_plain(&Some(ty.to_string()), cl))
-                        .unwrap_or_else(|| ty.to_string());
+                        .and_then(|cl| generation::enrichment_plain(Some(parsed_ty), cl))
+                        .unwrap_or_else(|| parsed_ty.to_string());
 
                     let mut tab_stop = 1u32;
                     let snippet_type = smart
                         .class_loader
                         .and_then(|cl| {
-                            generation::enrichment_snippet(&Some(ty.to_string()), &mut tab_stop, cl)
+                            generation::enrichment_snippet(Some(parsed_ty), &mut tab_stop, cl)
                         })
-                        .unwrap_or_else(|| format!("${{1:{}}}", ty));
+                        .unwrap_or_else(|| format!("${{1:{}}}", parsed_ty));
 
                     items.push(CompletionItem {
                         label: format!("@var {}", label_type),

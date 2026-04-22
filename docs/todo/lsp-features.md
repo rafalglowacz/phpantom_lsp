@@ -130,3 +130,467 @@ text sync is lower priority because full-file sync is rarely the
 bottleneck in practice. Partial result streaming has a more immediate
 user-visible impact for go-to-implementation, find references, and
 workspace symbols on large codebases.
+
+---
+
+## F4. Return type and closure parameter type inlay hints
+
+**Impact: Medium · Effort: Medium**
+
+PHPantom's inlay hints currently show **parameter names** and
+**by-reference indicators** at call sites. Two additional hint kinds
+would bring PHPantom to parity with Devsense and ahead of Intelephense:
+
+### Return type hints
+
+Show an inferred return type hint after the closing parenthesis of
+functions, methods, closures, and arrow functions that lack an explicit
+return type declaration:
+
+```php
+function doubled($x)  // → : int
+{
+    return $x * 2;
+}
+
+$fn = fn($x) => $x * 2;  // → : int
+```
+
+The hint should only appear when the return type can be inferred from
+the function body (or from the callable context for closures). Functions
+that already have a native return type hint or a `@return` docblock
+should not receive a hint.
+
+Ideally, clicking the hint (or double-clicking, depending on editor
+support) should insert the return type declaration as a text edit.
+
+### Closure / arrow function parameter type hints
+
+Show an inferred type hint after untyped closure and arrow function
+parameters when the type can be inferred from the callable context:
+
+```php
+$users->map(fn($u) => $u->name);
+//            ^ : User
+
+$filtered = array_filter($items, function ($item) { ... });
+//                                         ^ : Item
+```
+
+The hint should only appear when the parameter has no native type hint
+and the type is inferred from the enclosing callable signature (e.g.
+a `Closure(User): bool` parameter type, or a `@param` on the receiving
+function). Parameters that already have a type hint should not receive
+a hint.
+
+### What to avoid
+
+- **Variable type hints at assignment sites.** Phpactor shows these
+  (e.g. `$x` `: string` after every assignment). This is noisy in
+  practice and clutters the editor. Do not add this kind.
+- **End-of-block labels.** Phpactor shows `// class Foo` or
+  `// method bar` at closing braces. This is an editor feature (most
+  editors already show sticky scroll or breadcrumbs) and would add
+  visual noise. Do not add this kind.
+
+---
+
+## F5. Call hierarchy
+
+**Impact: Medium · Effort: Medium**
+
+Implement `callHierarchy/incomingCalls` and
+`callHierarchy/outgoingCalls` to answer "who calls this function?" and
+"what does this function call?"
+
+### Incoming calls (who calls this)
+
+Given a function or method, find all call sites across the project.
+This is conceptually similar to Find References but filtered to call
+expressions and structured as a tree (each caller is itself a callable
+with a location).
+
+The existing Find References infrastructure
+(`find_references_in_file`, cross-file scanning) provides the core
+search. The call hierarchy handler wraps the results into
+`CallHierarchyIncomingCall` items, grouping by containing function.
+
+### Outgoing calls (what does this call)
+
+Given a function or method, walk its AST body and collect all call
+expressions (function calls, method calls, static calls, `new`
+expressions). Resolve each callee to its declaration location.
+
+This is a single-file AST walk with cross-file resolution for each
+callee, similar to what go-to-definition already does.
+
+### Prepare
+
+`callHierarchy/prepare` returns a `CallHierarchyItem` for the symbol
+at the cursor. This is straightforward: resolve the symbol, return its
+name, kind, URI, range, and selection range.
+
+### Dependencies
+
+Call hierarchy benefits significantly from a full project index.
+Without an index, incoming calls can only be found via the existing
+classmap + PSR-4 scan approach (same as Find References). With a full
+index (X4), the lookup becomes a simple index query.
+
+Consider implementing after X4 (full background indexing) ships, or
+accept the same scan-based latency that Find References currently has.
+
+## F7. Evaluatable expression support (DAP integration)
+
+**Impact: Low-Medium · Effort: Low**
+
+Implement `textDocument/evaluatableExpression` so debuggers (Xdebug
+via DAP) can evaluate expressions under the cursor during a debug
+session. Given a cursor position, the handler returns the expression
+text and range that the debugger should evaluate in the running PHP
+process.
+
+### Supported expression kinds
+
+- **Variables**: `$var` — return the variable name and its span.
+- **Property access**: `$obj->prop`, `$this->prop` — return the full
+  member access expression.
+- **Array access**: `$arr[0]`, `$arr['key']` — return the full
+  subscript expression including brackets.
+- **Static property access**: `Foo::$bar` — return the full expression.
+- **Parameters**: function/method parameters at declaration sites.
+
+### Why this is cheap
+
+The symbol map already identifies all of these constructs with precise
+byte ranges. The handler is a thin layer: look up the `SymbolSpan` at
+the cursor position, check that it's a variable, member access, or
+subscript expression, and return the source text and range. No type
+resolution needed.
+
+### What this enables
+
+When a user is debugging PHP with Xdebug and hovers over `$user->name`
+in their editor, the editor asks the LSP "what expression is here?"
+and forwards it to the debug adapter for evaluation. Without this
+handler, the editor falls back to selecting the word under the cursor,
+which gives `name` instead of `$user->name` — useless for the
+debugger.
+
+---
+
+## F8. Test ↔ implementation navigation via `@covers`
+
+**Impact: Low · Effort: Medium**
+
+Provide bidirectional navigation between a test class and the class it
+tests, using PHPUnit's `@covers` / `@coversClass` / `#[CoversClass]`
+annotations as the linking mechanism.
+
+### Why not path-based mapping
+
+Pattern-based approaches (e.g. `src/Foo.php` → `tests/FooTest.php`)
+assume a project follows a specific directory convention. Many projects
+don't: tests may live under `tests/Feature/`, `tests/Functional/`,
+or in a completely separate directory structure. The `@covers` tag is
+an explicit, project-layout-independent link that works for any
+structure.
+
+### From test → subject
+
+When the cursor is in a test class, look for:
+- `@covers \App\Service\UserService` (docblock on class or method)
+- `@coversClass(\App\Service\UserService::class)` (PHPUnit 10+)
+- `#[CoversClass(UserService::class)]` (PHP 8 attribute, PHPUnit 10+)
+
+Resolve the referenced class name via the standard class loader and
+navigate to its definition. This can be exposed as a code lens
+("Go to subject") or a code action, or both.
+
+### From subject → test
+
+Given a class, find test classes that reference it in `@covers` /
+`@coversClass` / `#[CoversClass]`. This requires scanning test files
+for the annotation. Two approaches:
+
+- **Lazy scan**: When the user invokes "find tests" on a class, scan
+  files matching `*Test.php` in the project for `@covers` / `#[CoversClass]`
+  referencing the current class FQN. This is O(n) in test file count
+  but test directories are typically small.
+- **Indexed**: If full background indexing (X4) ships, index `@covers`
+  annotations during the indexing pass and look them up in O(1).
+
+The lazy approach is fine for most projects. Test directories rarely
+exceed a few hundred files, and a simple `memchr`-based string
+pre-filter on the class name before parsing keeps it fast.
+
+### Exposure
+
+- **Code lens** on test classes: "Subject: UserService" (clickable,
+  navigates to the subject class).
+- **Code lens** on subject classes: "Tests: UserServiceTest" (clickable,
+  navigates to the test).
+- **Code action**: "Go to test" / "Go to subject" when the cursor is
+  on the class name.
+
+### Dependencies
+
+No hard dependencies. Works with the existing class loader for the
+test → subject direction. The subject → test direction benefits from
+but does not require full indexing (X4).
+
+---
+
+## F9. Namespace renaming
+
+**Impact: Medium · Effort: Medium**
+
+Extend the rename handler (`textDocument/rename`) to support renaming
+PHP namespaces. When the user triggers a rename on a namespace segment
+in a `namespace` declaration or a `use` statement, PHPantom should
+produce a `WorkspaceEdit` that updates:
+
+1. The `namespace` declaration in every file that belongs to the
+   renamed namespace (and its children).
+2. All `use` statements across the project that reference classes,
+   functions, or constants under the renamed namespace.
+3. Fully-qualified name references (`\Old\Namespace\Class`) in
+   docblocks, type hints, and string literals (class-string context).
+4. PSR-4 directory structure: include `RenameFile` resource operations
+   in the `WorkspaceEdit` to move files and directories so the
+   filesystem stays consistent with the new namespace. Intelephense
+   already does this: renaming a namespace emits `RenameFile` ops
+   that move files to match the new PSR-4 path. PHPantom should do
+   the same by default when a PSR-4 mapping exists in
+   `composer.json`.
+
+### Scope
+
+Renaming applies to a single namespace segment. For example, renaming
+`Bar` in `App\Bar\Service` affects `App\Bar\*` but not `App\Baz\*`.
+Renaming the root segment (`App`) would rename everything under
+`App\*`.
+
+### Bidirectional support
+
+Phpactor supports the inverse direction: moving a class file to a new
+directory and updating the namespace declaration and all references to
+match. PHPStorm also supports "Move class with full reference update."
+PHPantom should eventually support both directions:
+
+- **Rename namespace → move files** (this task). The user renames a
+  namespace segment and PHPantom moves the corresponding directory.
+- **Move file → fix namespace** (future, separate task). The user
+  moves a file in the file manager and PHPantom updates the
+  `namespace` declaration and all `use` statements to match the new
+  PSR-4 path. Phpactor exposes this as a "Fix namespace / class name"
+  code action. This direction can be tracked separately once F9
+  ships.
+
+### Edge cases
+
+- Namespace aliases (`use App\Old as X`) should preserve the alias
+  and only update the FQN portion.
+- Group use declarations (`use App\Old\{Foo, Bar}`) need the shared
+  prefix updated.
+- Files with multiple namespace declarations (rare but legal in PHP)
+  should only rename the matching namespace block.
+- Inline FQNs in `@param`, `@return`, `@var`, `@throws`, `@see`,
+  `@extends`, `@implements`, and `@template` docblock tags.
+
+### Implementation
+
+1. Detect that the cursor is on a namespace name token (in a
+   `namespace` declaration or `use` statement).
+2. Resolve the full namespace being renamed and the segment being
+   changed.
+3. Use the existing cross-file scanning infrastructure (classmap +
+   PSR-4 walk) to find all files that reference the namespace.
+4. Generate text edits for each affected location.
+5. Look up the PSR-4 autoload mapping in `composer.json` to determine
+   the corresponding directory. If a mapping exists, include
+   `RenameFile` resource operations in the `WorkspaceEdit` to move
+   the directory (and all files beneath it) to the new path.
+
+---
+
+## F11. VS Code extension
+
+| Field      | Value                    |
+| ---------- | ------------------------ |
+| **Impact** | High                     |
+| **Effort** | Medium (2-5 days)        |
+
+Create a VS Code extension that bundles PHPantom and publishes it to
+the VS Code Marketplace.
+
+### Approach
+
+Fork the [vscode-intelephense](https://github.com/bmewburn/vscode-intelephense)
+client extension (MIT-licensed). Intelephense is the #1 PHP extension
+in the VS Code Marketplace, so its `package.json` represents what
+PHP developers expect from an extension: the settings schema,
+activation events, file associations, categories, and contribution
+points are battle-tested. Starting from this base means we do not
+accidentally omit something users take for granted.
+
+Strip the proprietary Intelephense server dependency (`intelephense`
+npm package) and replace it with PHPantom binary management. The
+extension is a thin TypeScript wrapper around `vscode-languageclient`
+that spawns `phpantom_lsp` over stdio.
+
+**Cleanup process:** After forking, compare the result against a
+fresh VS Code extension scaffold (`yo code` generator) to identify
+and remove Intelephense-specific legacy that does not apply to
+PHPantom (licence key commands, telemetry integration, Node.js
+runtime configuration, premium feature gating). The goal is a clean
+extension that inherits the right UX expectations without carrying
+over implementation baggage.
+
+### Scope
+
+1. **Binary distribution.** Bundle or auto-download the correct
+   pre-built binary for each platform (linux-x64, linux-arm64,
+   darwin-x64, darwin-arm64, win-x64). Use GitHub Releases as the
+   download source.
+2. **Settings surface.** Expose PHPantom's `.phpantom.toml` settings
+   as VS Code settings (PHP version, diagnostics toggles, indexing
+   strategy).
+3. **Status bar.** Show indexing progress and server status.
+4. **Marketplace listing.** Icon, description, screenshots,
+   categories, keywords.
+5. **CI.** GitHub Actions workflow to build, test, and publish the
+   extension on release.
+
+### Code signing
+
+macOS and Windows builds must be signed so the OS
+stops flagging PHPantom as malware. This is a prerequisite for the
+VS Code extension (users will not trust an extension that triggers
+Gatekeeper or SmartScreen warnings).
+
+- **macOS:** Apple Developer ID certificate, `codesign`, and
+  `notarytool` in the release CI workflow.
+- **Windows:** Authenticode certificate (or Azure Trusted Signing)
+  and `signtool` in the release CI workflow.
+
+---
+
+## F12. IntelliJ / PHPStorm plugin
+
+| Field      | Value                    |
+| ---------- | ------------------------ |
+| **Impact** | High                     |
+| **Effort** | Medium (2-5 days)        |
+
+Create an IntelliJ plugin that depends on
+[LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij) and
+bundles PHPantom. Publish it to the JetBrains Marketplace. Works in
+all IntelliJ-based IDEs (PHPStorm, IntelliJ IDEA, WebStorm, etc.).
+
+### Approach
+
+Fork [clojure-lsp-intellij](https://github.com/clojure-lsp/clojure-lsp-intellij)
+(MIT-licensed). It is a Kotlin/Gradle plugin that registers a
+language server via lsp4ij's `com.redhat.devtools.lsp4ij.server`
+extension point. Strip the Clojure-specific parts and replace them
+with PHPantom:
+
+- Register PHPantom as the language server in `plugin.xml`.
+- Map the `PHP` language and file type via
+  `com.redhat.devtools.lsp4ij.languageMapping`.
+- Bundle or auto-download the PHPantom binary.
+- Add a settings page for the binary path and any PHPantom-specific
+  options.
+
+### Scope
+
+1. **`plugin.xml` registration.** Server definition, language
+   mapping, file type mapping (`.php`, `.phtml`, `.inc`).
+2. **Binary management.** Auto-download from GitHub Releases on
+   first run, with a manual path override in settings.
+3. **Settings UI.** Binary path, PHP version override, diagnostic
+   toggles.
+4. **JetBrains Marketplace listing.** Icon, description, plugin
+   compatibility range (2024.2+, matching lsp4ij's requirement).
+5. **CI.** GitHub Actions workflow using `gradlew buildPlugin` and
+   `gradlew publishPlugin`.
+
+### Why not use the built-in IntelliJ LSP API
+
+IntelliJ's native LSP support (since 2023.2) is only available in
+Ultimate editions and is still limited in capability. LSP4IJ is free,
+works in all editions (including Community), and supports a broader
+set of LSP features. Using lsp4ij also means the plugin works in
+IntelliJ IDEA (for PHP projects opened there) and other JetBrains
+IDEs, not just PHPStorm.
+
+---
+
+## F13. Homebrew formula
+
+| Field      | Value                    |
+| ---------- | ------------------------ |
+| **Impact** | Medium                   |
+| **Effort** | Low (≤ 1 day)            |
+
+Create a Homebrew formula for PHPantom so users on macOS and Linux
+can install it with `brew install phpantom_lsp`.
+
+### Approach
+
+Submit a PR to [homebrew-core](https://github.com/Homebrew/homebrew-core)
+with a formula that downloads the pre-built binary from GitHub
+Releases for the current platform. Alternatively, the formula can
+build from source using `cargo install` if the Homebrew reviewers
+prefer source builds (common for Rust projects).
+
+### Formula contents
+
+- **Homepage:** `https://github.com/AJenbo/phpantom_lsp`
+- **Source:** GitHub Releases tarball or `cargo install` from crates.io.
+- **Binary:** `phpantom_lsp`
+- **Test block:** `system bin/"phpantom_lsp", "--version"`
+
+### Why this matters
+
+A Homebrew formula is a prerequisite for upstream PRs to editors like
+Helix, which prefer that language servers be installable via a
+package manager. It also simplifies the VS Code extension's binary
+management on macOS (detect Homebrew-installed binary before
+downloading).
+
+---
+
+## F14. Helix upstream PR
+
+| Field      | Value                    |
+| ---------- | ------------------------ |
+| **Impact** | Low-Medium               |
+| **Effort** | Low (≤ 1 day)            |
+
+**Depends on:** F13 (Homebrew formula).
+
+Submit a PR to the [Helix editor](https://github.com/helix-editor/helix)
+adding `phpantom_lsp` as a language server option in the default
+`languages.toml`.
+
+### Change
+
+Add a `phpantom` server definition and include it in the `php`
+language entry (alongside `intelephense`):
+
+```toml
+[language-server.phpantom]
+command = "phpantom_lsp"
+
+# In the [[language]] entry for php, add "phpantom" to language-servers.
+```
+
+### Prerequisites
+
+- F13 (Homebrew formula) should be merged so Helix maintainers can
+  point users at `brew install phpantom_lsp`.
+- Helix maintainers may want a brief README section documenting the
+  server and its feature set.
+

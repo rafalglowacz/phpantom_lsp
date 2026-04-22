@@ -17,6 +17,7 @@ use tower_lsp::lsp_types::Position;
 
 use super::helpers::{find_keyword_pos, find_matching_paren, split_params};
 use crate::completion::source::comment_position::{is_inside_docblock, position_to_byte_offset};
+use crate::php_type::PhpType;
 
 // ─── Context Detection ─────────────────────────────────────────────────────
 
@@ -47,11 +48,11 @@ pub enum DocblockContext {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolInfo {
     /// Parameters: `(optional_type_hint, $name)`.
-    pub params: Vec<(Option<String>, String)>,
+    pub params: Vec<(Option<PhpType>, String)>,
     /// Return type hint (e.g. `"string"`, `"void"`, `"?int"`).
-    pub return_type: Option<String>,
+    pub return_type: Option<PhpType>,
     /// Property / constant type hint.
-    pub type_hint: Option<String>,
+    pub type_hint: Option<PhpType>,
     /// Function/method name (e.g. `"__construct"`, `"getName"`).
     /// Only populated for `FunctionOrMethod` declarations.
     pub method_name: Option<String>,
@@ -152,7 +153,7 @@ pub fn detect_docblock_typing_position(
     }
 
     let line = lines[line_idx];
-    let col = (position.character as usize).min(line.len());
+    let col = crate::util::utf16_col_to_byte_offset(line, position.character);
     let before_cursor = &line[..col];
 
     // Find the `@tag` on this line.
@@ -550,25 +551,7 @@ fn is_variable_assignment(line: &str) -> bool {
 
 /// Check if a token is a PHP type keyword (used in property declarations).
 fn is_type_keyword(token: &str) -> bool {
-    matches!(
-        token,
-        "int"
-            | "float"
-            | "string"
-            | "bool"
-            | "array"
-            | "object"
-            | "callable"
-            | "iterable"
-            | "mixed"
-            | "void"
-            | "never"
-            | "null"
-            | "false"
-            | "true"
-            | "self"
-            | "parent"
-    )
+    crate::php_type::is_keyword_type(token)
 }
 
 /// Parse symbol info (params, return type, property type) from the
@@ -659,7 +642,7 @@ fn parse_symbol_info(text: &str) -> SymbolInfo {
 }
 
 /// Parse a comma-separated parameter list into `(type_hint, $name)` pairs.
-fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
+fn parse_params(params_str: &str) -> Vec<(Option<PhpType>, String)> {
     if params_str.trim().is_empty() {
         return Vec::new();
     }
@@ -677,7 +660,7 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
         // or: [Type] &$name, [Type] ...$name
         let tokens: Vec<&str> = param.split_whitespace().collect();
 
-        let mut type_hint: Option<String> = None;
+        let mut type_hint: Option<PhpType> = None;
         let mut name: Option<String> = None;
 
         for token in &tokens {
@@ -701,9 +684,9 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
             if let Some(existing) = type_hint {
                 // Union/intersection types with spaces shouldn't happen,
                 // but handle it gracefully
-                type_hint = Some(format!("{}{}", existing, t));
+                type_hint = Some(PhpType::parse(&format!("{}{}", existing, t)));
             } else {
-                type_hint = Some(t.to_string());
+                type_hint = Some(PhpType::parse(t));
             }
         }
 
@@ -718,7 +701,7 @@ fn parse_params(params_str: &str) -> Vec<(Option<String>, String)> {
 /// Extract the return type from the portion after `)` in a function declaration.
 ///
 /// Looks for `: Type` pattern.
-fn extract_return_type_from_decl(after_close_paren: &str) -> Option<String> {
+fn extract_return_type_from_decl(after_close_paren: &str) -> Option<PhpType> {
     let trimmed = after_close_paren.trim();
     let rest = trimmed.strip_prefix(':')?;
     let rest = rest.trim();
@@ -730,7 +713,7 @@ fn extract_return_type_from_decl(after_close_paren: &str) -> Option<String> {
     if ret_type.is_empty() {
         None
     } else {
-        Some(ret_type.to_string())
+        Some(PhpType::parse(ret_type))
     }
 }
 
@@ -738,11 +721,11 @@ fn extract_return_type_from_decl(after_close_paren: &str) -> Option<String> {
 ///
 /// Handles: `public string $name`, `protected ?int $count = 0`,
 /// `private static array $cache`, `readonly Foo $bar`, etc.
-fn extract_property_type(decl: &str) -> Option<String> {
+fn extract_property_type(decl: &str) -> Option<PhpType> {
     let tokens: Vec<&str> = decl.split_whitespace().collect();
 
     // Walk tokens: skip modifiers, the token before `$var` is the type
-    let mut last_non_modifier: Option<String> = None;
+    let mut last_non_modifier: Option<PhpType> = None;
     for token in &tokens {
         let t = *token;
         let lower = t.to_lowercase();
@@ -762,7 +745,7 @@ fn extract_property_type(decl: &str) -> Option<String> {
                 continue;
             }
             _ => {
-                last_non_modifier = Some(t.to_string());
+                last_non_modifier = Some(PhpType::parse(t));
             }
         }
     }
@@ -779,7 +762,7 @@ mod tests {
         let result = parse_params("public readonly bool $selected");
         assert_eq!(result.len(), 1);
         let (type_hint, name) = &result[0];
-        assert_eq!(type_hint.as_deref(), Some("bool"));
+        assert_eq!(type_hint, &Some(PhpType::parse("bool")));
         assert_eq!(name, "$selected");
     }
 }

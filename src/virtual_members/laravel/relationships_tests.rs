@@ -1,4 +1,5 @@
 use super::*;
+use crate::php_type::PhpType;
 use crate::test_fixtures::{make_class, make_method};
 
 // ── classify_relationship ───────────────────────────────────────────
@@ -6,7 +7,7 @@ use crate::test_fixtures::{make_class, make_method};
 #[test]
 fn classify_has_one() {
     assert_eq!(
-        classify_relationship("HasOne<Profile, $this>"),
+        classify_relationship_typed(&PhpType::parse("HasOne<Profile, $this>")),
         Some(RelationshipKind::Singular)
     );
 }
@@ -14,7 +15,7 @@ fn classify_has_one() {
 #[test]
 fn classify_has_many() {
     assert_eq!(
-        classify_relationship("HasMany<Post, $this>"),
+        classify_relationship_typed(&PhpType::parse("HasMany<Post, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -22,7 +23,7 @@ fn classify_has_many() {
 #[test]
 fn classify_belongs_to() {
     assert_eq!(
-        classify_relationship("BelongsTo<User, $this>"),
+        classify_relationship_typed(&PhpType::parse("BelongsTo<User, $this>")),
         Some(RelationshipKind::Singular)
     );
 }
@@ -30,7 +31,7 @@ fn classify_belongs_to() {
 #[test]
 fn classify_belongs_to_many() {
     assert_eq!(
-        classify_relationship("BelongsToMany<Role, $this>"),
+        classify_relationship_typed(&PhpType::parse("BelongsToMany<Role, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -38,7 +39,7 @@ fn classify_belongs_to_many() {
 #[test]
 fn classify_morph_one() {
     assert_eq!(
-        classify_relationship("MorphOne<Image, $this>"),
+        classify_relationship_typed(&PhpType::parse("MorphOne<Image, $this>")),
         Some(RelationshipKind::Singular)
     );
 }
@@ -46,7 +47,7 @@ fn classify_morph_one() {
 #[test]
 fn classify_morph_many() {
     assert_eq!(
-        classify_relationship("MorphMany<Comment, $this>"),
+        classify_relationship_typed(&PhpType::parse("MorphMany<Comment, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -54,7 +55,7 @@ fn classify_morph_many() {
 #[test]
 fn classify_morph_to() {
     assert_eq!(
-        classify_relationship("MorphTo"),
+        classify_relationship_typed(&PhpType::parse("MorphTo")),
         Some(RelationshipKind::MorphTo)
     );
 }
@@ -62,7 +63,7 @@ fn classify_morph_to() {
 #[test]
 fn classify_morph_to_many() {
     assert_eq!(
-        classify_relationship("MorphToMany<Tag, $this>"),
+        classify_relationship_typed(&PhpType::parse("MorphToMany<Tag, $this>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -70,7 +71,7 @@ fn classify_morph_to_many() {
 #[test]
 fn classify_has_many_through() {
     assert_eq!(
-        classify_relationship("HasManyThrough<Post, Country>"),
+        classify_relationship_typed(&PhpType::parse("HasManyThrough<Post, Country>")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -78,36 +79,46 @@ fn classify_has_many_through() {
 #[test]
 fn classify_fqn_relationship() {
     assert_eq!(
-        classify_relationship("Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post, $this>"),
+        classify_relationship_typed(&PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post, $this>"
+        )),
         Some(RelationshipKind::Collection)
     );
 }
 
 #[test]
 fn classify_non_relationship() {
-    assert_eq!(classify_relationship("string"), None);
-    assert_eq!(classify_relationship("Collection<User>"), None);
+    assert_eq!(classify_relationship_typed(&PhpType::parse("string")), None);
+    assert_eq!(
+        classify_relationship_typed(&PhpType::parse("Collection<User>")),
+        None,
+    );
 }
 
 #[test]
 fn classify_custom_fqn_has_many_is_not_relationship() {
     // A user class whose short name collides with an Eloquent relationship
     // should NOT be classified as a relationship.
-    assert_eq!(classify_relationship("App\\Relations\\HasMany<Post>"), None);
+    assert_eq!(
+        classify_relationship_typed(&PhpType::parse("App\\Relations\\HasMany<Post>")),
+        None,
+    );
 }
 
 #[test]
 fn classify_custom_fqn_belongs_to_is_not_relationship() {
     assert_eq!(
-        classify_relationship("MyApp\\Custom\\BelongsTo<User>"),
-        None
+        classify_relationship_typed(&PhpType::parse("MyApp\\Custom\\BelongsTo<User>")),
+        None,
     );
 }
 
 #[test]
 fn classify_eloquent_fqn_without_leading_backslash() {
     assert_eq!(
-        classify_relationship("Illuminate\\Database\\Eloquent\\Relations\\HasOne<Profile, $this>"),
+        classify_relationship_typed(&PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Relations\\HasOne<Profile, $this>"
+        )),
         Some(RelationshipKind::Singular)
     );
 }
@@ -115,7 +126,9 @@ fn classify_eloquent_fqn_without_leading_backslash() {
 #[test]
 fn classify_eloquent_fqn_morph_to() {
     assert_eq!(
-        classify_relationship("Illuminate\\Database\\Eloquent\\Relations\\MorphTo"),
+        classify_relationship_typed(&PhpType::parse(
+            "Illuminate\\Database\\Eloquent\\Relations\\MorphTo"
+        )),
         Some(RelationshipKind::MorphTo)
     );
 }
@@ -123,7 +136,7 @@ fn classify_eloquent_fqn_morph_to() {
 #[test]
 fn classify_bare_name_without_generics() {
     assert_eq!(
-        classify_relationship("HasMany"),
+        classify_relationship_typed(&PhpType::parse("HasMany")),
         Some(RelationshipKind::Collection)
     );
 }
@@ -132,23 +145,25 @@ fn classify_bare_name_without_generics() {
 
 #[test]
 fn extracts_first_generic_arg() {
+    let parsed = PhpType::parse("HasMany<Post, $this>");
     assert_eq!(
-        extract_related_type("HasMany<Post, $this>"),
-        Some("Post".to_string())
+        extract_related_type_typed(&parsed),
+        Some(&PhpType::Named("Post".to_string()))
     );
 }
 
 #[test]
 fn extracts_fqn_related_type() {
+    let parsed = PhpType::parse("HasOne<\\App\\Models\\Profile, $this>");
     assert_eq!(
-        extract_related_type("HasOne<\\App\\Models\\Profile, $this>"),
-        Some("\\App\\Models\\Profile".to_string())
+        extract_related_type_typed(&parsed),
+        Some(&PhpType::Named("\\App\\Models\\Profile".to_string()))
     );
 }
 
 #[test]
 fn returns_none_without_generics() {
-    assert_eq!(extract_related_type("HasMany"), None);
+    assert_eq!(extract_related_type_typed(&PhpType::parse("HasMany")), None);
 }
 
 // ── build_property_type ─────────────────────────────────────────────
@@ -156,15 +171,19 @@ fn returns_none_without_generics() {
 #[test]
 fn singular_with_related() {
     assert_eq!(
-        build_property_type(RelationshipKind::Singular, Some("App\\Models\\Post"), None),
-        Some("App\\Models\\Post".to_string())
+        build_property_type(
+            RelationshipKind::Singular,
+            Some(&PhpType::Named("App\\Models\\Post".to_string())),
+            None
+        ),
+        Some(PhpType::Named("App\\Models\\Post".to_string()))
     );
 }
 
 #[test]
 fn singular_without_related() {
     assert_eq!(
-        build_property_type(RelationshipKind::Singular, None, None),
+        build_property_type(RelationshipKind::Singular, None::<&PhpType>, None),
         None
     );
 }
@@ -174,29 +193,40 @@ fn collection_with_related() {
     assert_eq!(
         build_property_type(
             RelationshipKind::Collection,
-            Some("App\\Models\\Post"),
+            Some(&PhpType::Named("App\\Models\\Post".to_string())),
             None
         ),
-        Some("Illuminate\\Database\\Eloquent\\Collection<App\\Models\\Post>".to_string())
+        Some(PhpType::Generic(
+            "Illuminate\\Database\\Eloquent\\Collection".to_string(),
+            vec![PhpType::Named("App\\Models\\Post".to_string())],
+        ))
     );
 }
 
 #[test]
 fn collection_without_related_uses_model() {
     assert_eq!(
-        build_property_type(RelationshipKind::Collection, None, None),
-        Some(
-            "Illuminate\\Database\\Eloquent\\Collection<Illuminate\\Database\\Eloquent\\Model>"
-                .to_string()
-        )
+        build_property_type(RelationshipKind::Collection, None::<&PhpType>, None),
+        Some(PhpType::Generic(
+            "Illuminate\\Database\\Eloquent\\Collection".to_string(),
+            vec![PhpType::Named(
+                "Illuminate\\Database\\Eloquent\\Model".to_string(),
+            )],
+        ))
     );
 }
 
 #[test]
 fn morph_to_always_returns_model() {
     assert_eq!(
-        build_property_type(RelationshipKind::MorphTo, Some("App\\Models\\Foo"), None),
-        Some("Illuminate\\Database\\Eloquent\\Model".to_string())
+        build_property_type(
+            RelationshipKind::MorphTo,
+            Some(&PhpType::Named("App\\Models\\Foo".to_string())),
+            None
+        ),
+        Some(PhpType::Named(
+            "Illuminate\\Database\\Eloquent\\Model".to_string(),
+        ))
     );
 }
 
@@ -205,10 +235,13 @@ fn collection_with_custom_collection() {
     assert_eq!(
         build_property_type(
             RelationshipKind::Collection,
-            Some("App\\Models\\Post"),
+            Some(&PhpType::Named("App\\Models\\Post".to_string())),
             Some("App\\Collections\\PostCollection")
         ),
-        Some("App\\Collections\\PostCollection<App\\Models\\Post>".to_string())
+        Some(PhpType::Generic(
+            "App\\Collections\\PostCollection".to_string(),
+            vec![PhpType::Named("App\\Models\\Post".to_string())],
+        ))
     );
 }
 
@@ -217,10 +250,13 @@ fn collection_custom_collection_canonical() {
     assert_eq!(
         build_property_type(
             RelationshipKind::Collection,
-            Some("App\\Models\\Post"),
+            Some(&PhpType::Named("App\\Models\\Post".to_string())),
             Some("App\\Collections\\PostCollection")
         ),
-        Some("App\\Collections\\PostCollection<App\\Models\\Post>".to_string())
+        Some(PhpType::Generic(
+            "App\\Collections\\PostCollection".to_string(),
+            vec![PhpType::Named("App\\Models\\Post".to_string())],
+        ))
     );
 }
 
@@ -229,10 +265,10 @@ fn singular_ignores_custom_collection() {
     assert_eq!(
         build_property_type(
             RelationshipKind::Singular,
-            Some("App\\Models\\Post"),
+            Some(&PhpType::Named("App\\Models\\Post".to_string())),
             Some("App\\Collections\\PostCollection")
         ),
-        Some("App\\Models\\Post".to_string())
+        Some(PhpType::Named("App\\Models\\Post".to_string()))
     );
 }
 
@@ -241,10 +277,12 @@ fn morph_to_ignores_custom_collection() {
     assert_eq!(
         build_property_type(
             RelationshipKind::MorphTo,
-            Some("App\\Models\\Foo"),
+            Some(&PhpType::Named("App\\Models\\Foo".to_string())),
             Some("App\\Collections\\FooCollection")
         ),
-        Some("Illuminate\\Database\\Eloquent\\Model".to_string())
+        Some(PhpType::Named(
+            "Illuminate\\Database\\Eloquent\\Model".to_string(),
+        ))
     );
 }
 
@@ -255,7 +293,10 @@ fn infer_has_many_from_body() {
     let body = "{ return $this->hasMany(Post::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string(),
+            vec![PhpType::Named("Post".to_string())],
+        ))
     );
 }
 
@@ -264,7 +305,10 @@ fn infer_has_one_from_body() {
     let body = "{ return $this->hasOne(Profile::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasOne<Profile>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasOne".to_string(),
+            vec![PhpType::Named("Profile".to_string())],
+        ))
     );
 }
 
@@ -273,7 +317,10 @@ fn infer_belongs_to_from_body() {
     let body = "{ return $this->belongsTo(User::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\BelongsTo<User>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\BelongsTo".to_string(),
+            vec![PhpType::Named("User".to_string())],
+        ))
     );
 }
 
@@ -282,7 +329,10 @@ fn infer_belongs_to_many_from_body() {
     let body = "{ return $this->belongsToMany(Role::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\BelongsToMany<Role>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\BelongsToMany".to_string(),
+            vec![PhpType::Named("Role".to_string())],
+        ))
     );
 }
 
@@ -291,7 +341,10 @@ fn infer_morph_one_from_body() {
     let body = "{ return $this->morphOne(Image::class, 'imageable'); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\MorphOne<Image>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\MorphOne".to_string(),
+            vec![PhpType::Named("Image".to_string())],
+        ))
     );
 }
 
@@ -300,7 +353,10 @@ fn infer_morph_many_from_body() {
     let body = "{ return $this->morphMany(Comment::class, 'commentable'); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\MorphMany<Comment>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\MorphMany".to_string(),
+            vec![PhpType::Named("Comment".to_string())],
+        ))
     );
 }
 
@@ -310,7 +366,9 @@ fn infer_morph_to_from_body() {
     let body = "{ return $this->morphTo(); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\MorphTo".to_string())
+        Some(PhpType::Named(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\MorphTo".to_string(),
+        ))
     );
 }
 
@@ -319,7 +377,10 @@ fn infer_morph_to_many_from_body() {
     let body = "{ return $this->morphToMany(Tag::class, 'taggable'); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\MorphToMany<Tag>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\MorphToMany".to_string(),
+            vec![PhpType::Named("Tag".to_string())],
+        ))
     );
 }
 
@@ -329,7 +390,10 @@ fn infer_morphed_by_many_from_body() {
     let result = infer_relationship_from_body(body).unwrap();
     assert_eq!(
         result,
-        "\\Illuminate\\Database\\Eloquent\\Relations\\MorphToMany<Tag>"
+        PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\MorphToMany".to_string(),
+            vec![PhpType::Named("Tag".to_string())],
+        )
     );
 }
 
@@ -338,7 +402,10 @@ fn infer_has_many_through_from_body() {
     let body = "{ return $this->hasManyThrough(Post::class, Country::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasManyThrough<Post>".to_string()),
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasManyThrough".to_string(),
+            vec![PhpType::Named("Post".to_string())],
+        )),
     );
 }
 
@@ -347,7 +414,10 @@ fn infer_has_one_through_from_body() {
     let body = "{ return $this->hasOneThrough(Owner::class, Car::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasOneThrough<Owner>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasOneThrough".to_string(),
+            vec![PhpType::Named("Owner".to_string())],
+        ))
     );
 }
 
@@ -356,7 +426,10 @@ fn infer_relationship_fqn_class_argument() {
     let body = r"{ return $this->hasMany(\App\Models\Post::class); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string(),
+            vec![PhpType::Named("Post".to_string())],
+        ))
     );
 }
 
@@ -365,7 +438,10 @@ fn infer_relationship_with_extra_arguments() {
     let body = "{ return $this->hasMany(Post::class, 'user_id', 'id'); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string(),
+            vec![PhpType::Named("Post".to_string())],
+        ))
     );
 }
 
@@ -376,7 +452,10 @@ fn infer_relationship_with_whitespace() {
     }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string(),
+            vec![PhpType::Named("Post".to_string())],
+        ))
     );
 }
 
@@ -398,7 +477,9 @@ fn infer_relationship_without_class_argument() {
     let body = "{ return $this->hasMany('App\\Models\\Post'); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string()),
+        Some(PhpType::Named(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string(),
+        )),
         "Without ::class argument, returns bare FQN relationship name"
     );
 }
@@ -409,7 +490,9 @@ fn infer_morph_to_with_arguments() {
     let body = "{ return $this->morphTo('commentable', 'commentable_type', 'commentable_id'); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\MorphTo".to_string())
+        Some(PhpType::Named(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\MorphTo".to_string(),
+        ))
     );
 }
 
@@ -430,7 +513,10 @@ fn infer_relationship_same_line_chain() {
     let body = "{ return $this->hasMany(Post::class)->latest(); }";
     assert_eq!(
         infer_relationship_from_body(body),
-        Some("\\Illuminate\\Database\\Eloquent\\Relations\\HasMany<Post>".to_string())
+        Some(PhpType::Generic(
+            "\\Illuminate\\Database\\Eloquent\\Relations\\HasMany".to_string(),
+            vec![PhpType::Named("Post".to_string())],
+        ))
     );
 }
 

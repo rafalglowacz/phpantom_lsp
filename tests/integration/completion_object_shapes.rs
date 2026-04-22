@@ -6,48 +6,56 @@ use tower_lsp::lsp_types::*;
 
 #[test]
 fn test_parse_object_shape_basic() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries = parse_object_shape("object{foo: int, bar: string}").unwrap();
+    let entries =
+        parse_object_shape_typed(&PhpType::parse("object{foo: int, bar: string}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
     assert!(!entries[1].optional);
 }
 
 #[test]
 fn test_parse_object_shape_optional_property() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries = parse_object_shape("object{foo: int, bar?: string}").unwrap();
+    let entries =
+        parse_object_shape_typed(&PhpType::parse("object{foo: int, bar?: string}")).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
     assert!(!entries[0].optional);
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
     assert!(entries[1].optional);
 }
 
 #[test]
 fn test_parse_object_shape_quoted_keys() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries = parse_object_shape(r#"object{'foo': int, "bar": string}"#).unwrap();
+    let entries =
+        parse_object_shape_typed(&PhpType::parse(r#"object{'foo': int, "bar": string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
-    assert_eq!(entries[1].key, "bar");
-    assert_eq!(entries[1].value_type, "string");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
+    assert_eq!(entries[1].key.as_deref(), Some("bar"));
+    assert_eq!(entries[1].value_type.to_string(), "string");
 }
 
 #[test]
 fn test_parse_object_shape_quoted_optional() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries = parse_object_shape(r#"object{'foo': int, "bar"?: string}"#).unwrap();
+    let entries =
+        parse_object_shape_typed(&PhpType::parse(r#"object{'foo': int, "bar"?: string}"#)).unwrap();
     assert_eq!(entries.len(), 2);
     assert!(!entries[0].optional);
     assert!(entries[1].optional);
@@ -55,108 +63,130 @@ fn test_parse_object_shape_quoted_optional() {
 
 #[test]
 fn test_parse_object_shape_empty() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries = parse_object_shape("object{}").unwrap();
+    let entries = parse_object_shape_typed(&PhpType::parse("object{}")).unwrap();
     assert!(entries.is_empty());
 }
 
 #[test]
 fn test_parse_object_shape_nullable() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries = parse_object_shape("?object{foo: int}").unwrap();
+    let entries = parse_object_shape_typed(&PhpType::parse("?object{foo: int}")).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].key, "foo");
-    assert_eq!(entries[0].value_type, "int");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
+    assert_eq!(entries[0].value_type.to_string(), "int");
 }
 
 #[test]
 fn test_parse_object_shape_canonical_form() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
     // After resolution, `object` never has a leading `\` — verify canonical input works.
-    let entries = parse_object_shape("object{foo: int}").unwrap();
+    let entries = parse_object_shape_typed(&PhpType::parse("object{foo: int}")).unwrap();
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].key, "foo");
+    assert_eq!(entries[0].key.as_deref(), Some("foo"));
 }
 
 #[test]
 fn test_parse_object_shape_complex_value_types() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let entries =
-        parse_object_shape("object{user: User, items: list<Item>, meta: array{page: int}}")
-            .unwrap();
+    let entries = parse_object_shape_typed(&PhpType::parse(
+        "object{user: User, items: list<Item>, meta: array{page: int}}",
+    ))
+    .unwrap();
     assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0].key, "user");
-    assert_eq!(entries[0].value_type, "User");
-    assert_eq!(entries[1].key, "items");
-    assert_eq!(entries[1].value_type, "list<Item>");
-    assert_eq!(entries[2].key, "meta");
-    assert_eq!(entries[2].value_type, "array{page: int}");
+    assert_eq!(entries[0].key.as_deref(), Some("user"));
+    assert_eq!(entries[0].value_type.to_string(), "User");
+    assert_eq!(entries[1].key.as_deref(), Some("items"));
+    assert_eq!(entries[1].value_type.to_string(), "list<Item>");
+    assert_eq!(entries[2].key.as_deref(), Some("meta"));
+    assert_eq!(entries[2].value_type.to_string(), "array{page: int}");
 }
 
 #[test]
 fn test_parse_object_shape_not_an_object_shape() {
-    use phpantom_lsp::docblock::parse_object_shape;
+    use phpantom_lsp::docblock::parse_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    assert!(parse_object_shape("array{foo: int}").is_none());
-    assert!(parse_object_shape("string").is_none());
-    assert!(parse_object_shape("object").is_none());
-    assert!(parse_object_shape("User").is_none());
+    assert!(parse_object_shape_typed(&PhpType::parse("array{foo: int}")).is_none());
+    assert!(parse_object_shape_typed(&PhpType::parse("string")).is_none());
+    assert!(parse_object_shape_typed(&PhpType::parse("object")).is_none());
+    assert!(parse_object_shape_typed(&PhpType::parse("User")).is_none());
 }
 
 #[test]
 fn test_is_object_shape() {
-    use phpantom_lsp::docblock::is_object_shape;
+    use phpantom_lsp::docblock::is_object_shape_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    assert!(is_object_shape("object{foo: int}"));
-    assert!(is_object_shape("?object{foo: int}"));
+    assert!(is_object_shape_typed(&PhpType::parse("object{foo: int}")));
+    assert!(is_object_shape_typed(&PhpType::parse("?object{foo: int}")));
 
-    assert!(is_object_shape("object{}"));
-    assert!(!is_object_shape("object"));
-    assert!(!is_object_shape("array{foo: int}"));
-    assert!(!is_object_shape("string"));
+    assert!(is_object_shape_typed(&PhpType::parse("object{}")));
+    assert!(!is_object_shape_typed(&PhpType::parse("object")));
+    assert!(!is_object_shape_typed(&PhpType::parse("array{foo: int}")));
+    assert!(!is_object_shape_typed(&PhpType::parse("string")));
 }
 
 #[test]
 fn test_extract_object_shape_property_type() {
-    use phpantom_lsp::docblock::extract_object_shape_property_type;
+    use phpantom_lsp::docblock::extract_object_shape_property_type_typed;
+    use phpantom_lsp::php_type::PhpType;
 
     assert_eq!(
-        extract_object_shape_property_type("object{name: string, user: User}", "user"),
+        extract_object_shape_property_type_typed(
+            &PhpType::parse("object{name: string, user: User}"),
+            "user"
+        )
+        .map(|t| t.to_string()),
         Some("User".to_string())
     );
     assert_eq!(
-        extract_object_shape_property_type("object{name: string, user: User}", "name"),
+        extract_object_shape_property_type_typed(
+            &PhpType::parse("object{name: string, user: User}"),
+            "name"
+        )
+        .map(|t| t.to_string()),
         Some("string".to_string())
     );
     assert_eq!(
-        extract_object_shape_property_type("object{name: string, user: User}", "missing"),
+        extract_object_shape_property_type_typed(
+            &PhpType::parse("object{name: string, user: User}"),
+            "missing"
+        )
+        .map(|t| t.to_string()),
         None
     );
     assert_eq!(
-        extract_object_shape_property_type("array{name: string}", "name"),
+        extract_object_shape_property_type_typed(&PhpType::parse("array{name: string}"), "name")
+            .map(|t| t.to_string()),
         None
     );
 }
 
 #[test]
 fn test_extract_object_shape_property_type_quoted_key() {
-    use phpantom_lsp::docblock::extract_object_shape_property_type;
+    use phpantom_lsp::docblock::extract_object_shape_property_type_typed;
+    use phpantom_lsp::php_type::PhpType;
 
-    let t = r#"object{"host": string, 'port': int, ssl: bool}"#;
+    let parsed = PhpType::parse(r#"object{"host": string, 'port': int, ssl: bool}"#);
     assert_eq!(
-        extract_object_shape_property_type(t, "host"),
+        extract_object_shape_property_type_typed(&parsed, "host").map(|t| t.to_string()),
         Some("string".to_string())
     );
     assert_eq!(
-        extract_object_shape_property_type(t, "port"),
+        extract_object_shape_property_type_typed(&parsed, "port").map(|t| t.to_string()),
         Some("int".to_string())
     );
     assert_eq!(
-        extract_object_shape_property_type(t, "ssl"),
+        extract_object_shape_property_type_typed(&parsed, "ssl").map(|t| t.to_string()),
         Some("bool".to_string())
     );
 }

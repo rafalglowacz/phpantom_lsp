@@ -2219,6 +2219,181 @@ async fn test_completion_method_conditional_return_class_string_chain() {
     }
 }
 
+// ── Symfony-style conditional return with @psalm-return coexisting ───────────
+
+/// Reproduces https://github.com/AJenbo/phpantom_lsp/issues/41
+///
+/// When a method has both `@phpstan-return` and `@psalm-return` conditional
+/// annotations and the class-string parameter is not at index 0, the resolved
+/// type should be the concrete class only (not a union with `mixed`).
+///
+/// ```php
+/// /**
+///  * @template TObject of object
+///  * @template TType of string|class-string<TObject>
+///  * @param mixed  $data
+///  * @param TType  $type
+///  * @param string $format
+///  * @param array<string, mixed> $context
+///  * @phpstan-return ($type is class-string<TObject> ? TObject : mixed)
+///  * @psalm-return (TType is class-string<TObject> ? TObject : mixed)
+///  */
+/// public function deserialize(mixed $data, string $type, string $format, array $context = []): mixed;
+/// ```
+#[tokio::test]
+async fn test_completion_conditional_return_class_string_at_param_index_1() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///symfony_deserialize.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                                     // 0
+        "class SubmissionProducerMessage {\n",                                         // 1
+        "    public function getId(): int {}\n",                                       // 2
+        "    public function getPayload(): string {}\n",                               // 3
+        "}\n",                                                                         // 4
+        "\n",                                                                          // 5
+        "interface SerializerInterface {\n",                                           // 6
+        "    /**\n",                                                                   // 7
+        "     * @template TObject of object\n",                                        // 8
+        "     * @template TType of string|class-string<TObject>\n",                    // 9
+        "     *\n",                                                                    // 10
+        "     * @param TType                $type\n",                                  // 11
+        "     * @param array<string, mixed> $context\n",                               // 12
+        "     *\n",                                                                    // 13
+        "     * @phpstan-return ($type is class-string<TObject> ? TObject : mixed)\n", // 14
+        "     * @psalm-return (TType is class-string<TObject> ? TObject : mixed)\n",   // 15
+        "     */\n",                                                                   // 16
+        "    public function deserialize(mixed $data, string $type, string $format, array $context = []): mixed;\n", // 17
+        "}\n",                                                  // 18
+        "\n",                                                   // 19
+        "class Consumer {\n",                                   // 20
+        "    private SerializerInterface $serializer;\n",       // 21
+        "\n",                                                   // 22
+        "    public function handle(string $buffer): void {\n", // 23
+        "        $message = $this->serializer->deserialize($buffer, SubmissionProducerMessage::class, 'json');\n", // 24
+        "        $message->\n", // 25
+        "    }\n",              // 26
+        "}\n",                  // 27
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$message->` on line 25
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 25,
+                character: 18,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $message-> after deserialize()"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // Should include members from SubmissionProducerMessage
+            assert!(
+                labels.iter().any(|l| l.starts_with("getId")),
+                "Should include getId from SubmissionProducerMessage, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("getPayload")),
+                "Should include getPayload from SubmissionProducerMessage, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When a method only has `@psalm-return` (no `@phpstan-return`), the
+/// conditional should still resolve correctly.
+#[tokio::test]
+async fn test_completion_psalm_return_conditional_class_string() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///psalm_return.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                          // 0
+        "class Order {\n",                                                  // 1
+        "    public function getTotal(): float {}\n",                       // 2
+        "}\n",                                                              // 3
+        "\n",                                                               // 4
+        "class Mapper {\n",                                                 // 5
+        "    /**\n",                                                        // 6
+        "     * @template T of object\n",                                   // 7
+        "     * @param class-string<T> $class\n",                           // 8
+        "     * @psalm-return ($class is class-string<T> ? T : mixed)\n",   // 9
+        "     */\n",                                                        // 10
+        "    public function map(string $data, string $class): mixed {}\n", // 11
+        "}\n",                                                              // 12
+        "\n",                                                               // 13
+        "$m = new Mapper();\n",                                             // 14
+        "$order = $m->map('{}', Order::class);\n",                          // 15
+        "$order->\n",                                                       // 16
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 16,
+                character: 8,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $order-> after psalm-return conditional"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("getTotal")),
+                "Should include getTotal from Order (resolved via @psalm-return conditional), got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
 // ── Inline @var docblock override tests ─────────────────────────────────────
 
 #[tokio::test]
@@ -19093,6 +19268,249 @@ async fn test_completion_class_string_foreach_cases() {
     }
 }
 
+/// `class-string<BackedEnum>` parameter: foreach over `$class::cases()`
+/// should resolve `$item` to the bound type so that `$item->name`
+/// and `$item->value` are available via instance member completion.
+#[tokio::test]
+async fn test_completion_class_string_foreach_cases_item_members() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_foreach_item.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "interface UnitEnum {\n",
+        "    /** @return static[] */\n",
+        "    public static function cases(): array;\n",
+        "    public readonly string $name;\n",
+        "}\n",
+        "interface BackedEnum extends UnitEnum {\n",
+        "    public static function from(string|int $value): static;\n",
+        "    public readonly string|int $value;\n",
+        "}\n",
+        "\n",
+        "class OptionList {\n",
+        "    /**\n",
+        "     * @param class-string<BackedEnum> $class\n",
+        "     */\n",
+        "    public function getOptions(string $class): array {\n",
+        "        foreach ($class::cases() as $item) {\n",
+        "            $item->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 17,
+                character: 19,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $item-> inside foreach over $class::cases()"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"name"),
+                "Should include property 'name' from UnitEnum on foreach item, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"value"),
+                "Should include property 'value' from BackedEnum on foreach item, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// `class-string<BackedEnum>` parameter: `$class::from()` should
+/// resolve the `static` return type to `BackedEnum`, making instance
+/// members available on the result via chaining.
+#[tokio::test]
+async fn test_completion_class_string_static_return_type_chain() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_static_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "interface UnitEnum {\n",
+        "    /** @return static[] */\n",
+        "    public static function cases(): array;\n",
+        "    public readonly string $name;\n",
+        "}\n",
+        "interface BackedEnum extends UnitEnum {\n",
+        "    public static function from(string|int $value): static;\n",
+        "    public readonly string|int $value;\n",
+        "}\n",
+        "\n",
+        "class Svc {\n",
+        "    /**\n",
+        "     * @param class-string<BackedEnum> $class\n",
+        "     */\n",
+        "    public function resolve(string $class): void {\n",
+        "        $result = $class::from('foo');\n",
+        "        $result->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 17,
+                character: 17,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $result-> after $class::from()"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"name"),
+                "Should include property 'name' from BackedEnum on static return, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"value"),
+                "Should include property 'value' from BackedEnum on static return, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// `class-string<T>` in a standalone function: `$class::from()` should
+/// resolve through the template bound and make instance members available.
+#[tokio::test]
+async fn test_completion_class_string_template_standalone_function_chain() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_tpl_func.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "interface UnitEnum {\n",
+        "    /** @return static[] */\n",
+        "    public static function cases(): array;\n",
+        "    public readonly string $name;\n",
+        "}\n",
+        "interface BackedEnum extends UnitEnum {\n",
+        "    public static function from(string|int $value): static;\n",
+        "    public readonly string|int $value;\n",
+        "}\n",
+        "\n",
+        "/**\n",
+        " * @template T of BackedEnum\n",
+        " * @param class-string<T> $class\n",
+        " * @return T\n",
+        " */\n",
+        "function createEnum(string $class): BackedEnum {\n",
+        "    $item = $class::from('test');\n",
+        "    $item->\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 18,
+                character: 11,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $item-> after $class::from() in standalone function"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"name"),
+                "Should include property 'name' from BackedEnum via template bound, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"value"),
+                "Should include property 'value' from BackedEnum via template bound, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
 // ─── Loop-body assignments visible inside the same iteration (B20) ──────────
 
 /// When a variable is initialized as `null` and reassigned later in the
@@ -20473,6 +20891,81 @@ async fn test_completion_foreach_variadic_param_standalone_function() {
             assert!(
                 labels.iter().any(|l| l.starts_with("render")),
                 "Should include render method from Widget, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+// ─── Foreach variable type from @param array shape ──────────────────────────
+
+/// When a parameter is annotated with `@param array<int, array{bundle: Product, count: int}>`,
+/// iterating over it with foreach should propagate the value type so that
+/// `$entry['bundle']->` resolves to `Product`.
+#[tokio::test]
+async fn test_foreach_variable_type_from_param_array_shape() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///foreach_param_shape.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                                    // 0
+        "class Product {\n",                                                          // 1
+        "    public string $sku;\n",                                                  // 2
+        "    public function parentProduct(): Product { return new self(); }\n",      // 3
+        "}\n",                                                                        // 4
+        "\n",                                                                         // 5
+        "class Listener {\n",                                                         // 6
+        "    /** @param array<int, array{bundle: Product, count: int}> $counts */\n", // 7
+        "    public function handle(array $counts): void {\n",                        // 8
+        "        foreach ($counts as $entry) {\n",                                    // 9
+        "            $entry['bundle']->\n",                                           // 10
+        "        }\n",                                                                // 11
+        "    }\n",                                                                    // 12
+        "}\n",                                                                        // 13
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor at line 10 after `$entry['bundle']->`
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 10,
+                character: 34,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $entry['bundle']-> inside foreach over array shape param"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("sku")),
+                "Should include 'sku' from Product via array shape foreach. Got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("parentProduct")),
+                "Should include 'parentProduct' from Product via array shape foreach. Got: {:?}",
                 labels
             );
         }

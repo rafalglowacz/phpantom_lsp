@@ -8,11 +8,10 @@ use mago_syntax::ast::*;
 
 use crate::Backend;
 use crate::docblock;
-use crate::php_type::PhpType;
 use crate::types::*;
 
 use super::{
-    DocblockCtx, extract_hint_string, extract_parameters, is_available_for_version,
+    DocblockCtx, extract_hint_type, extract_parameters, is_available_for_version,
     is_removed_for_version, merge_deprecation_info,
 };
 
@@ -116,19 +115,18 @@ impl Backend {
                     let raw_native_return_type = func
                         .return_type_hint
                         .as_ref()
-                        .map(|rth| extract_hint_string(&rth.hint));
+                        .map(|rth| extract_hint_type(&rth.hint));
 
                     // Check for a #[LanguageLevelTypeAware] override on the
                     // function's return type.  When present, it replaces the
                     // native type hint with the version-appropriate string.
                     let native_return_type = if let Some(ctx) = doc_ctx
                         && let Some(ver) = ctx.php_version
-                        && let Some(override_type) =
-                            super::extract_language_level_type(&func.attribute_lists, ctx, ver)
                     {
-                        Some(PhpType::parse(&override_type))
+                        super::extract_language_level_type(&func.attribute_lists, ctx, ver)
+                            .or(raw_native_return_type)
                     } else {
-                        raw_native_return_type.map(|s| PhpType::parse(&s))
+                        raw_native_return_type
                     };
 
                     // Apply PHPDoc `@return` override for the function.
@@ -154,18 +152,17 @@ impl Backend {
                         link_urls,
                         see_refs,
                         func_template_params,
+                        func_template_param_bounds,
                         func_template_bindings,
                         throws,
                     ) = if let Some(ctx) = doc_ctx {
-                        let doc_type = info
+                        let parsed_doc_return = info
                             .as_ref()
                             .and_then(docblock::extract_return_type_from_info);
 
-                        let native_return_type_str =
-                            native_return_type.as_ref().map(|t| t.to_string());
-                        let effective = docblock::resolve_effective_type(
-                            native_return_type_str.as_deref(),
-                            doc_type.as_deref(),
+                        let effective = docblock::resolve_effective_type_typed(
+                            native_return_type.as_ref(),
+                            parsed_doc_return.as_ref(),
                         );
 
                         let conditional = info
@@ -175,10 +172,21 @@ impl Backend {
                         // Extract function-level @template params and their
                         // @param bindings for generic type substitution at
                         // call sites.
-                        let tpl_params: Vec<String> = info
+                        let params_full = info
                             .as_ref()
-                            .map(docblock::extract_template_params_from_info)
+                            .map(docblock::extract_template_params_full_from_info)
                             .unwrap_or_default();
+                        let tpl_params: Vec<String> =
+                            params_full.iter().map(|(n, _, _, _)| n.clone()).collect();
+                        let tpl_param_bounds: std::collections::HashMap<
+                            String,
+                            crate::php_type::PhpType,
+                        > = params_full
+                            .iter()
+                            .filter_map(|(name, bound, _, _)| {
+                                bound.as_ref().map(|b| (name.clone(), b.clone()))
+                            })
+                            .collect();
                         let tpl_bindings = if !tpl_params.is_empty() {
                             info.as_ref()
                                 .map(|i| {
@@ -200,12 +208,11 @@ impl Backend {
                         //   @return T
                         // becomes a conditional that resolves T from the
                         // call-site argument (e.g. resolve(User::class) → User).
-                        let effective_str = effective.as_ref().map(|t| t.to_string());
                         let conditional = conditional.or_else(|| {
                             docblock::synthesize_template_conditional_from_info(
                                 info.as_ref()?,
                                 &tpl_params,
-                                effective_str.as_deref(),
+                                effective.as_ref(),
                                 false,
                             )
                         });
@@ -258,6 +265,7 @@ impl Backend {
                             link_urls,
                             see_refs,
                             tpl_params,
+                            tpl_param_bounds,
                             tpl_bindings,
                             throws,
                         )
@@ -277,6 +285,7 @@ impl Backend {
                             Vec::new(),
                             Vec::new(),
                             Vec::new(),
+                            std::collections::HashMap::new(),
                             Vec::new(),
                             Vec::new(),
                         )
@@ -289,8 +298,8 @@ impl Backend {
                             let param_doc_type =
                                 docblock::extract_param_raw_type_from_info(info, &param.name);
                             if let Some(ref doc_type) = param_doc_type {
-                                let effective = docblock::resolve_effective_type(
-                                    param.type_hint.as_ref().map(|t| t.to_string()).as_deref(),
+                                let effective = docblock::resolve_effective_type_typed(
+                                    param.type_hint.as_ref(),
                                     Some(doc_type),
                                 );
                                 if effective.is_some() {
@@ -319,9 +328,9 @@ impl Backend {
                                 continue;
                             }
                             // Find the positional @param tag at this index.
-                            if let Some(&(None, ref doc_type)) = positional_tags.get(idx) {
-                                let effective = docblock::resolve_effective_type(
-                                    param.type_hint.as_ref().map(|t| t.to_string()).as_deref(),
+                            if let Some((None, doc_type)) = positional_tags.get(idx) {
+                                let effective = docblock::resolve_effective_type_typed(
+                                    param.type_hint.as_ref(),
                                     Some(doc_type),
                                 );
                                 if effective.is_some() {
@@ -353,11 +362,10 @@ impl Backend {
                             if !parameters.iter().any(|p| p.name == tag_name) {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
-                                let type_hint = Some(tag_type);
                                 parameters.push(ParameterInfo {
                                     name: tag_name,
                                     is_required: false,
-                                    type_hint: type_hint.map(|s| PhpType::parse(&s)),
+                                    type_hint: Some(tag_type),
                                     native_type_hint: None,
                                     description,
                                     default_value: None,
@@ -385,6 +393,7 @@ impl Backend {
                         deprecation_message,
                         deprecated_replacement,
                         template_params: func_template_params,
+                        template_param_bounds: func_template_param_bounds,
                         template_bindings: func_template_bindings,
                         throws,
                         is_polyfill: false,

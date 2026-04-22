@@ -19,17 +19,10 @@
 namespace Demo {
 
 use Attribute;
-use Bug10298\PropAttr;
-use Bug5607\Cl;
 use Closure;
 use Demo\ValidationException;
 use Demo\NotFoundException;
 use Exception;
-use Override;
-use PHPStan\DependencyInjection\GenerateFactory;
-use PHPStan\Reflection\ClassReflection;
-use ReadonlyPropertyAssignPhpDoc\C;
-use Stringable;
 use Demo\UserProfile as Profile;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -147,7 +140,7 @@ class VarDocblockDemo
     {
         /** @var Pencil $inlineHinted */
         $inlineHinted = getUnknownValue();
-        $inlineHinted->sketch();                  // with explicit variable name
+        $inlineHinted->sketch();
 
         /** @var Pen */
         $hinted = getUnknownValue();
@@ -213,6 +206,59 @@ class TypeNarrowingDemo
         $sample = pickRockOrBanana();
         if ($sample instanceof Rock && $sample->crush()) {
             // $sample is Rock here too
+        }
+    }
+}
+
+
+// ── Type Guard Narrowing (is_array, is_object, …) ──────────────────────────
+
+class TypeGuardNarrowingDemo
+{
+    /**
+     * @param null|list<Pen>|Pen $input
+     */
+    public function demo(null|array|Pen $input): void
+    {
+        // is_array() narrows the union to the array-like PHPDoc member,
+        // preserving the generic element type for foreach iteration.
+        if (is_array($input)) {
+            foreach ($input as $pen) {
+                $pen->write();                    // list<Pen> → Pen
+            }
+        }
+
+        // Else branch: non-array members survive
+        if (is_array($input)) {
+            // array branch
+        } else {
+            // $input is null|Pen here
+        }
+
+        // Guard clause: is_array() + early return
+        if (is_array($input)) {
+            return;
+        }
+        // $input is null|Pen after the guard
+
+        // is_object() narrows to class members only
+        $mixed = pickRockOrBanana();              // Rock|Banana
+        if (is_object($mixed)) {
+            $mixed->weigh();                      // both Rock and Banana have weigh()
+        }
+
+        // is_object() narrows mixed → object, suppressing diagnostics
+        // on dynamic property access (stdClass / object permit any property).
+        $decoded = json_decode('{}');             // mixed
+        if (is_object($decoded)) {
+            echo $decoded->anything;              // no diagnostic — object allows any property
+        }
+
+        // Compound && condition: is_object() narrowing propagates
+        // through the entire condition and into the if-body.
+        $payload = json_decode('{}');             // mixed
+        if (is_object($payload) && property_exists($payload, 'name')) {
+            echo $payload->name;                  // no diagnostic
         }
     }
 }
@@ -517,6 +563,39 @@ class ClosureReturnTemplateDemo
             new Pen('starter')
         );
         $merged2->color();      // TReduceReturnType = Pen
+
+        // Chained call: reduce() result used directly without intermediate variable.
+        // The template inference must survive the symbol-map subject text serialization.
+        $pencils->reduce(fn(Pen $carry, Pencil $item): Pen => $carry, new Pen('starter'))->write();
+    }
+}
+
+// ── Closure Param → Template Inference (Contravariant) ─────────────────────
+
+class ClosureParamTemplateDemo
+{
+    public function demo(): void
+    {
+        // When a method declares @param Closure(T): void $cb, the template
+        // param T is inferred from the closure's *parameter* type annotation
+        // (contravariant position), not the return type.
+
+        $bus = new ScaffoldingEventBus();
+
+        // Arrow function: T inferred as Pen from fn(Pen $p)
+        $result = $bus->listen(function(Pen $p): void { $p->write(); });
+        $result->write();       // T = Pen
+        $result->color();       // completions for Pen
+
+        // Full closure: T inferred as User from function(User $u)
+        $user = $bus->listen(function(User $u): void { $u->getEmail(); });
+        $user->getName();       // T = User
+
+        // Second param position: @param Closure(int, T): void
+        $proc = new ScaffoldingBatchProcessor();
+        $item = $proc->process(function(int $i, Pencil $p): void { $p->sketch(); });
+        $item->sketch();        // T = Pencil (from position 1)
+        $item->sharpen();
     }
 }
 
@@ -768,6 +847,29 @@ class ClassStringStaticDemo
     {
         $cls = Pen::class;
         $cls::make();                             // static method from Pen
+    }
+}
+
+
+// ── Class-String Parameter Static Dispatch ──────────────────────────────────
+
+class ClassStringParamDispatchDemo
+{
+    /**
+     * @param class-string<\BackedEnum> $enumClass
+     */
+    public function demo(string $enumClass): void
+    {
+        // Static method dispatch through class-string<T> parameter.
+        // $enumClass::from() returns static, resolved to BackedEnum.
+        $result = $enumClass::from('foo');
+        $result->name;                            // property from UnitEnum via BackedEnum
+
+        // Foreach over $enumClass::cases() resolves items to BackedEnum.
+        foreach ($enumClass::cases() as $item) {
+            $item->value;                         // property from BackedEnum
+            $item->name;                          // property from UnitEnum
+        }
     }
 }
 
@@ -1284,6 +1386,25 @@ class IterationDemo
 }
 
 
+// ── Foreach Array Shape Elements ────────────────────────────────────────────
+
+class ForeachArrayShapeDemo
+{
+    /**
+     * @param array<int, array{tool: Pen, count: int}> $inventory
+     */
+    public function demo(array $inventory): void
+    {
+        // When iterating over an array whose value type is an array shape,
+        // the foreach variable carries the shape type so that bracket
+        // access resolves each key to its declared type.
+        foreach ($inventory as $entry) {
+            $entry['tool']->write();      // array{tool: Pen, count: int} → Pen
+        }
+    }
+}
+
+
 // ── Variadic Parameter Foreach ──────────────────────────────────────────────
 
 class VariadicForeachDemo
@@ -1729,6 +1850,12 @@ class EloquentQueryDemo
         Bakery::whereOvenCode('X9');                  // from $hidden
         Bakery::whereFlour('rye')->whereApricot(true)->get();
         Bakery::where('open', true)->whereFlour('spelt')->fresh()->first();
+
+        // Conditionable when()/unless() chain continuation
+        // The patch replaces the unresolved TWhenReturnType template param
+        // with $this so that chained calls after when()/unless() resolve.
+        BlogAuthor::where('active', 1)->when(true, fn($q) => $q)->get();
+        BlogAuthor::where('active', 1)->unless(false, fn($q) => $q)->first();
     }
 }
 
@@ -2415,6 +2542,9 @@ class HoverOriginsDemo extends Model implements Renderable
 // Place cursor on `MutateArrayInsertSpec` and press Ctrl+. (or Cmd+. on Mac)
 // to see "Import `Couchbase\MutateArrayInsertSpec`" in the quick-fix menu.
 // Accepting inserts a `use Couchbase\MutateArrayInsertSpec;` at the top.
+//
+// Because this file has two unresolved names, the quick-fix menu also shows
+// "Import all missing classes" which imports both at once.
 
 class ImportClassDemo
 {
@@ -2589,6 +2719,45 @@ class ArgumentCountDemo
     }
 }
 
+class TypeErrorDemo
+{
+    public function demo(): void
+    {
+        $user = new User('Alice', 'alice@test.com');
+
+        // Correct — no diagnostic:
+        $user->setName('Bob');
+        $user->setStatus(Status::Active);
+
+        // Type error — string passed to int parameter:
+        $this->requiresInt("not a number");
+
+        // Type error — null passed to non-nullable parameter:
+        $this->requiresString(null);
+
+        // Type error — wrong class type:
+        $pen = new Pen('blue');
+        $this->requiresUser($pen);
+
+        // No diagnostic — subclass is compatible:
+        $admin = new AdminUser('Admin', 'admin@test.com', ['manage']);
+        $this->requiresUser($admin);
+
+        // No diagnostic — null is valid for nullable parameter:
+        $this->acceptsNullable(null);
+        $this->acceptsNullable("hello");
+
+        // No diagnostic — int widens to float:
+        $this->requiresFloat(42);
+    }
+
+    private function requiresInt(int $value): void {}
+    private function requiresString(string $text): void {}
+    private function requiresUser(User $user): void {}
+    private function acceptsNullable(?string $text): void {}
+    private function requiresFloat(float $value): void {}
+}
+
 
 // ── Implement Missing Methods (Code Action) ─────────────────────────────────
 // Uncomment the class below, place the cursor inside it, and trigger
@@ -2729,6 +2898,23 @@ class PassByReferenceDemo
         // acquires that type after the call.
         initPen($pen);
         $pen->write();                    // $pen is now Pen
+
+        // Static method calls with by-ref parameters:
+        PenFactory::create($staticPen);
+        $staticPen->write();              // $staticPen is now Pen
+
+        // Constructor calls with by-ref parameters:
+        new PenBuilder($ctorPen);
+        $ctorPen->write();                // $ctorPen is now Pen
+
+        // Instance method calls ($this->method) with by-ref parameters:
+        $this->init($thisPen);
+        $thisPen->write();                // $thisPen is now Pen
+    }
+
+    private function init(?Pen &$pen): void
+    {
+        $pen = new Pen();
     }
 }
 
@@ -2840,7 +3026,7 @@ class InlayHintsDemo
     public function demo(): void
     {
         // Parameter name hints appear before each argument:
-        $user = createUser('Alice', 25);          // name:, age:
+        $user = createUser('Alice', 'test@example.com');          // name:, email:
 
         // By-reference parameters show & before the name:
         $arr = [1, 2, 3];
@@ -3121,7 +3307,131 @@ class AttributeCompletionDemo
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Loop Array Build (variable-key assignment tracking) ─────────────────────
+
+class LoopArrayBuildDemo
+{
+    /** @param list<Pen> $pens */
+    public function demo(array $pens): void
+    {
+        // Variable-key assignment inside a loop: `$arr[$var] = $value`
+        // PHPantom tracks the RHS type as the array's element type.
+        $indexed = [];
+        foreach ($pens as $i => $pen) {
+            $key = $pen->color();
+            $indexed[$key] = $pen;
+        }
+
+        // Foreach over the built array resolves element members
+        foreach ($indexed as $item) {
+            $item->write();               // Pen method via element type tracking
+        }
+
+        // Bracket access resolves element type
+        $indexed['red']->color();         // Pen method
+
+        // Null-coalescing with guard clause
+        $found = $indexed['blue'] ?? null;
+        if ($found === null) { return; }
+        $found->write();                  // narrowed to Pen
+    }
+}
+
+class ConditionalLoopShapeDemo
+{
+    /** @param list<Pen> $pens */
+    public function demo(array $pens): void
+    {
+        // Array built with variable keys inside a loop where the assignment
+        // is inside a conditional branch (if/else). The shape type from
+        // the array literal is preserved through foreach iteration.
+        $grouped = [];
+        foreach ($pens as $pen) {
+            $key = $pen->color();
+            if (array_key_exists($key, $grouped)) {
+                $grouped[$key]['count']++;
+            } else {
+                $grouped[$key] = [
+                    'tool'  => $pen,
+                    'count' => 1,
+                ];
+            }
+        }
+
+        // Foreach over the built array resolves shape keys
+        foreach ($grouped as $entry) {
+            $entry['tool']->write();      // Pen method via shape tracking
+        }
+    }
+}
+
+
+// ── Invalid Class-Like Kind Diagnostics ─────────────────────────────────────
+// PHPantom flags class-like names used in positions where their kind is
+// guaranteed to fail at runtime.  Open demo() and look for Error/Warning
+// squiggles on the class names.
+
+class InvalidClassKindDemo
+{
+    public function demo(): void
+    {
+        // Error: cannot instantiate abstract class
+        $a = new ScaffoldingAbstractShape();
+
+        // Error: cannot instantiate enum
+        $b = new Status();
+
+        // Warning: instanceof with a trait always evaluates to false
+        $x = new Pen('test');
+        $result = $x instanceof JsonSerializer;
+
+        // Warning: trait in a type hint will always fail type checking
+        $this->acceptTrait(new Pen('test'));
+    }
+
+    private function acceptTrait(JsonSerializer $x): JsonSerializer
+    {
+        return $x;
+    }
+
+    // These also produce diagnostics but would crash at class-load time,
+    // so they are commented out.  See the AGENTS.md hoisting pitfall note.
+}
+
+
+// ── Untyped Property Inference ──────────────────────────────────────────────
+// Properties without type declarations have their types inferred from
+// constructor assignments (`$this->prop = new Foo()`) and promoted
+// parameter defaults (`private $prop = new Foo()`). Trigger completion
+// after `->` on the property to see methods from the inferred type.
+
+class UntypedPropertyInferenceDemo
+{
+    private $repository;
+    private $logger;
+
+    public function __construct(
+        private $defaultRepo = new ScaffoldingUntypedRepo(),
+    ) {
+        $this->repository = new ScaffoldingUntypedRepo();
+        $this->logger = new ScaffoldingUntypedLogger();
+    }
+
+    public function demo(): void
+    {
+        // Constructor body assignment: $this->repository = new ScaffoldingUntypedRepo()
+        $this->repository->findById(1);       // resolves ScaffoldingUntypedRepo::findById()
+
+        // Constructor body assignment: $this->logger = new ScaffoldingUntypedLogger()
+        $this->logger->info('hello');         // resolves ScaffoldingUntypedLogger::info()
+
+        // Promoted parameter default: private $defaultRepo = new ScaffoldingUntypedRepo()
+        $this->defaultRepo->findById(42);     // resolves ScaffoldingUntypedRepo::findById()
+    }
+}
+
+
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 // ┃  SCAFFOLDING — Supporting definitions below this line.              ┃
 
@@ -3189,6 +3499,20 @@ class TreeMapperImpl
 // known PHP limitation (php-src#7873), not a bug that will be fixed.
 // The same applies to `interface Foo extends \Stringable`.
 
+
+// ── Untyped Property Inference Scaffolding ──────────────────────────────────
+
+class ScaffoldingUntypedRepo
+{
+    public function findById(int $id): Pen { return new Pen('found'); }
+    public function save(Pen $pen): void {}
+}
+
+class ScaffoldingUntypedLogger
+{
+    public function info(string $msg): void {}
+    public function error(string $msg): void {}
+}
 
 // ── Demo-Specific Scaffolding ───────────────────────────────────────────────
 
@@ -3532,6 +3856,38 @@ class ScaffoldingClosureParamInference
     public FluentCollection $items;
 
     public function __construct() { $this->items = new FluentCollection([new Pen('red'), new Pen('blue')]); }
+}
+
+class ScaffoldingEventBus
+{
+    /**
+     * @template T
+     * @param Closure(T): void $callback
+     * @return T
+     */
+    public function listen(Closure $callback): mixed
+    {
+        $params = (new \ReflectionFunction($callback))->getParameters();
+        $type = $params[0]->getType();
+        $class = $type instanceof \ReflectionNamedType ? $type->getName() : 'stdClass';
+        return (new \ReflectionClass($class))->newInstanceWithoutConstructor();
+    }
+}
+
+class ScaffoldingBatchProcessor
+{
+    /**
+     * @template T
+     * @param Closure(int, T): void $handler
+     * @return T
+     */
+    public function process(Closure $handler): mixed
+    {
+        $params = (new \ReflectionFunction($handler))->getParameters();
+        $type = $params[1]->getType();
+        $class = $type instanceof \ReflectionNamedType ? $type->getName() : 'stdClass';
+        return (new \ReflectionClass($class))->newInstanceWithoutConstructor();
+    }
 }
 
 class ScaffoldingTemplateCallableHolder
@@ -4554,6 +4910,22 @@ function initPen(?Pen &$pen): void
     $pen = new Pen();
 }
 
+class PenFactory
+{
+    public static function create(?Pen &$pen): void
+    {
+        $pen = new Pen();
+    }
+}
+
+class PenBuilder
+{
+    public function __construct(?Pen &$pen)
+    {
+        $pen = new Pen();
+    }
+}
+
 interface ScaffoldingEntityFinder
 {
     /**
@@ -5071,6 +5443,23 @@ function runDemoAssertions(): void
         new Pen('starter')
     );
     assert($reduced instanceof Pen, 'reduce() with fn(): Pen must return Pen');
+
+    // Chained call: reduce() result used directly without intermediate variable.
+    $chainedWrite = $reducible->reduce(fn(Pen $carry, Pencil $item): Pen => $carry, new Pen('starter'))->write();
+    assert(is_string($chainedWrite), 'reduce()->write() chained must return string (Pen::write() return type)');
+
+    // ── ScaffoldingEventBus::listen() — closure param type binding ──────
+    $bus = new ScaffoldingEventBus();
+    $listened = $bus->listen(function(Pen $p): void { $p->write(); });
+    assert($listened instanceof Pen, 'listen(fn(Pen $p)) must return Pen (T inferred from closure param)');
+
+    $listenedUser = $bus->listen(function(User $u): void { $u->getEmail(); });
+    assert($listenedUser instanceof User, 'listen(function(User $u)) must return User');
+
+    // ── ScaffoldingBatchProcessor::process() — second closure param ─────
+    $proc = new ScaffoldingBatchProcessor();
+    $processed = $proc->process(function(int $i, Pencil $p): void { $p->sketch(); });
+    assert($processed instanceof Pencil, 'process(fn(int, Pencil)) must return Pencil (T from position 1)');
 
     // ── Nested generic: ServiceLocator::wrap → Box::unwrap ──────────────
     $boxed = $locator->wrap(Pen::class);
@@ -5603,6 +5992,14 @@ function runDemoAssertions(): void
     initPen($refPen);
     assert($refPen instanceof Pen, 'initPen(&$pen) must give $pen type Pen');
 
+    $staticPen = null;
+    PenFactory::create($staticPen);
+    assert($staticPen instanceof Pen, 'PenFactory::create(&$pen) must give $pen type Pen');
+
+    $ctorPen = null;
+    new PenBuilder($ctorPen);
+    assert($ctorPen instanceof Pen, 'new PenBuilder(&$pen) must give $pen type Pen');
+
     // ── Interface template inheritance (class-string<T>) ────────────────
     $locator = new ScaffoldingEntityLocator();
     $locatorResult = $locator->find(Pen::class);
@@ -5715,6 +6112,70 @@ function runDemoAssertions(): void
         );
     }
 
+    // ── Type guard narrowing ────────────────────────────────────────────
+    /** @var list<Pen> $tgPens */
+    $tgPens = [new Pen('a'), new Pen('b')];
+    /** @var null|list<Pen>|Pen $tgInput */
+    $tgInput = $tgPens;
+    if (is_array($tgInput)) {
+        foreach ($tgInput as $tgPen) {
+            assert($tgPen instanceof Pen, 'is_array() narrowed foreach element must be Pen');
+        }
+    }
+    $tgSingle = new Pen('solo');
+    /** @var list<Pen>|Pen $tgMixed */
+    $tgMixed = $tgSingle;
+    if (!is_array($tgMixed)) {
+        assert($tgMixed instanceof Pen, 'Else branch of is_array() must be Pen');
+    }
+
+    // ── Foreach array shape elements ────────────────────────────────────
+    /** @var array<int, array{tool: Pen, count: int}> $fasInventory */
+    $fasInventory = [['tool' => new Pen('red'), 'count' => 3]];
+    foreach ($fasInventory as $fasEntry) {
+        assert($fasEntry['tool'] instanceof Pen, 'Foreach over array shape must resolve key type');
+    }
+
+    // ── Loop array build (variable-key assignment) ──────────────────────
+    $labPens = [new Pen('red'), new Pen('blue')];
+    $labIndexed = [];
+    foreach ($labPens as $labPen) {
+        $labKey = $labPen->color();
+        $labIndexed[$labKey] = $labPen;
+    }
+    assert($labIndexed['red'] instanceof Pen, 'Variable-key array element must be Pen');
+    foreach ($labIndexed as $labItem) {
+        assert($labItem instanceof Pen, 'Foreach over variable-key array must yield Pen');
+    }
+    $labFound = $labIndexed['blue'] ?? null;
+    assert($labFound instanceof Pen, 'Null-coalesce on variable-key array must resolve to Pen');
+
+    // ── Conditional loop shape (keyed assignment in if/else) ────────────
+    $shapePens = [new Pen('red'), new Pen('blue'), new Pen('red')];
+    $shapeGrouped = [];
+    foreach ($shapePens as $shapePen) {
+        $shapeKey = $shapePen->color();
+        if (array_key_exists($shapeKey, $shapeGrouped)) {
+            $shapeGrouped[$shapeKey]['count']++;
+        } else {
+            $shapeGrouped[$shapeKey] = [
+                'tool'  => $shapePen,
+                'count' => 1,
+            ];
+        }
+    }
+    foreach ($shapeGrouped as $shapeEntry) {
+        assert($shapeEntry['tool'] instanceof Pen, 'Shape key from conditional loop must resolve to Pen');
+    }
+
+    // ── Untyped property inference from constructor ─────────────────────
+    $untypedDemo = new UntypedPropertyInferenceDemo();
+    // The scaffolding repo's findById() returns Pen, so we can verify
+    // that the inferred type propagates through the property chain.
+    $repoRef = new ScaffoldingUntypedRepo();
+    $found = $repoRef->findById(1);
+    assert($found instanceof Pen, 'ScaffoldingUntypedRepo::findById() must return Pen');
+
     echo "All assertions passed.\n";
 }
 
@@ -5763,6 +6224,7 @@ namespace Illuminate\Database\Eloquent {
     class Builder implements \Illuminate\Contracts\Database\Eloquent\Builder {
         /** @use \Illuminate\Database\Concerns\BuildsQueries<TModel> */
         use \Illuminate\Database\Concerns\BuildsQueries;
+        use \Illuminate\Support\Traits\Conditionable;
 
         /**
          * @param  (\Closure(static): mixed)|string|array  $column
@@ -5904,6 +6366,27 @@ namespace Illuminate\Support {
          */
         public function each(callable $callback): static { return $this; }
         public function getIterator(): \ArrayIterator { return new \ArrayIterator([]); }
+    }
+}
+
+namespace Illuminate\Support\Traits {
+
+    /**
+     * @template TWhenReturnType
+     * @template TUnlessReturnType
+     */
+    trait Conditionable {
+        /**
+         * @param  (callable($this): TWhenReturnType)|null  $callback
+         * @return $this|TWhenReturnType
+         */
+        public function when(mixed $value = null, ?callable $callback = null, ?callable $default = null): mixed { return $this; }
+
+        /**
+         * @param  (callable($this): TUnlessReturnType)|null  $callback
+         * @return $this|TUnlessReturnType
+         */
+        public function unless(mixed $value = null, ?callable $callback = null, ?callable $default = null): mixed { return $this; }
     }
 }
 

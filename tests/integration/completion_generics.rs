@@ -1189,67 +1189,88 @@ fn test_extract_template_params_empty() {
 #[test]
 fn test_extract_generics_tag_extends_basic() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @extends Collection<int, Language>\n */";
     let result = extract_generics_tag(docblock, "@extends");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "Collection");
-    assert_eq!(result[0].1, vec!["int", "Language"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("int"), PhpType::parse("Language")]
+    );
 }
 
 #[test]
 fn test_extract_generics_tag_extends_single_param() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @extends Box<Apple>\n */";
     let result = extract_generics_tag(docblock, "@extends");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "Box");
-    assert_eq!(result[0].1, vec!["Apple"]);
+    assert_eq!(result[0].1, vec![PhpType::parse("Apple")]);
 }
 
 #[test]
 fn test_extract_generics_tag_phpstan_extends() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @phpstan-extends Collection<int, User>\n */";
     let result = extract_generics_tag(docblock, "@extends");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "Collection");
-    assert_eq!(result[0].1, vec!["int", "User"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("int"), PhpType::parse("User")]
+    );
 }
 
 #[test]
 fn test_extract_generics_tag_implements() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @implements ArrayAccess<string, User>\n */";
     let result = extract_generics_tag(docblock, "@implements");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "ArrayAccess");
-    assert_eq!(result[0].1, vec!["string", "User"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("string"), PhpType::parse("User")]
+    );
 }
 
 #[test]
 fn test_extract_generics_tag_with_fqn() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @extends \\Illuminate\\Support\\Collection<int, \\App\\Model>\n */";
     let result = extract_generics_tag(docblock, "@extends");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "Illuminate\\Support\\Collection");
-    assert_eq!(result[0].1, vec!["int", "App\\Model"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("int"), PhpType::parse("\\App\\Model")]
+    );
 }
 
 #[test]
 fn test_extract_generics_tag_nested_generic() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @extends Base<array<int, string>, User>\n */";
     let result = extract_generics_tag(docblock, "@extends");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "Base");
-    assert_eq!(result[0].1, vec!["array<int, string>", "User"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("array<int, string>"), PhpType::parse("User")]
+    );
 }
 
 #[test]
@@ -1274,6 +1295,7 @@ fn test_extract_generics_tag_extends_without_angle_brackets() {
 #[test]
 fn test_extract_generics_tag_multiple_implements() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1286,9 +1308,15 @@ fn test_extract_generics_tag_multiple_implements() {
     // Only entries with generics are returned
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].0, "ArrayAccess");
-    assert_eq!(result[0].1, vec!["int", "User"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("int"), PhpType::parse("User")]
+    );
     assert_eq!(result[1].0, "IteratorAggregate");
-    assert_eq!(result[1].1, vec!["int", "User"]);
+    assert_eq!(
+        result[1].1,
+        vec![PhpType::parse("int"), PhpType::parse("User")]
+    );
 }
 
 // ─── Method-level @template tests ───────────────────────────────────────────
@@ -1307,6 +1335,7 @@ fn test_extract_generics_tag_multiple_implements() {
 #[test]
 fn test_synthesize_template_conditional_basic() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1316,7 +1345,8 @@ fn test_synthesize_template_conditional_basic() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize a conditional for @template T with class-string<T>"
@@ -1327,6 +1357,7 @@ fn test_synthesize_template_conditional_basic() {
 #[test]
 fn test_synthesize_template_conditional_non_template_return() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1336,7 +1367,8 @@ fn test_synthesize_template_conditional_non_template_return() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("string"), false);
+    let parsed = PhpType::parse("string");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_none(),
         "Should NOT synthesize when return type is not a template param"
@@ -1347,6 +1379,7 @@ fn test_synthesize_template_conditional_non_template_return() {
 #[test]
 fn test_synthesize_template_conditional_no_templates() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1355,7 +1388,8 @@ fn test_synthesize_template_conditional_no_templates() {
         " */",
     );
     let template_params: Vec<String> = vec![];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("string"), false);
+    let parsed = PhpType::parse("string");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_none(),
         "Should NOT synthesize when there are no template params"
@@ -1366,6 +1400,7 @@ fn test_synthesize_template_conditional_no_templates() {
 #[test]
 fn test_synthesize_template_conditional_existing_conditional() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1375,7 +1410,8 @@ fn test_synthesize_template_conditional_existing_conditional() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), true);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), true);
     assert!(
         result.is_none(),
         "Should NOT synthesize when has_existing_conditional is true"
@@ -1386,6 +1422,7 @@ fn test_synthesize_template_conditional_existing_conditional() {
 #[test]
 fn test_synthesize_template_conditional_nullable_return() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1395,7 +1432,8 @@ fn test_synthesize_template_conditional_nullable_return() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("?T"), false);
+    let parsed = PhpType::parse("?T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize for nullable return type ?T"
@@ -1406,6 +1444,7 @@ fn test_synthesize_template_conditional_nullable_return() {
 #[test]
 fn test_synthesize_template_conditional_no_class_string_param() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1415,7 +1454,8 @@ fn test_synthesize_template_conditional_no_class_string_param() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_none(),
         "Should NOT synthesize when no @param has class-string<T>"
@@ -1426,6 +1466,7 @@ fn test_synthesize_template_conditional_no_class_string_param() {
 #[test]
 fn test_synthesize_template_conditional_nullable_class_string() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1435,7 +1476,8 @@ fn test_synthesize_template_conditional_nullable_class_string() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize for nullable class-string param ?class-string<T>"
@@ -1446,6 +1488,7 @@ fn test_synthesize_template_conditional_nullable_class_string() {
 #[test]
 fn test_synthesize_template_conditional_class_string_null_union() {
     use phpantom_lsp::docblock::synthesize_template_conditional;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = concat!(
         "/**\n",
@@ -1455,7 +1498,8 @@ fn test_synthesize_template_conditional_class_string_null_union() {
         " */",
     );
     let template_params = vec!["T".to_string()];
-    let result = synthesize_template_conditional(docblock, &template_params, Some("T"), false);
+    let parsed = PhpType::parse("T");
+    let result = synthesize_template_conditional(docblock, &template_params, Some(&parsed), false);
     assert!(
         result.is_some(),
         "Should synthesize for class-string<T>|null union param"
@@ -2216,12 +2260,11 @@ async fn test_method_template_different_param_name() {
     }
 }
 
-// ─── Generic context preservation through clean_type ────────────────────────
+// ─── Generic context preservation ──────────────────────────────────────────
 //
 // These tests verify that when a property or method return type carries
 // generic parameters (e.g. `Collection<int, User>`), the generic context
 // is preserved and applied so that further chaining resolves correctly.
-// This was previously broken because `clean_type` stripped `<…>` generics.
 
 /// Test: a property typed as `Collection<int, User>` via `@var` docblock
 /// should resolve to `Collection` with `TValue → User`, so chaining
@@ -3806,48 +3849,58 @@ async fn test_trait_use_generic_this_context() {
 #[test]
 fn test_extract_generics_tag_use_basic() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @use HasFactory<UserFactory>\n */";
     let result = extract_generics_tag(docblock, "@use");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "HasFactory");
-    assert_eq!(result[0].1, vec!["UserFactory"]);
+    assert_eq!(result[0].1, vec![PhpType::parse("UserFactory")]);
 }
 
 /// Test that @phpstan-use variant is parsed by extract_generics_tag.
 #[test]
 fn test_extract_generics_tag_phpstan_use() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @phpstan-use HasFactory<UserFactory>\n */";
     let result = extract_generics_tag(docblock, "@use");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "HasFactory");
-    assert_eq!(result[0].1, vec!["UserFactory"]);
+    assert_eq!(result[0].1, vec![PhpType::parse("UserFactory")]);
 }
 
 /// Test @use with multiple template parameters.
 #[test]
 fn test_extract_generics_tag_use_multiple_params() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @use Indexable<int, User>\n */";
     let result = extract_generics_tag(docblock, "@use");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "Indexable");
-    assert_eq!(result[0].1, vec!["int", "User"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("int"), PhpType::parse("User")]
+    );
 }
 
 /// Test @use with fully-qualified trait name.
 #[test]
 fn test_extract_generics_tag_use_fqn() {
     use phpantom_lsp::docblock::extract_generics_tag;
+    use phpantom_lsp::php_type::PhpType;
 
     let docblock = "/**\n * @use \\App\\Concerns\\HasFactory<\\App\\Factories\\UserFactory>\n */";
     let result = extract_generics_tag(docblock, "@use");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].0, "App\\Concerns\\HasFactory");
-    assert_eq!(result[0].1, vec!["App\\Factories\\UserFactory"]);
+    assert_eq!(
+        result[0].1,
+        vec![PhpType::parse("\\App\\Factories\\UserFactory")]
+    );
 }
 
 // ─── Method-level @template general case tests ──────────────────────────────
@@ -7083,7 +7136,7 @@ async fn test_inherited_property_bracket_access_template_substitution() {
     }
 }
 
-/// T18: Method-level template parameter resolution inside method body.
+/// Method-level template parameter resolution inside method body.
 /// When `@template T of Builder` and `@param T $query`, accessing
 /// `$query->` inside the method body should resolve T to its bound
 /// (`Builder`) and offer Builder's methods.
@@ -7162,7 +7215,7 @@ async fn test_method_template_param_resolves_to_bound_inside_body() {
     }
 }
 
-/// T18: Method-level template with union bound inside method body.
+/// Method-level template with union bound inside method body.
 /// `@template T of Builder|QueryBuilder` should resolve to both types.
 #[tokio::test]
 async fn test_method_template_union_bound_resolves_inside_body() {
@@ -7243,7 +7296,7 @@ async fn test_method_template_union_bound_resolves_inside_body() {
     }
 }
 
-/// T18: Trait method-level template inside body.
+/// Trait method-level template inside body.
 /// `@template TRelation of Relation` — `$relation->getQuery()` should
 /// resolve via the Relation bound.
 #[tokio::test]
@@ -7317,7 +7370,7 @@ async fn test_trait_method_template_param_resolves_inside_body() {
     }
 }
 
-/// T18: Function-level template parameter resolution inside body.
+/// Function-level template parameter resolution inside body.
 /// Standalone function with `@template T of SomeClass` and `@param T $item`.
 #[tokio::test]
 async fn test_function_template_param_resolves_to_bound_inside_body() {
@@ -7498,6 +7551,498 @@ class KlaviyoClient {
             assert!(
                 method_names.contains(&"getApiInstance"),
                 "Wrapper's own method 'getApiInstance' should still be present, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When `@param Closure(T): void $cb` receives `fn(User $u) => ...`,
+/// the template param `T` should be inferred from the closure's parameter
+/// type (contravariant position).
+#[tokio::test]
+async fn test_template_inferred_from_closure_param_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///closure_param_template.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                        // 0
+        "class User {\n",                                                 // 1
+        "    public function getName(): string {}\n",                     // 2
+        "    public function getEmail(): string {}\n",                    // 3
+        "}\n",                                                            // 4
+        "\n",                                                             // 5
+        "class EventBus {\n",                                             // 6
+        "    /**\n",                                                      // 7
+        "     * @template T\n",                                           // 8
+        "     * @param Closure(T): void $callback\n",                     // 9
+        "     * @return T\n",                                             // 10
+        "     */\n",                                                      // 11
+        "    public function listen(Closure $callback): mixed {}\n",      // 12
+        "}\n",                                                            // 13
+        "\n",                                                             // 14
+        "function test() {\n",                                            // 15
+        "    $bus = new EventBus();\n",                                   // 16
+        "    $result = $bus->listen(fn(User $u): void => $u->save());\n", // 17
+        "    $result->\n",                                                // 18
+        "}\n",                                                            // 19
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 18,
+                character: 13,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getName"),
+                "T should be inferred as User from closure param type, showing 'getName', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getEmail"),
+                "T should be inferred as User from closure param type, showing 'getEmail', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When `@param callable(TCarry, TValue): TCarry $cb` receives a closure
+/// with a typed return, `TCarry` should be inferred from both the return
+/// type *and* the first parameter type.  This models `Collection::reduce`.
+#[tokio::test]
+async fn test_template_inferred_from_closure_return_type_reduce_pattern() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///closure_reduce_template.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                                     // 0
+        "class Decimal {\n",                                                           // 1
+        "    public function add(Decimal $other): Decimal {}\n",                       // 2
+        "    public function getValue(): string {}\n",                                 // 3
+        "}\n",                                                                         // 4
+        "\n",                                                                          // 5
+        "class Collection {\n",                                                        // 6
+        "    /**\n",                                                                   // 7
+        "     * @template TReduceReturnType\n",                                        // 8
+        "     * @param callable(TReduceReturnType, mixed): TReduceReturnType $cb\n",   // 9
+        "     * @param TReduceReturnType $initial\n",                                  // 10
+        "     * @return TReduceReturnType\n",                                          // 11
+        "     */\n",                                                                   // 12
+        "    public function reduce(callable $cb, mixed $initial = null): mixed {}\n", // 13
+        "}\n",                                                                         // 14
+        "\n",                                                                          // 15
+        "function test() {\n",                                                         // 16
+        "    $c = new Collection();\n",                                                // 17
+        "    $total = $c->reduce(fn(Decimal $carry, $item): Decimal => $carry, new Decimal());\n", // 18
+        "    $total->\n", // 19
+        "}\n",            // 20
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 19,
+                character: 12,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"add"),
+                "TReduceReturnType should resolve to Decimal showing 'add', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getValue"),
+                "TReduceReturnType should resolve to Decimal showing 'getValue', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Template param inferred from the second closure parameter position.
+/// `@param Closure(int, T): void $cb` with `fn(int $i, Order $o) => ...`
+/// should infer `T` = `Order`.
+#[tokio::test]
+async fn test_template_inferred_from_closure_second_param() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///closure_second_param_template.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                           // 0
+        "class Order {\n",                                                   // 1
+        "    public function getTotal(): float {}\n",                        // 2
+        "    public function getStatus(): string {}\n",                      // 3
+        "}\n",                                                               // 4
+        "\n",                                                                // 5
+        "class Processor {\n",                                               // 6
+        "    /**\n",                                                         // 7
+        "     * @template T\n",                                              // 8
+        "     * @param Closure(int, T): void $cb\n",                         // 9
+        "     * @return T\n",                                                // 10
+        "     */\n",                                                         // 11
+        "    public function process(Closure $cb): mixed {}\n",              // 12
+        "}\n",                                                               // 13
+        "\n",                                                                // 14
+        "function test() {\n",                                               // 15
+        "    $proc = new Processor();\n",                                    // 16
+        "    $item = $proc->process(fn(int $i, Order $o): void => null);\n", // 17
+        "    $item->\n",                                                     // 18
+        "}\n",                                                               // 19
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 18,
+                character: 11,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getTotal"),
+                "T should be inferred as Order from second closure param, showing 'getTotal', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getStatus"),
+                "T should be inferred as Order from second closure param, showing 'getStatus', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Function-level template inferred from closure param (contravariant).
+/// `@param Closure(T): void $cb` on a standalone function.
+#[tokio::test]
+async fn test_function_template_inferred_from_closure_param_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///func_closure_param_template.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                              // 0
+        "class Product {\n",                                    // 1
+        "    public function getPrice(): float {}\n",           // 2
+        "    public function getSku(): string {}\n",            // 3
+        "}\n",                                                  // 4
+        "\n",                                                   // 5
+        "/**\n",                                                // 6
+        " * @template T\n",                                     // 7
+        " * @param Closure(T): void $cb\n",                     // 8
+        " * @return T\n",                                       // 9
+        " */\n",                                                // 10
+        "function tap(Closure $cb): mixed {}\n",                // 11
+        "\n",                                                   // 12
+        "$result = tap(fn(Product $p): void => $p->save());\n", // 13
+        "$result->\n",                                          // 14
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 9,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getPrice"),
+                "T should be inferred as Product from closure param, showing 'getPrice', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getSku"),
+                "T should be inferred as Product from closure param, showing 'getSku', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Closure with full `function` keyword (not arrow fn) should also have
+/// its parameter type extracted for template inference.
+#[tokio::test]
+async fn test_template_inferred_from_full_closure_param_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///full_closure_param_template.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                                    // 0
+        "class Invoice {\n",                                                          // 1
+        "    public function getAmount(): float {}\n",                                // 2
+        "    public function isPaid(): bool {}\n",                                    // 3
+        "}\n",                                                                        // 4
+        "\n",                                                                         // 5
+        "class Pipeline {\n",                                                         // 6
+        "    /**\n",                                                                  // 7
+        "     * @template T\n",                                                       // 8
+        "     * @param Closure(T): void $handler\n",                                  // 9
+        "     * @return T\n",                                                         // 10
+        "     */\n",                                                                  // 11
+        "    public function handle(Closure $handler): mixed {}\n",                   // 12
+        "}\n",                                                                        // 13
+        "\n",                                                                         // 14
+        "function test() {\n",                                                        // 15
+        "    $pipe = new Pipeline();\n",                                              // 16
+        "    $inv = $pipe->handle(function(Invoice $i): void { $i->process(); });\n", // 17
+        "    $inv->\n",                                                               // 18
+        "}\n",                                                                        // 19
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 18,
+                character: 10,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getAmount"),
+                "T should be inferred as Invoice from full closure param, showing 'getAmount', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"isPaid"),
+                "T should be inferred as Invoice from full closure param, showing 'isPaid', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// `Collection::reduce()` with the real Laravel signature that uses TWO
+/// template params: `TReduceInitial` for the `$initial` arg and
+/// `TReduceReturnType` for the closure return type.  The callable's first
+/// parameter is typed as the union `TReduceInitial|TReduceReturnType`.
+///
+/// PHPantom must infer `TReduceReturnType = Decimal` from the closure's
+/// return type annotation so that `reduce()` returns `Decimal`.
+#[tokio::test]
+async fn test_reduce_two_template_params_union_callable() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///reduce_two_tpl.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                               // 0
+        "class Decimal {\n",                                     // 1
+        "    public function add(Decimal $other): Decimal {}\n", // 2
+        "    public function getValue(): string {}\n",           // 3
+        "}\n",                                                   // 4
+        "\n",                                                    // 5
+        "class OrderProduct {\n",                                // 6
+        "    public float $price;\n",                            // 7
+        "}\n",                                                   // 8
+        "\n",                                                    // 9
+        "/**\n",                                                 // 10
+        " * @template TKey\n",                                   // 11
+        " * @template TValue\n",                                 // 12
+        " */\n",                                                 // 13
+        "class Collection {\n",                                  // 14
+        "    /**\n",                                             // 15
+        "     * @template TReduceInitial\n",                     // 16
+        "     * @template TReduceReturnType\n",                  // 17
+        "     * @param callable(TReduceInitial|TReduceReturnType, TValue, TKey): TReduceReturnType $callback\n", // 18
+        "     * @param TReduceInitial $initial\n", // 19
+        "     * @return TReduceReturnType\n",      // 20
+        "     */\n",                               // 21
+        "    public function reduce(callable $callback, mixed $initial = null): mixed {}\n", // 22
+        "}\n",                                     // 23
+        "\n",                                      // 24
+        "function test() {\n",                     // 25
+        "    /** @var Collection<int, OrderProduct> $products */\n", // 26
+        "    $products = new Collection();\n",     // 27
+        "    $total = $products->reduce(fn(Decimal $carry, OrderProduct $p): Decimal => $carry->add($p->price), new Decimal('0'));\n", // 28
+        "    $total->\n", // 29
+        "}\n",            // 30
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 29,
+                character: 12,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $total->"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"add"),
+                "TReduceReturnType should resolve to Decimal via closure return type, showing 'add', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getValue"),
+                "TReduceReturnType should resolve to Decimal via closure return type, showing 'getValue', got: {:?}",
                 method_names
             );
         }

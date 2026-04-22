@@ -38,6 +38,14 @@
 //!   when the class has `__call` / `__callStatic` / `__get` magic methods.
 //! - **Unknown function diagnostics** — report function calls that
 //!   cannot be resolved to any known function definition.
+//! - **Undefined variable diagnostics** — report variable reads that
+//!   have no prior definition (assignment, parameter, foreach binding,
+//!   catch variable, `global`, `static`, `use()` clause, or `list()`
+//!   destructuring) in the same scope.  Uses a conservative Phase 1
+//!   approach: any assignment anywhere in the function counts as a
+//!   definition.  Suppressed for superglobals, `isset()` / `empty()`
+//!   guards, `compact()` references, `extract()` calls, variable
+//!   variables (`$$`), `@` error suppression, and `@var` annotations.
 //! - **Unresolved member access diagnostics** (opt-in) — report
 //!   `MemberAccess` spans where the **subject type** cannot be resolved
 //!   at all.  Off by default; enable via `[diagnostics]
@@ -51,7 +59,7 @@
 //!   abstract parents.  Reuses the same missing-method detection as the
 //!   "Implement missing methods" code action.
 //!
-//! ## Phase 3 — heavy (external process, dedicated worker)
+//! ## Phase 3 — heavy (external process, dedicated workers)
 //!
 //! - **PHPStan proxy diagnostics** — run PHPStan in editor mode
 //!   (`--tmp-file` / `--instead-of`) and surface its errors as LSP
@@ -65,27 +73,37 @@
 //!   updated and the worker picks it up after the current run finishes.
 //!   Native diagnostics (phases 1 and 2) are never blocked.
 //!
+//! - **PHPCS proxy diagnostics** — run PHP_CodeSniffer via
+//!   `phpcs --report=json` and surface coding standard violations as
+//!   LSP diagnostics.  Auto-detected when `squizlabs/php_codesniffer`
+//!   is in `require-dev`; configurable under `[phpcs]`.
+//!
+//!   PHPCS runs in its own **dedicated worker task**, following the
+//!   same pattern as the PHPStan worker.  At most one PHPCS process
+//!   runs at a time, with the same debounce and pending-URI slot
+//!   design.
+//!
 //! ## Publishing strategy
 //!
 //! Fast diagnostics are **always pushed** immediately via
-//! `textDocument/publishDiagnostics`, merged with cached slow and
-//! PHPStan results so the editor never shows a gap.  This gives
+//! `textDocument/publishDiagnostics`, merged with cached slow,
+//! PHPStan, and PHPCS results so the editor never shows a gap.  This gives
 //! instant feedback (strikethrough, dimming) regardless of client
 //! capabilities.
 //!
 //! Slow diagnostics are then computed by the background worker:
 //!
 //! - **Pull mode** — the worker caches the full result (fast + fresh
-//!   slow + cached PHPStan) and sends `workspace/diagnostic/refresh`.
-//!   The editor re-pulls and gets the complete set.  No second push
-//!   is needed.
+//!   slow + cached PHPStan + cached PHPCS) and sends
+//!   `workspace/diagnostic/refresh`.  The editor re-pulls and gets
+//!   the complete set.  No second push is needed.
 //!
 //! - **Push mode** (fallback) — the worker pushes the full result
-//!   (fast + fresh slow + cached PHPStan) via `publishDiagnostics`,
-//!   replacing the Phase 1 snapshot.
+//!   (fast + fresh slow + cached PHPStan + cached PHPCS) via
+//!   `publishDiagnostics`, replacing the Phase 1 snapshot.
 //!
-//! - **PHPStan worker** — caches its results and triggers a re-deliver
-//!   (refresh in pull mode, full re-publish in push mode).
+//! - **PHPStan / PHPCS workers** — each caches its results and triggers
+//!   a re-deliver (refresh in pull mode, full re-publish in push mode).
 //!
 //! Diagnostics are published **asynchronously** via [`Backend::schedule_diagnostics`].
 //! On every `did_change` event a version counter is bumped and the
@@ -101,7 +119,10 @@ mod argument_count;
 mod deprecated;
 pub(crate) mod helpers;
 mod implementation_errors;
+mod invalid_class_kind;
 mod syntax_errors;
+mod type_errors;
+pub(crate) mod undefined_variables;
 pub(crate) mod unknown_classes;
 pub(crate) mod unknown_functions;
 pub(crate) mod unknown_members;
@@ -114,6 +135,7 @@ use std::sync::atomic::Ordering;
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
+use crate::phpcs;
 use crate::phpstan;
 use crate::util::ranges_overlap;
 
@@ -150,6 +172,23 @@ impl Backend {
         content: &str,
         out: &mut Vec<Diagnostic>,
     ) {
+        // Activate the chain resolution cache so that all slow
+        // diagnostic collectors share cached intermediate chain
+        // prefix results (e.g. `$model->where(...)` resolved once
+        // and reused by `$model->where(...)->whereNotNull(...)`).
+        // This eliminates O(depth²) re-resolution of shared chain
+        // prefixes across unknown_member, argument_count, type_error,
+        // and deprecated collectors.
+        let _chain_guard = crate::completion::resolver::with_chain_resolution_cache();
+
+        // Activate the callable target cache so that the same method
+        // on the same class is resolved at most once across all
+        // diagnostic collectors.  For example, `Builder::where` is
+        // looked up once and reused for every `$q->where(...)`,
+        // `$query->where(...)`, and `Product::query()->where(...)`
+        // call site in the file.
+        let _callable_guard = crate::completion::call_resolution::with_callable_target_cache();
+
         self.collect_unknown_class_diagnostics(uri_str, content, out);
         self.collect_unknown_member_diagnostics(uri_str, content, out);
         self.collect_unknown_function_diagnostics(uri_str, content, out);
@@ -157,12 +196,16 @@ impl Backend {
         // inside collect_unknown_member_diagnostics (in the Untyped arm)
         // to avoid a second full walk with duplicate type resolution.
         self.collect_argument_count_diagnostics(uri_str, content, out);
+        self.collect_type_error_diagnostics(uri_str, content, out);
         self.collect_implementation_error_diagnostics(uri_str, content, out);
         self.collect_deprecated_diagnostics(uri_str, content, out);
+        self.collect_undefined_variable_diagnostics(uri_str, content, out);
+        self.collect_invalid_class_kind_diagnostics(uri_str, content, out);
     }
 
     /// Build a merged diagnostic set from fresh fast diagnostics,
-    /// cached slow diagnostics, and cached PHPStan diagnostics.
+    /// cached slow diagnostics, cached PHPStan diagnostics, and
+    /// cached PHPCS diagnostics.
     ///
     /// Stale PHPStan diagnostics are eagerly pruned when the current
     /// file content no longer matches the condition that triggered
@@ -200,6 +243,12 @@ impl Backend {
                     cache.insert(uri_str.to_string(), filtered.clone());
                 }
                 merged.extend(filtered);
+            }
+        }
+        {
+            let cache = self.phpcs_last_diags.lock();
+            if let Some(prev_phpcs) = cache.get(uri_str) {
+                merged.extend(prev_phpcs.iter().cloned());
             }
         }
         deduplicate_diagnostics(&mut merged);
@@ -352,6 +401,15 @@ fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
         );
     }
 
+    // ── return.unusedType — unused type removed from return type ─────
+    if identifier == "return.unusedType" {
+        return crate::code_actions::phpstan::remove_unused_return_type::is_remove_unused_return_type_stale(
+            content,
+            diag.range.start.line as usize,
+            &diag.message,
+        );
+    }
+
     false
 }
 
@@ -385,7 +443,7 @@ fn extract_checked_exception_fqn(message: &str) -> Option<String> {
     let start = message.find(marker)? + marker.len();
     let rest = &message[start..];
     let end = rest.find(" but")?;
-    let fqn = rest[..end].trim().trim_start_matches('\\');
+    let fqn = crate::util::strip_fqn_prefix(rest[..end].trim());
     if fqn.is_empty() {
         return None;
     }
@@ -521,35 +579,28 @@ fn enclosing_docblock_text(content: &str, diag_line: usize) -> String {
 /// Check whether `scope` (typically a single docblock) contains
 /// `@throws <short_name>` (case-insensitive).
 fn scope_has_throws_tag(scope: &str, short_name: &str) -> bool {
-    use mago_docblock::document::TagKind;
-
-    let info = match crate::docblock::parser::parse_docblock_for_tags(scope) {
-        Some(info) => info,
-        None => return false,
-    };
-
     let lower = short_name.to_lowercase();
-    for tag in info.tags_by_kind(TagKind::Throws) {
-        let rest = tag.description.trim();
-        if let Some(tag_type) = rest.split_whitespace().next() {
-            let tag_short = tag_type.trim_start_matches('\\');
-            let tag_short = tag_short.rsplit('\\').next().unwrap_or(tag_short);
-            if tag_short.to_lowercase() == lower {
-                return true;
-            }
-        }
-    }
-    false
+    crate::docblock::extract_throws_tags(scope)
+        .iter()
+        .any(|ty| {
+            ty.base_name()
+                .map(crate::util::short_name)
+                .is_some_and(|s| s.eq_ignore_ascii_case(&lower))
+        })
 }
 
 /// How long to wait after the last keystroke before publishing diagnostics.
 const DIAGNOSTIC_DEBOUNCE_MS: u64 = 500;
 
 /// How long to wait after the last keystroke before running PHPStan.
-///
 /// Longer than the normal debounce because PHPStan is extremely
 /// expensive.  We want the user to be truly idle before spawning it.
 const PHPSTAN_DEBOUNCE_MS: u64 = 2_000;
+
+/// How long to wait after the last keystroke before running PHPCS.
+/// Same rationale as [`PHPSTAN_DEBOUNCE_MS`]: PHPCS is an external
+/// process, so we wait for the user to be idle.
+const PHPCS_DEBOUNCE_MS: u64 = 2_000;
 
 impl Backend {
     /// Deliver diagnostics for a single file.
@@ -619,23 +670,6 @@ impl Backend {
             let _cache_guard = crate::virtual_members::with_active_resolved_class_cache(
                 &self.resolved_class_cache,
             );
-            // Activate the diagnostic subject cache so that
-            // collect_unknown_member_diagnostics and
-            // collect_argument_count_diagnostics share resolved
-            // subjects instead of re-resolving them independently.
-            let _subj_guard = crate::completion::resolver::with_diagnostic_subject_cache();
-
-            // Provide scope boundaries so the diagnostic subject cache
-            // can distinguish variables in different methods of the same
-            // class (prevents cross-method cache pollution).
-            if let Some(sm) = self.symbol_maps.read().get(uri_str) {
-                crate::completion::resolver::set_diagnostic_subject_cache_scopes(
-                    sm.scopes.clone(),
-                    sm.var_defs.clone(),
-                    sm.narrowing_blocks.clone(),
-                    sm.assert_narrowing_offsets.clone(),
-                );
-            }
 
             self.collect_slow_diagnostics(uri_str, content, &mut slow_diagnostics);
         }
@@ -646,7 +680,7 @@ impl Backend {
             cache.insert(uri_str.to_string(), slow_diagnostics.clone());
         }
 
-        // Build the full set: fast + fresh slow + cached PHPStan.
+        // Build the full set: fast + fresh slow + cached PHPStan + cached PHPCS.
         let mut full = fast_diagnostics;
         full.extend(slow_diagnostics);
         let phpstan_before: Vec<Diagnostic> = {
@@ -657,6 +691,12 @@ impl Backend {
             }
         };
         full.extend(phpstan_before.iter().cloned());
+        {
+            let cache = self.phpcs_last_diags.lock();
+            if let Some(phpcs_diags) = cache.get(uri_str) {
+                full.extend(phpcs_diags.iter().cloned());
+            }
+        }
         deduplicate_diagnostics(&mut full);
 
         // Filter out any diagnostics suppressed by codeAction/resolve.
@@ -727,8 +767,9 @@ impl Backend {
         // Wake the worker (no-op if it is already awake).
         self.diag_notify.notify_one();
 
-        // Also schedule a PHPStan run for this file.
-        self.schedule_phpstan(uri);
+        // Also schedule PHPStan and PHPCS runs for this file.
+        self.schedule_phpstan(uri.clone());
+        self.schedule_phpcs(uri);
     }
 
     /// Invalidate diagnostics for all open files after a cross-file change.
@@ -1035,12 +1076,179 @@ impl Backend {
         }
     }
 
+    // ── PHPCS worker ────────────────────────────────────────────────
+
+    /// Schedule a PHPCS run for a single file.
+    ///
+    /// Only the most recent file is kept: if the user switches files or
+    /// types rapidly, earlier requests are superseded.  This is
+    /// intentional — PHPCS is too slow to queue up multiple files.
+    fn schedule_phpcs(&self, uri: String) {
+        *self.phpcs_pending_uri.lock() = Some(uri);
+        self.phpcs_notify.notify_one();
+    }
+
+    /// Long-lived background task that runs PHPCS on pending files.
+    ///
+    /// Spawned once during `initialized`, alongside the main diagnostic
+    /// worker and the PHPStan worker.  This task is completely
+    /// independent: native diagnostics and PHPStan are never blocked.
+    ///
+    /// ## Serialization guarantee
+    ///
+    /// At most one PHPCS process runs at a time.  The worker loop:
+    ///
+    /// 1. Wait for a notification (new edit arrived).
+    /// 2. Debounce: sleep [`PHPCS_DEBOUNCE_MS`], checking whether new
+    ///    edits arrived.  If so, restart the debounce.
+    /// 3. Snapshot the pending URI and file content.
+    /// 4. Resolve the PHPCS binary (skip if not found / disabled).
+    /// 5. Run PHPCS (blocking — this is the slow part).
+    /// 6. Cache the results and re-publish diagnostics for the file.
+    /// 7. Loop back to step 1.
+    ///
+    /// If the user edits while step 5 is in progress, the pending URI
+    /// is updated.  When step 5 finishes, the worker sees the new
+    /// notification and loops back to step 1, starting a fresh run
+    /// with the latest content.
+    pub(crate) async fn phpcs_worker(&self) {
+        loop {
+            if self.shutdown_flag.load(Ordering::Acquire) {
+                return;
+            }
+
+            // ── Step 1: wait for work ───────────────────────────────
+            self.phpcs_notify.notified().await;
+
+            if self.shutdown_flag.load(Ordering::Acquire) {
+                return;
+            }
+
+            // Drain any extra stored permits (same rationale as the
+            // PHPStan worker).
+            let _ =
+                tokio::time::timeout(std::time::Duration::ZERO, self.phpcs_notify.notified()).await;
+
+            // ── Step 2: debounce ────────────────────────────────────
+            loop {
+                let version_before = self.diag_version.load(Ordering::Acquire);
+                tokio::time::sleep(std::time::Duration::from_millis(PHPCS_DEBOUNCE_MS)).await;
+                let version_after = self.diag_version.load(Ordering::Acquire);
+                if version_before == version_after {
+                    break;
+                }
+                // More edits arrived — loop and debounce again.
+            }
+
+            // ── Step 3: snapshot the pending URI ────────────────────
+            let uri = {
+                let mut pending = self.phpcs_pending_uri.lock();
+                pending.take()
+            };
+            let uri = match uri {
+                Some(u) => u,
+                None => continue,
+            };
+
+            // Snapshot the file content.
+            let content = {
+                let files = self.open_files.read();
+                match files.get(&uri) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                }
+            };
+
+            // ── Step 4: resolve PHPCS binary ────────────────────────
+            let config = self.config();
+            if config.phpcs.is_disabled() {
+                continue;
+            }
+
+            let file_path = match uri.parse::<Url>().ok().and_then(|u| u.to_file_path().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let workspace_root = self.workspace_root.read().clone();
+            let workspace_root = match workspace_root {
+                Some(root) => root,
+                None => continue,
+            };
+
+            let bin_dir: Option<String> = crate::composer::read_composer_package(&workspace_root)
+                .map(|pkg| crate::composer::get_bin_dir(&pkg));
+
+            let resolved = match phpcs::resolve_phpcs(
+                Some(&workspace_root),
+                &config.phpcs,
+                bin_dir.as_deref(),
+            ) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // ── Step 5: run PHPCS (the slow part) ───────────────────
+            let phpcs_config = config.phpcs.clone();
+            let shutdown_flag = Arc::clone(&self.shutdown_flag);
+            let phpcs_diags = {
+                let result = tokio::task::spawn_blocking(move || {
+                    phpcs::run_phpcs(
+                        &resolved,
+                        &content,
+                        &file_path,
+                        &workspace_root,
+                        &phpcs_config,
+                        &shutdown_flag,
+                    )
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(diags)) => diags,
+                    Ok(Err(_e)) => {
+                        // PHPCS failures are silently ignored to
+                        // avoid flooding the editor with errors when
+                        // PHPCS is misconfigured or the project
+                        // doesn't use it.
+                        continue;
+                    }
+                    Err(_join_err) => {
+                        // The blocking task panicked or was cancelled.
+                        continue;
+                    }
+                }
+            };
+
+            // ── Step 6: cache results and re-publish ────────────────
+            // Verify the file is still open before caching (same
+            // rationale as the PHPStan worker).
+            let content = {
+                let files = self.open_files.read();
+                match files.get(&uri) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                }
+            };
+
+            {
+                let mut cache = self.phpcs_last_diags.lock();
+                cache.insert(uri.clone(), phpcs_diags);
+            }
+
+            // Re-deliver diagnostics for this file so the editor sees
+            // the fresh PHPCS results merged with native diagnostics.
+            self.publish_diagnostics_for_file(&uri, &content).await;
+        }
+    }
+
     /// Clear diagnostics for a file (e.g. on `did_close`).
     pub(crate) async fn clear_diagnostics_for_file(&self, uri_str: &str) {
         // Remove cached slow diagnostics so we don't leak memory.
         self.diag_last_slow.lock().remove(uri_str);
-        // Remove cached PHPStan diagnostics too.
+        // Remove cached PHPStan and PHPCS diagnostics too.
         self.phpstan_last_diags.lock().remove(uri_str);
+        self.phpcs_last_diags.lock().remove(uri_str);
         // Remove pull-diagnostic caches.
         self.diag_result_ids.lock().remove(uri_str);
         self.diag_last_full.lock().remove(uri_str);

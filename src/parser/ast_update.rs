@@ -260,7 +260,7 @@ impl Backend {
                 }
                 // Resolve exception class names in @throws tags.
                 for throw in &mut func.throws {
-                    let resolved = Self::resolve_type_string_via_php_type(throw, &resolver);
+                    let resolved = throw.resolve_names(&resolver);
                     if resolved != *throw {
                         *throw = resolved;
                     }
@@ -651,9 +651,10 @@ impl Backend {
                 .collect();
 
             // Resolve custom collection class name to FQN
-            if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.as_ref()) {
-                let resolved = Self::resolve_name(coll, use_map, namespace);
-                class.laravel_mut().custom_collection = Some(resolved);
+            if let Some(coll) = class.laravel().and_then(|l| l.custom_collection.clone()) {
+                let resolver =
+                    |name: &str| -> String { Self::resolve_name(name, use_map, namespace) };
+                class.laravel_mut().custom_collection = Some(coll.resolve_names(&resolver));
             }
 
             // Resolve cast class names to FQN so that custom cast
@@ -817,6 +818,13 @@ impl Backend {
                         if resolved != *hint {
                             param.type_hint = Some(resolved);
                         }
+                    }
+                }
+                // Resolve exception class names in @throws tags.
+                for throw in &mut method.throws {
+                    let resolved = throw.resolve_names(method_resolver);
+                    if resolved != *throw {
+                        *throw = resolved;
                     }
                 }
             }
@@ -998,20 +1006,27 @@ impl Backend {
         }
     }
 
+    /// Resolve class-like identifiers within a [`PhpType`] to their
+    /// fully-qualified forms, using `PhpType::resolve_names()`.
+    ///
+    /// This is for callers that already have a parsed `PhpType`, avoiding
+    /// a redundant parse→stringify→parse cycle.
+    fn resolve_type_via_php_type(ty: &PhpType, resolver: &dyn Fn(&str) -> String) -> PhpType {
+        ty.resolve_names(resolver)
+    }
+
     /// Resolve class-like identifiers within a type string to their
     /// fully-qualified forms, using `PhpType::resolve_names()`.
     ///
     /// Parses the string into a `PhpType`, resolves names via the given
     /// resolver, and converts back to a string.  This is used for
-    /// string-typed fields (e.g. `throws`, `native_return_type`,
+    /// string-typed fields (e.g. `native_return_type`,
     /// type alias definitions) where the caller does not have a `PhpType`.
     fn resolve_type_string_via_php_type(
         type_str: &str,
         resolver: &dyn Fn(&str) -> String,
     ) -> String {
-        let parsed = PhpType::parse(type_str);
-        let resolved = parsed.resolve_names(resolver);
-        resolved.to_string()
+        Self::resolve_type_via_php_type(&PhpType::parse(type_str), resolver).to_string()
     }
 
     /// Resolve a class name to its fully-qualified form given a use_map and

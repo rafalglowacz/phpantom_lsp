@@ -256,27 +256,3 @@ fn consume_union_intersection_suffix(s: &str, pos: usize) -> usize {
     }
     end
 }
-
-/// Clean a raw type string from a docblock.
-///
-/// Strips trailing punctuation (`.`, `,`) that could leak from
-/// docblock descriptions.  Everything else is preserved as-is:
-///
-///   - `Foo|null` stays `Foo|null` (nullable unions are kept)
-///   - `?Foo` stays `?Foo` (nullable shorthand is kept)
-///   - `\App\Models\User` stays `\App\Models\User` (FQN prefix kept)
-///   - `Collection<int, User>` stays `Collection<int, User>` (generics kept)
-///
-/// Use `PhpType::parse(s).base_name()` when you need just the
-/// unparameterised, non-nullable class name.
-pub fn clean_type(raw: &str) -> String {
-    // Strip trailing punctuation that could leak from docblocks
-    // (e.g. trailing `.` or `,` in descriptions).
-    let s = raw.trim_end_matches(['.', ',']);
-
-    // Return the punctuation-stripped string as-is.  Nullable
-    // information (`Foo|null`, `?Foo`) is preserved so that
-    // downstream consumers (hover, type display, template
-    // substitution) see the full type including nullability.
-    s.to_string()
-}

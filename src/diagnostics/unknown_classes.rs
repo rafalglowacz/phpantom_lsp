@@ -105,7 +105,7 @@ impl Backend {
             }
 
             let (ref_name, is_fqn) = match &span.kind {
-                SymbolKind::ClassReference { name, is_fqn } => (name.as_str(), *is_fqn),
+                SymbolKind::ClassReference { name, is_fqn, .. } => (name.as_str(), *is_fqn),
                 _ => continue,
             };
 
@@ -125,13 +125,6 @@ impl Backend {
             } else {
                 resolve_to_fqn(ref_name, &file_use_map, &file_namespace)
             };
-
-            // ── Skip names that are always resolvable ───────────────────
-            // `self`, `static`, `parent`, `$this` are context-dependent
-            // keywords and should never trigger an unknown-class warning.
-            if is_self_like(ref_name) {
-                continue;
-            }
 
             // ── Skip @phpstan-type / @psalm-type aliases ────────────────
             // Type aliases defined via `@phpstan-type`, `@psalm-type`, or
@@ -158,13 +151,10 @@ impl Backend {
             // ── Attempt resolution through all phases ───────────────────
 
             // 1. Local classes (same file)
-            if local_classes.iter().any(|c| {
-                c.name == ref_name
-                    || match &file_namespace {
-                        Some(ns) => format!("{}\\{}", ns, c.name) == fqn,
-                        None => c.name == fqn,
-                    }
-            }) {
+            if local_classes
+                .iter()
+                .any(|c| c.name == ref_name || c.fqn() == fqn)
+            {
                 continue;
             }
 
@@ -261,12 +251,6 @@ fn compute_attribute_ranges(content: &str) -> Vec<ByteRange> {
     }
 
     ranges
-}
-
-/// Returns `true` for context-dependent keywords that resolve to the
-/// enclosing class and should never be flagged as unknown.
-fn is_self_like(name: &str) -> bool {
-    matches!(name, "self" | "static" | "parent" | "$this")
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1012,6 +996,139 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Star wildcards in generic positions must not cause false unknown_class diagnostics, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ── No-namespace file tests ─────────────────────────────────────────
+
+    #[test]
+    fn diagnostic_when_namespaced_class_in_ast_map() {
+        // Reproduces issue #59: when `Carbon\Carbon` is already parsed
+        // and in the ast_map, `find_or_load_class("Carbon")` must NOT
+        // match it — the bare name is a global-scope lookup.  Without
+        // the fix the no-namespace fallback at step 3 resolves the bare
+        // name to the namespaced class, suppressing the diagnostic.
+        let backend = Backend::new_test();
+
+        // Parse the dependency so Carbon\Carbon is in the ast_map.
+        let uri_dep = "file:///vendor/carbon.php";
+        let content_dep = "<?php\nnamespace Carbon;\n\nclass Carbon {}\n";
+        backend.update_ast(uri_dep, content_dep);
+        {
+            let mut idx = backend.class_index.write();
+            idx.insert("Carbon\\Carbon".to_string(), uri_dep.to_string());
+        }
+
+        let uri = "file:///test.php";
+        let content = "<?php\n\nfunction () {\n    return Carbon::now();\n};\n";
+
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.iter().any(|d| d.message.contains("Carbon")),
+            "expected unknown-class diagnostic for Carbon even when Carbon\\Carbon is in ast_map, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn diagnostic_for_unknown_class_in_no_namespace_file() {
+        // In a file without a namespace, an unresolved class name should
+        // still produce a diagnostic.
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = "<?php\n\nnew Request();\n";
+
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.iter().any(|d| d.message.contains("Request")),
+            "expected unknown-class diagnostic for Request in no-namespace file, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn diagnostic_for_unknown_static_class_in_no_namespace_file() {
+        // Reproduces issue #59: `Carbon::now()` in a file without a
+        // namespace should emit a diagnostic for unresolved `Carbon`.
+        let backend = Backend::new_test();
+        let uri = "file:///test.php";
+        let content = "<?php\n\nfunction () {\n    return Carbon::now();\n};\n";
+
+        let diags = collect(&backend, uri, content);
+        assert!(
+            diags.iter().any(|d| d.message.contains("Carbon")),
+            "expected unknown-class diagnostic for Carbon in no-namespace file, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_imported_class_in_no_namespace_file() {
+        // A `use` statement in a no-namespace file should suppress the
+        // diagnostic, just like in a namespaced file.
+        let backend = Backend::new_test();
+
+        // Register the class so it can be found.
+        let uri_dep = "file:///carbon.php";
+        let content_dep = "<?php\nnamespace Carbon;\n\nclass Carbon {}\n";
+        backend.update_ast(uri_dep, content_dep);
+        {
+            let mut idx = backend.class_index.write();
+            idx.insert("Carbon\\Carbon".to_string(), uri_dep.to_string());
+        }
+
+        let uri = "file:///test.php";
+        let content =
+            "<?php\n\nuse Carbon\\Carbon;\n\nfunction () {\n    return Carbon::now();\n};\n";
+
+        let diags = collect(&backend, uri, content);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Carbon")),
+            "should not flag imported Carbon class, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_global_class_via_class_index_lazy_load() {
+        // A global-namespace class (like Mockery) that is discovered by
+        // `scan_autoload_files` and placed in class_index — but NOT yet
+        // parsed into ast_map — should be lazily loaded via Phase 0 of
+        // find_or_load_class and suppress the diagnostic.
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let dep_path = dir.path().join("Mockery.php");
+        std::fs::write(&dep_path, "<?php\nclass Mockery {}\n").expect("failed to write temp file");
+        let dep_uri = crate::util::path_to_uri(&dep_path);
+
+        let backend = Backend::new_test();
+
+        // Only populate class_index (simulating scan_autoload_files).
+        // Do NOT call update_ast for the dependency — it must be lazily
+        // parsed by find_or_load_class Phase 0.
+        {
+            let mut idx = backend.class_index.write();
+            idx.insert("Mockery".to_string(), dep_uri);
+        }
+
+        let uri = "file:///test.php";
+        let content = concat!(
+            "<?php\n",
+            "namespace Tests\\Feature;\n",
+            "\n",
+            "use Mockery;\n",
+            "\n",
+            "class ApiTest {\n",
+            "    public function test(): void {\n",
+            "        Mockery::mock();\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let diags = collect(&backend, uri, content);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Mockery")),
+            "should not flag Mockery resolved via class_index lazy load, got: {:?}",
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }

@@ -88,7 +88,10 @@ fn scope_return_type_void_defaults() {
     let method = make_method("scopeActive", Some("void"));
     assert_eq!(
         scope_return_type(&method),
-        "Illuminate\\Database\\Eloquent\\Builder<static>"
+        PhpType::Generic(
+            "Illuminate\\Database\\Eloquent\\Builder".to_string(),
+            vec![PhpType::static_()],
+        )
     );
 }
 
@@ -97,7 +100,10 @@ fn scope_return_type_none_defaults() {
     let method = make_method("scopeActive", None);
     assert_eq!(
         scope_return_type(&method),
-        "Illuminate\\Database\\Eloquent\\Builder<static>"
+        PhpType::Generic(
+            "Illuminate\\Database\\Eloquent\\Builder".to_string(),
+            vec![PhpType::static_()],
+        )
     );
 }
 
@@ -109,14 +115,20 @@ fn scope_return_type_explicit() {
     );
     assert_eq!(
         scope_return_type(&method),
-        "Illuminate\\Database\\Eloquent\\Builder<static>"
+        PhpType::Generic(
+            "Illuminate\\Database\\Eloquent\\Builder".to_string(),
+            vec![PhpType::static_()],
+        )
     );
 }
 
 #[test]
 fn scope_return_type_custom() {
     let method = make_method("scopeActive", Some("\\App\\Builders\\UserBuilder"));
-    assert_eq!(scope_return_type(&method), "\\App\\Builders\\UserBuilder");
+    assert_eq!(
+        scope_return_type(&method),
+        PhpType::Named("\\App\\Builders\\UserBuilder".to_string())
+    );
 }
 
 // ── build_scope_methods (convention) ─────────────────────────────────

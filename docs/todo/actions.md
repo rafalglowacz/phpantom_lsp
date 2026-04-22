@@ -388,3 +388,266 @@ these eagerly, removing the else changes semantics).
 
 **Code action kind:** `refactor.rewrite`.
 
+---
+
+### A35. Convert to arrow function
+
+**Impact: Low-Medium · Effort: Low**
+
+Convert a single-expression anonymous function to an arrow function:
+`function($x) { return $x * 2; }` → `fn($x) => $x * 2`.
+
+Only offer the conversion when ALL of the following are true:
+
+- The closure body contains exactly one statement, and that statement
+  is a `return` with an expression.
+- The closure does not have a `use()` clause that captures by reference
+  (`&$var`). Arrow functions capture by value automatically; by-ref
+  semantics differ.
+- The closure's return type (native hint, `@return` docblock, or
+  inferred from callable context) is NOT `void` or `never`. Arrow
+  functions always return their expression value. Converting a
+  `void`-returning closure produces code that silently changes
+  behaviour when the caller inspects the return value (e.g.
+  `array_walk`, `register_shutdown_function`, `Event::listen`).
+- The closure does not have a return type hint of `void` or `never`
+  explicitly declared.
+- `php_version >= 7.4`.
+
+**Why the void/never guard matters:** Several PHP functions and
+framework APIs behave differently depending on whether a callback
+returns a value. `array_walk` ignores the return, but `array_filter`
+uses it. A closure typed `function(): void { doSomething(); }` makes
+the intent explicit. Converting it to `fn() => doSomething()` changes
+the return value from `null` (void) to whatever `doSomething()` returns,
+which can silently break filtering, mapping, or event-handling logic.
+
+**Code action kind:** `refactor.rewrite`.
+
+---
+
+### A37. Simplify with `?->` (nullsafe operator)
+
+**Impact: Low-Medium · Effort: Medium**
+
+Replace null-checked method/property chains with PHP 8.0's nullsafe
+operator:
+
+```php
+// Before
+if ($user !== null) {
+    $name = $user->getName();
+}
+
+$city = null;
+if ($user !== null) {
+    $city = $user->getAddress()->getCity();
+}
+
+// After
+$name = $user?->getName();
+
+$city = $user?->getAddress()?->getCity();
+```
+
+#### When the conversion is safe
+
+- The if-body contains exactly one statement: an assignment or a
+  standalone expression statement using the checked variable.
+- The null check is `$var !== null`, `$var !== null`, `!is_null($var)`,
+  or `isset($var)` (for a single variable, not array access).
+- There is no `else` / `elseif` branch. An else branch means the
+  developer wants to handle the null case explicitly, which `?->`
+  cannot express.
+- The variable is used only with `->` access in the body (not passed
+  to a function, not reassigned, not used in a binary expression).
+- For chained access (`$a->b()->c()`), every intermediate `->` must
+  also be converted to `?->` because the nullsafe operator
+  short-circuits the entire chain.
+- If the body assigns to a variable (`$x = $var->foo()`), the
+  resulting `$x = $var?->foo()` produces `null` when `$var` is null,
+  which matches the pre-existing state (the assignment was skipped
+  entirely, so `$x` was either unset or previously null).
+
+#### Implementation
+
+- Walk the AST for `Statement::If` nodes where the condition is a
+  null check on a single variable.
+- Verify the body meets the safety criteria above.
+- Replace the entire if-block with the body statement, substituting
+  every `->` on the checked variable's access chain with `?->`.
+- When the if-block only contains a standalone expression (no
+  assignment), emit just the expression with `?->`.
+
+**Code action kind:** `refactor.rewrite`.
+**Guard:** `php_version >= 8.0`.
+
+---
+
+### A38. Convert if/elseif chain to switch
+
+**Impact: Low-Medium · Effort: Medium**
+
+Convert an if/elseif chain that compares the same variable or
+expression against different values into a `switch` statement:
+
+```php
+// Before
+if ($status === 'active') {
+    doActive();
+} elseif ($status === 'inactive') {
+    doInactive();
+} elseif ($status === 'pending') {
+    doPending();
+} else {
+    doDefault();
+}
+
+// After
+switch ($status) {
+    case 'active':
+        doActive();
+        break;
+    case 'inactive':
+        doInactive();
+        break;
+    case 'pending':
+        doPending();
+        break;
+    default:
+        doDefault();
+        break;
+}
+```
+
+#### When the conversion is safe
+
+- Every condition in the chain compares the same subject expression
+  against a constant value using `===` or `==` (all arms must use the
+  same comparison operator).
+- The subject expression is a simple expression (variable, property
+  access, method call) that should not have side effects when evaluated
+  once in the switch head instead of repeatedly in each condition.
+- With `===`, the conversion is semantically exact only for scalar
+  values. Switch uses loose comparison internally, so strict-equality
+  chains are converted with a comment noting the semantic difference,
+  or the action is only offered for `==` chains.
+
+#### Implementation
+
+- Walk the AST for `Statement::If` nodes that have at least one
+  `elseif` branch.
+- Extract the subject from the first condition's comparison. Verify
+  all subsequent conditions compare the same subject (by source text
+  or AST structure equality).
+- Build a `switch` statement: each condition value becomes a `case`,
+  the if/elseif body becomes the case body with `break;` appended
+  (unless the body ends with `return`, `throw`, or `continue`).
+- If the chain has a trailing `else`, convert it to `default:`.
+- Replace the entire if/elseif/else block with the switch.
+
+**Code action kind:** `refactor.rewrite`.
+
+---
+
+### A39. Convert to string interpolation
+
+**Impact: Low-Medium · Effort: Low**
+
+Replace simple string concatenation with double-quoted string
+interpolation:
+
+```php
+// Before
+$greeting = 'Hello ' . $name . ', welcome!';
+$msg = "Total: " . $order->getTotal();
+
+// After
+$greeting = "Hello {$name}, welcome!";
+$msg = "Total: {$order->getTotal()}";
+```
+
+#### When the conversion is safe
+
+- The concatenation contains at least one variable or simple
+  expression (`$var`, `$var->prop`, `$arr['key']`) and at least one
+  string literal.
+- No interpolated part contains characters that would need escaping
+  in a double-quoted string (`$`, `"`, `\`) beyond what is already
+  escaped, unless the tool handles the escaping.
+- Existing single-quoted string literals in the concatenation are
+  re-quoted as double-quoted, with `$` and `"` characters escaped.
+- Method calls like `$obj->method()` require curly-brace syntax
+  (`{$obj->method()}`), which is valid in PHP.
+- Integer, float, and boolean literals are left as concatenation
+  (they don't benefit from interpolation and `true`/`false` would
+  print as `1`/empty string).
+- The concatenation must be a top-level expression or RHS of an
+  assignment, not nested inside a function call argument where
+  readability is subjective.
+
+#### Implementation
+
+- Walk the AST for `Expression::Concat` (binary `.` operator) nodes.
+- Collect the flattened chain of concat operands (recursively unwrap
+  nested concats).
+- If the chain is all literals or all variables (no mix), skip.
+- Build a double-quoted string: literal parts are inserted verbatim
+  (with `$` and `"` escaped), variable/expression parts are wrapped
+  in `{...}`.
+- Replace the entire concat expression with the interpolated string.
+
+**Code action kind:** `refactor.rewrite`.
+
+---
+
+### A40. Convert to instance variable
+
+**Impact: Medium · Effort: Medium**
+
+Convert a local variable inside a method body into an instance property
+on the enclosing class, updating all references within the method.
+
+#### Trigger
+
+Cursor is on a local variable assignment (e.g. `$result = ...`) inside
+a method body.
+
+#### Behaviour
+
+1. Create a new `private` property declaration on the enclosing class
+   (placed after the last existing property, or before the first
+   method if no properties exist).
+2. Replace `$result = expr` with `$this->result = expr`.
+3. Replace all other occurrences of `$result` within the same method
+   scope with `$this->result`.
+4. If the variable's type can be inferred (from type hints, docblocks,
+   or assignment context), add a type declaration to the property.
+
+#### Edge cases
+
+- If a property with the same name already exists, do not offer the
+  action.
+- Variables used across multiple methods (via separate assignments)
+  should only convert the occurrences in the current method scope.
+- Closure-captured variables (`use ($result)`) inside the method need
+  their capture updated to `use ($this)` or the reference replaced
+  with `$this->result` depending on context (closures can access
+  `$this` implicitly in non-static contexts).
+- Static methods: offer a `private static` property and use
+  `self::$result` instead of `$this->result`.
+- Constructor promoted parameters should not be offered this action
+  (they are already instance variables).
+
+#### Implementation
+
+- Detect that the cursor is on a variable assignment inside a method.
+- Check the enclosing class for an existing property with the same
+  name.
+- Generate the property declaration with the inferred type.
+- Produce a `WorkspaceEdit` with edits for the property declaration,
+  the assignment rewrite, and all reference replacements within the
+  method.
+
+**Code action kind:** `refactor.extract`.
+

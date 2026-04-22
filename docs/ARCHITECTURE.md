@@ -250,7 +250,7 @@ The handler (`definition/type_definition.rs`) reuses the same symbol-map lookup 
 
    | `SymbolKind`                                                 | Resolution path                                                                                                                                                                                                  |
    | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | `Variable`                                                   | `resolve_variable_type_string` (type-string path) with fallback to `resolve_variable_types` (ClassInfo path). `$this` resolves to the enclosing class.                                                           |
+   | `Variable`                                                   | `resolve_variable_type` (type-string path) with fallback to `resolve_variable_types` (ClassInfo path). `$this` resolves to the enclosing class.                                                           |
    | `MemberAccess`                                               | `resolve_target_classes` finds the subject's class, then the method's `return_type` or the property's `type_hint` is extracted. `self`/`static`/`$this` in return types are replaced with the owning class name. |
    | `SelfStaticParent`                                           | `self`/`static` resolve to the enclosing class; `parent` resolves to the parent class.                                                                                                                           |
    | `ClassReference`                                             | The type is the class itself.                                                                                                                                                                                    |
@@ -551,9 +551,14 @@ resolve_class_fully(class)
 ├── 1. resolve_class_with_inheritance(class)
 │   └── Returns base-resolved ClassInfo
 │
-└── 2. For each provider (in priority order):
-    └── if applies_to(class): merge provide(class) into result
-        └── Skips members that already exist (no overwrites)
+├── 2. For each provider (in priority order):
+│   └── if applies_to(class): merge provide(class) into result
+│       └── Skips members that already exist (no overwrites)
+│
+├── 3. Merge members from implemented interfaces
+│
+└── 4. apply_laravel_patches(class, fqn)
+    └── Post-resolution fixups for Laravel classes (see below)
 ```
 
 Provider priority order (highest first):
@@ -565,6 +570,18 @@ Two providers are currently registered in `default_providers()`:
 
 - **`LaravelModelProvider`** (`virtual_members/laravel.rs`): synthesizes virtual members for classes extending `Illuminate\Database\Eloquent\Model`. Produces relationship properties (methods returning `HasMany`, `HasOne`, `BelongsTo`, etc. generate a virtual property typed from the relationship's generic parameters), scope methods (both the `scopeActive` naming convention and the `#[Scope]` attribute from Laravel 11+ are supported; either style becomes `active()` as both static and instance), Builder-as-static forwarding (`User::where()->get()` resolves end-to-end), accessors (legacy `getXAttribute()` and modern `Attribute` casts), and cast properties (`$casts` array or `casts()` method entries are mapped to PHP types like `datetime` to `\Carbon\Carbon`, `boolean` to `bool`, custom cast classes to their `get()` return type). Highest priority among virtual member providers. Scope methods are also injected onto `Builder<Model>` instances via a post-generic-substitution hook in `type_hint_to_classes_depth` (see "Scope Methods on Builder Instances" below).
 - **`PHPDocProvider`** (`virtual_members/phpdoc.rs`): parses `@method`, `@property`, `@property-read`, `@property-write`, and `@mixin` tags from the class-level docblock stored in `ClassInfo.class_docblock`. Explicit `@method` / `@property` tags are not parsed eagerly during AST extraction; instead, the raw docblock string is preserved and parsed lazily when `provide` is called. For `@mixin` tags, the provider loads the referenced classes and merges their public members. Within the provider, explicit tags take precedence over mixin members. Recurses into mixin-of-mixin chains up to `MAX_MIXIN_DEPTH`.
+
+### Laravel Class Patches
+
+After virtual members and interface members are merged, `resolve_class_fully_inner` calls `apply_laravel_patches(class, fqn)` from `virtual_members/laravel/patches.rs`. Unlike virtual member providers (which *add* new members), patches *modify* existing members' type information to fix framework-specific type inaccuracies that break chain resolution.
+
+The patch system is centralized in a single module with one entry point. Dispatching is based on the fully-qualified class name and trait usage. Current patches:
+
+1. **`Eloquent\Builder::__call` / `__callStatic` return type.** Laravel's `Builder::__call()` is declared as returning `mixed`, but in practice always returns `$this` (scope dispatch, macro dispatch, Query\Builder forwarding). The patch overrides the return type to `static` so that method chains through unknown calls preserve the Builder type.
+
+2. **`Conditionable::when()` / `unless()` return type.** The trait declares `@return $this|TWhenReturnType` but the unresolved method-level template parameter `TWhenReturnType` prevents `is_self_like_type` from recognizing the return as self-referential, breaking method chain resolution on Builder and Collection. The patch replaces the return type with `$this`. Applied to the `Conditionable` trait itself, to `Eloquent\Builder` (which uses the trait), and to any class whose `used_traits` includes `Conditionable`.
+
+3. **Bare `Builder` return types on scope methods.** Handled separately in `scopes.rs` (`is_bare_builder_type`) because it runs at scope-injection time (post-generic-substitution), not during `resolve_class_fully_inner`. Documented in the patch module as part of the inventory but not dispatched from it.
 
 ### Precedence Rules
 
@@ -959,11 +976,16 @@ Files that are not open (vendor files loaded via PSR-4 on demand) do not get a s
 
 ## Diagnostic Philosophy
 
-PHPantom's diagnostics assert **type coverage**, not bug detection. The question they answer is: "can the LSP resolve every class, member, and function call in this project?" When the answer is yes, completion works everywhere with no dead spots, and downstream tools like PHPStan get the type information they need to find real bugs at every strictness level.
+PHPantom earns trust through two promises:
 
-This is a deliberate division of labour. PHPStan only complains about missing types at levels 6, 9, and 10. PHPantom fills those gaps cheaply and immediately so PHPStan can focus on logic errors rather than fighting incomplete type information. The two tools complement each other at any PHPStan level: PHPantom rejects structural problems fast (unknown class, unknown member, wrong argument count, unimplemented interface method), and PHPStan hunts for semantic bugs (type mismatches, unreachable code, null safety violations) with full type context available.
+1. **Provide suggestions for everything the developer expects.** Completion, hover, go-to-definition, and every other LSP feature should work on every symbol in the project with no dead spots.
+2. **Stay silent on everything the developer knows works.** Every diagnostic PHPantom reports must be something that is genuinely wrong, not something that is merely imprecise or unconventional. If the code runs without errors, PHPantom should not complain about it.
 
-The native diagnostic categories reflect this philosophy:
+Most PHP developers have learned to ignore IDE errors. They have seen tools produce walls of false positives from bugs in the inference engine, mistakes in stubs, or overly strict rules applied to code that works perfectly well in production. The result is that developers treat red squiggles as noise and test in production to see if a problem is real. PHPantom exists to break that cycle. When a diagnostic appears, it must mean something. A single false positive costs more trust than ten missed true positives, because it teaches the developer to stop reading.
+
+### Type Coverage Diagnostics
+
+The core diagnostic categories assert **type coverage**: can the LSP resolve every class, member, and function call in the project?
 
 | Diagnostic | What it asserts |
 |---|---|
@@ -973,10 +995,35 @@ The native diagnostic categories reflect this philosophy:
 | Unknown members | Every member access resolves to a declared member. |
 | Unknown functions | Every function call resolves to a declared function. |
 | Argument count | Call sites match the target's parameter count. |
+| Argument type mismatch | Every argument's type is definitely compatible with the parameter's declared type. |
 | Implementation errors | Concrete classes satisfy their interface/abstract contracts. |
+| Undefined variables | Every variable read has a prior definition in scope. |
 | Deprecated usage | The developer is aware of deprecation. |
 
-None of these are type-compatibility checks, dead-code analysis, or control-flow reasoning. That is by design. A project that passes all of PHPantom's diagnostics has 100% type coverage from the LSP's perspective: every symbol is resolvable, every completion trigger produces results, and every hover shows a type.
+A project that passes all of these has 100% type coverage from the LSP's perspective: every symbol is resolvable, every completion trigger produces results, and every hover shows a type.
+
+This also serves as a deliberate division of labour with PHPStan. PHPStan only complains about missing types at levels 6, 9, and 10. PHPantom fills those gaps cheaply and immediately so PHPStan can focus on logic errors rather than fighting incomplete type information. PHPantom rejects structural problems fast (unknown class, unknown member, wrong argument count, unimplemented interface method), and PHPStan hunts for semantic bugs with full type context available.
+
+### Type Compatibility Diagnostics: Yes / No / Maybe
+
+Argument type mismatch diagnostics (`type_error.argument`) go beyond coverage into type-compatibility territory. Here the risk of false positives is highest, because PHP is a dynamically typed language with pervasive implicit coercion, and real-world codebases are full of patterns that are technically imprecise but functionally correct.
+
+Every type check is classified into one of three buckets:
+
+- **Yes** (definitely compatible). `Cat` passed to `Animal` where `Cat extends Animal`. No diagnostic.
+- **No** (definitely incompatible). `array` passed to `int`. Diagnostic reported.
+- **Maybe** (might work, might not). `?Carbon` passed to `Carbon`, bare `array` passed to `array<string>`, `HtmlString` passed to `string`. No diagnostic.
+
+**Only "no" produces a diagnostic.** The "maybe" bucket is deliberately wide. If there is any reasonable interpretation under which the code could work at runtime, PHPantom stays silent. Examples of "maybe":
+
+- **Nullable to non-nullable** (`?Carbon` to `Carbon`). The developer may have null-checked before the call. We cannot see the guard clause from the call site alone.
+- **Bare array to typed array** (`array` to `array<string>`). A bare `array` is untyped. It might contain strings. We cannot prove otherwise.
+- **Stringable objects to string** (`HtmlString` to `string`). PHP calls `__toString()` at runtime. We follow PHP's runtime behaviour.
+- **Int to string**. PHP coerces integers to strings in many contexts and we cannot know the `strict_types` setting.
+- **`list<X>` and `array<int, X>`**. Used interchangeably in practice. array<int, X> might have sequential-keys in actuality.
+- **Interface to concrete subtype** (`CarbonInterface` to `Carbon`). The interface is broader, but in practice the value is almost always the expected concrete type.
+
+This conservatism is the foundation for trust. Once developers learn that PHPantom's red squiggles are never false alarms, they start paying attention to them. At that point, a stricter mode can be offered as an opt-in for teams that want more help. But the default must be: if we are not certain, we stay silent.
 
 ## Analyze Command
 
@@ -994,9 +1041,15 @@ Output uses PHPStan's table format (with progress bar and coloured output) so th
 
 ## Diagnostic Worker Architecture
 
-Diagnostics run in a background `tokio::spawn` task so they never block completion, hover, or signature help. The worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slot) are shared by `Arc::clone`, so the worker sees every mutation the main `Backend` makes.
+Diagnostics run in three independent background `tokio::spawn` tasks so they never block completion, hover, or signature help:
 
-Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the worker is spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the worker would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
+1. **Native diagnostic worker** — collects fast (syntax errors, unused imports, deprecated usage) and slow (unknown classes/members/functions, argument count, implementation errors) diagnostics. Debounces at 500 ms.
+2. **PHPStan worker** — runs PHPStan in editor mode (`--tmp-file` / `--instead-of`). Debounces at 2 000 ms.
+3. **PHPCS worker** — runs PHP_CodeSniffer via `phpcs --report=json` with stdin piping. Debounces at 2 000 ms.
+
+Each worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slots) are shared by `Arc::clone`, so every worker sees all mutations the main `Backend` makes. The PHPStan and PHPCS workers each have their own notify handle, pending-URI slot, and diagnostic cache so they run independently of each other and of the native diagnostic worker.
+
+Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the workers are spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the workers would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
 
 ## Name Resolution
 

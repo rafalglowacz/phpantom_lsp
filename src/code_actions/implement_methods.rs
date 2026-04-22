@@ -152,6 +152,15 @@ pub(crate) fn collect_missing_methods(
 
     // ── Interfaces ──────────────────────────────────────────────────────
     for iface_name in &class.interfaces {
+        // Skip implicit BackedEnum/UnitEnum interfaces on enums.
+        // PHP provides from(), tryFrom(), and cases() automatically
+        // at runtime — they don't need to be declared in the enum body.
+        if class.kind == crate::types::ClassLikeKind::Enum {
+            let stripped = iface_name.strip_prefix('\\').unwrap_or(iface_name);
+            if stripped == "BackedEnum" || stripped == "UnitEnum" {
+                continue;
+            }
+        }
         collect_from_interface(
             iface_name,
             class_loader,
@@ -439,8 +448,7 @@ fn format_params(
         // Type hint — prefer native type hint (what appears in PHP source)
         // over the docblock-enriched one.
         if let Some(ref hint) = param.native_type_hint {
-            let hint_str = hint.to_string();
-            let shortened = shorten_type(&hint_str, use_map, file_namespace);
+            let shortened = shorten_php_type_direct(hint, use_map, file_namespace);
             s.push_str(&shortened);
             s.push(' ');
         }
@@ -474,17 +482,22 @@ fn format_return_type(
     file_namespace: &Option<String>,
 ) -> String {
     // Prefer native return type (the actual PHP source-level type hint).
-    let return_type_str = method.return_type_str();
-    let native_ret_str = method.native_return_type.as_ref().map(|t| t.to_string());
-    let hint = native_ret_str.as_deref().or(return_type_str.as_deref());
-
-    match hint {
-        Some(t) if !t.is_empty() => {
-            let shortened = shorten_type(t, use_map, file_namespace);
-            format!(": {}", shortened)
+    if let Some(ref native) = method.native_return_type {
+        let shortened = shorten_php_type_direct(native, use_map, file_namespace);
+        if !shortened.is_empty() {
+            return format!(": {}", shortened);
         }
-        _ => String::new(),
     }
+
+    // Fall back to the docblock return type.
+    if let Some(ref ret) = method.return_type {
+        let shortened = shorten_php_type_direct(ret, use_map, file_namespace);
+        if !shortened.is_empty() {
+            return format!(": {}", shortened);
+        }
+    }
+
+    String::new()
 }
 
 /// Shorten a fully-qualified type name using the file's use-map and
@@ -493,122 +506,26 @@ fn format_return_type(
 /// For example, if the file has `use App\Models\User;`, then
 /// `App\Models\User` becomes `User`.  If the class is in the same
 /// namespace, the namespace prefix is dropped.
+#[cfg(test)]
 fn shorten_type(
     type_str: &str,
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
 ) -> String {
     let parsed = PhpType::parse(type_str);
-    let shortened = shorten_php_type(&parsed, use_map, file_namespace);
-    shortened.to_string()
+    parsed
+        .resolve_names(&|name| shorten_single_type(name, use_map, file_namespace))
+        .to_string()
 }
 
-/// Recursively walk a [`PhpType`] tree and shorten every named type.
-fn shorten_php_type(
+/// Shorten a [`PhpType`] directly, without round-tripping through a string.
+fn shorten_php_type_direct(
     ty: &PhpType,
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
-) -> PhpType {
-    match ty {
-        PhpType::Named(name) => PhpType::Named(shorten_single_type(name, use_map, file_namespace)),
-        PhpType::Nullable(inner) => {
-            PhpType::Nullable(Box::new(shorten_php_type(inner, use_map, file_namespace)))
-        }
-        PhpType::Union(types) => PhpType::Union(
-            types
-                .iter()
-                .map(|t| shorten_php_type(t, use_map, file_namespace))
-                .collect(),
-        ),
-        PhpType::Intersection(types) => PhpType::Intersection(
-            types
-                .iter()
-                .map(|t| shorten_php_type(t, use_map, file_namespace))
-                .collect(),
-        ),
-        PhpType::Generic(name, args) => PhpType::Generic(
-            shorten_single_type(name, use_map, file_namespace),
-            args.iter()
-                .map(|t| shorten_php_type(t, use_map, file_namespace))
-                .collect(),
-        ),
-        PhpType::Array(inner) => {
-            PhpType::Array(Box::new(shorten_php_type(inner, use_map, file_namespace)))
-        }
-        PhpType::ClassString(inner) => PhpType::ClassString(
-            inner
-                .as_ref()
-                .map(|t| Box::new(shorten_php_type(t, use_map, file_namespace))),
-        ),
-        PhpType::InterfaceString(inner) => PhpType::InterfaceString(
-            inner
-                .as_ref()
-                .map(|t| Box::new(shorten_php_type(t, use_map, file_namespace))),
-        ),
-        PhpType::KeyOf(inner) => {
-            PhpType::KeyOf(Box::new(shorten_php_type(inner, use_map, file_namespace)))
-        }
-        PhpType::ValueOf(inner) => {
-            PhpType::ValueOf(Box::new(shorten_php_type(inner, use_map, file_namespace)))
-        }
-        PhpType::IndexAccess(target, index) => PhpType::IndexAccess(
-            Box::new(shorten_php_type(target, use_map, file_namespace)),
-            Box::new(shorten_php_type(index, use_map, file_namespace)),
-        ),
-        PhpType::Callable {
-            kind,
-            params,
-            return_type,
-        } => PhpType::Callable {
-            kind: kind.clone(),
-            params: params
-                .iter()
-                .map(|p| crate::php_type::CallableParam {
-                    type_hint: shorten_php_type(&p.type_hint, use_map, file_namespace),
-                    variadic: p.variadic,
-                    optional: p.optional,
-                })
-                .collect(),
-            return_type: return_type
-                .as_ref()
-                .map(|t| Box::new(shorten_php_type(t, use_map, file_namespace))),
-        },
-        PhpType::Conditional {
-            param,
-            negated,
-            condition,
-            then_type,
-            else_type,
-        } => PhpType::Conditional {
-            param: param.clone(),
-            negated: *negated,
-            condition: Box::new(shorten_php_type(condition, use_map, file_namespace)),
-            then_type: Box::new(shorten_php_type(then_type, use_map, file_namespace)),
-            else_type: Box::new(shorten_php_type(else_type, use_map, file_namespace)),
-        },
-        PhpType::ArrayShape(entries) => PhpType::ArrayShape(
-            entries
-                .iter()
-                .map(|e| crate::php_type::ShapeEntry {
-                    key: e.key.clone(),
-                    optional: e.optional,
-                    value_type: shorten_php_type(&e.value_type, use_map, file_namespace),
-                })
-                .collect(),
-        ),
-        PhpType::ObjectShape(entries) => PhpType::ObjectShape(
-            entries
-                .iter()
-                .map(|e| crate::php_type::ShapeEntry {
-                    key: e.key.clone(),
-                    optional: e.optional,
-                    value_type: shorten_php_type(&e.value_type, use_map, file_namespace),
-                })
-                .collect(),
-        ),
-        // Leaf types that contain no nested type names.
-        PhpType::IntRange(..) | PhpType::Literal(..) | PhpType::Raw(..) => ty.clone(),
-    }
+) -> String {
+    ty.resolve_names(&|name| shorten_single_type(name, use_map, file_namespace))
+        .to_string()
 }
 
 /// Shorten a single named type string.

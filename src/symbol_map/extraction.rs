@@ -10,11 +10,12 @@ use mago_syntax::ast::sequence::TokenSeparatedSequence;
 use mago_syntax::ast::*;
 
 use super::docblock::{
-    class_ref_span, extract_docblock_symbols, extract_param_var_spans,
+    class_ref_span, class_ref_span_ctx, extract_docblock_symbols, extract_param_var_spans,
     get_docblock_text_with_offset, is_navigable_type,
 };
 use super::{
-    CallSite, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, VarDefKind, VarDefSite,
+    CallSite, ClassRefContext, SelfStaticParentKind, SymbolKind, SymbolMap, SymbolSpan,
+    TemplateParamDef, VarDefKind, VarDefSite,
 };
 use crate::util::strip_fqn_prefix;
 
@@ -89,6 +90,19 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
 
     for stmt in program.statements.iter() {
         extract_from_statement(stmt, &mut ctx, 0);
+    }
+
+    // ── Sweep all docblock trivia for floating references ───────────
+    // Docblocks attached to classes, functions, methods, properties, and
+    // certain statements are already processed during the AST walk above.
+    // However, docblocks in other positions (e.g. inline `/** @see ... */`
+    // inside array literals or after expressions) are never visited.
+    // Scan every docblock trivia entry and extract symbols; the dedup
+    // step below removes any duplicates from already-processed docblocks.
+    for t in program.trivia.iter() {
+        if t.kind == TriviaKind::DocBlockComment {
+            let _tpl = extract_docblock_symbols(t.value, t.span.start.offset, &mut ctx.spans);
+        }
     }
 
     // Sort by start offset for binary search.
@@ -277,7 +291,7 @@ fn extract_from_statement<'a>(
             }
             for catch in try_stmt.catch_clauses.iter() {
                 // Catch type hint is a navigable class reference.
-                extract_from_hint(&catch.hint, &mut ctx.spans);
+                extract_from_hint_ctx(&catch.hint, &mut ctx.spans, ClassRefContext::Catch);
                 // The caught variable.
                 if let Some(ref var) = catch.variable {
                     let var_name = var.name.strip_prefix('$').unwrap_or(var.name).to_string();
@@ -531,10 +545,11 @@ fn extract_from_class<'a>(class: &'a Class<'a>, ctx: &mut ExtractionCtx<'a>) {
     if let Some(ref extends) = class.extends {
         for ident in extends.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::ExtendsClass,
             ));
         }
     }
@@ -543,10 +558,11 @@ fn extract_from_class<'a>(class: &'a Class<'a>, ctx: &mut ExtractionCtx<'a>) {
     if let Some(ref implements) = class.implements {
         for ident in implements.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::Implements,
             ));
         }
     }
@@ -590,10 +606,11 @@ fn extract_from_interface<'a>(iface: &'a Interface<'a>, ctx: &mut ExtractionCtx<
     if let Some(ref extends) = iface.extends {
         for ident in extends.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::ExtendsInterface,
             ));
         }
     }
@@ -669,10 +686,11 @@ fn extract_from_enum<'a>(enum_def: &'a Enum<'a>, ctx: &mut ExtractionCtx<'a>) {
     if let Some(ref implements) = enum_def.implements {
         for ident in implements.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::Implements,
             ));
         }
     }
@@ -759,10 +777,11 @@ fn extract_from_class_member<'a>(member: &'a ClassLikeMember<'a>, ctx: &mut Extr
 
             for ident in trait_use.trait_names.iter() {
                 let raw = ident.value().to_string();
-                ctx.spans.push(class_ref_span(
+                ctx.spans.push(class_ref_span_ctx(
                     ident.span().start.offset,
                     ident.span().end.offset,
                     &raw,
+                    ClassRefContext::TraitUse,
                 ));
             }
 
@@ -1022,7 +1041,7 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
         // Attributes (PHP 8) on the parameter.
         extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
         if let Some(ref hint) = param.hint {
-            extract_from_hint(hint, &mut ctx.spans);
+            extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
         }
         // Docblock attached to the parameter itself (e.g. promoted
         // constructor properties with `/** @var list<Subscription> */`).
@@ -1059,7 +1078,7 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
 
     // Return type hint.
     if let Some(ref return_type) = method.return_type_hint {
-        extract_from_hint(&return_type.hint, &mut ctx.spans);
+        extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Method body.
@@ -1102,7 +1121,7 @@ fn extract_from_property<'a>(property: &Property<'a>, ctx: &mut ExtractionCtx<'a
 
     // Property type hint.
     if let Some(hint) = property.hint() {
-        extract_from_hint(hint, &mut ctx.spans);
+        extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Property variable names and default value expressions.
@@ -1184,7 +1203,7 @@ fn extract_from_class_constant<'a>(
 
     // Type hint on constant (PHP 8.3+).
     if let Some(ref hint) = constant.hint {
-        extract_from_hint(hint, &mut ctx.spans);
+        extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Constant value expressions.
@@ -1262,7 +1281,7 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
         // Attributes (PHP 8) on the parameter.
         extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
         if let Some(ref hint) = param.hint {
-            extract_from_hint(hint, &mut ctx.spans);
+            extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
         }
         // Docblock attached to the parameter itself (e.g. `/** @var list<Foo> */`).
         if let Some((doc_text, doc_offset)) =
@@ -1301,7 +1320,7 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
 
     // Return type hint.
     if let Some(ref return_type) = func.return_type_hint {
-        extract_from_hint(&return_type.hint, &mut ctx.spans);
+        extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Function body.
@@ -1322,7 +1341,11 @@ fn extract_from_use_statement(use_stmt: &Use<'_>, spans: &mut Vec<SymbolSpan>) {
         spans.push(SymbolSpan {
             start: item.name.span().start.offset,
             end: item.name.span().end.offset,
-            kind: SymbolKind::ClassReference { name, is_fqn: true },
+            kind: SymbolKind::ClassReference {
+                name,
+                is_fqn: true,
+                context: ClassRefContext::Other,
+            },
         });
     }
 
@@ -1363,58 +1386,55 @@ fn extract_from_use_statement(use_stmt: &Use<'_>, spans: &mut Vec<SymbolSpan>) {
 
 // ─── Type hint extractor ────────────────────────────────────────────────────
 
-fn extract_from_hint(hint: &Hint<'_>, spans: &mut Vec<SymbolSpan>) {
+/// Extract navigable symbols from a type hint, tagging emitted
+/// `ClassReference` spans with the given [`ClassRefContext`].
+fn extract_from_hint_ctx(hint: &Hint<'_>, spans: &mut Vec<SymbolSpan>, ref_ctx: ClassRefContext) {
     match hint {
         Hint::Identifier(ident) => {
             let raw = ident.value().to_string();
             let name_clean = strip_fqn_prefix(&raw).to_string();
             if is_navigable_type(&name_clean) {
-                spans.push(class_ref_span(
+                spans.push(class_ref_span_ctx(
                     ident.span().start.offset,
                     ident.span().end.offset,
                     &raw,
+                    ref_ctx,
                 ));
             }
         }
         Hint::Nullable(nullable) => {
-            extract_from_hint(nullable.hint, spans);
+            extract_from_hint_ctx(nullable.hint, spans, ref_ctx);
         }
         Hint::Union(union) => {
-            extract_from_hint(union.left, spans);
-            extract_from_hint(union.right, spans);
+            extract_from_hint_ctx(union.left, spans, ref_ctx);
+            extract_from_hint_ctx(union.right, spans, ref_ctx);
         }
         Hint::Intersection(intersection) => {
-            extract_from_hint(intersection.left, spans);
-            extract_from_hint(intersection.right, spans);
+            extract_from_hint_ctx(intersection.left, spans, ref_ctx);
+            extract_from_hint_ctx(intersection.right, spans, ref_ctx);
         }
         Hint::Parenthesized(paren) => {
-            extract_from_hint(paren.hint, spans);
+            extract_from_hint_ctx(paren.hint, spans, ref_ctx);
         }
         Hint::Self_(kw) => {
             spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "self".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Self_),
             });
         }
         Hint::Static(kw) => {
             spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "static".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Static),
             });
         }
         Hint::Parent(kw) => {
             spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "parent".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Parent),
             });
         }
         // Scalar / built-in type hints are not navigable.
@@ -1439,9 +1459,7 @@ fn extract_from_expression<'a>(
                 ctx.spans.push(SymbolSpan {
                     start: dv.span.start.offset,
                     end: dv.span.end.offset,
-                    kind: SymbolKind::SelfStaticParent {
-                        keyword: "static".to_string(),
-                    },
+                    kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::This),
                 });
             } else {
                 let name = raw.strip_prefix('$').unwrap_or(raw).to_string();
@@ -1458,27 +1476,21 @@ fn extract_from_expression<'a>(
             ctx.spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "self".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Self_),
             });
         }
         Expression::Static(kw) => {
             ctx.spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "static".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Static),
             });
         }
         Expression::Parent(kw) => {
             ctx.spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "parent".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Parent),
             });
         }
 
@@ -1500,37 +1512,32 @@ fn extract_from_expression<'a>(
             match inst.class {
                 Expression::Identifier(ident) => {
                     let raw = ident.value().to_string();
-                    ctx.spans.push(class_ref_span(
+                    ctx.spans.push(class_ref_span_ctx(
                         ident.span().start.offset,
                         ident.span().end.offset,
                         &raw,
+                        ClassRefContext::New,
                     ));
                 }
                 Expression::Self_(kw) => {
                     ctx.spans.push(SymbolSpan {
                         start: kw.span.start.offset,
                         end: kw.span.end.offset,
-                        kind: SymbolKind::SelfStaticParent {
-                            keyword: "self".to_string(),
-                        },
+                        kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Self_),
                     });
                 }
                 Expression::Static(kw) => {
                     ctx.spans.push(SymbolSpan {
                         start: kw.span.start.offset,
                         end: kw.span.end.offset,
-                        kind: SymbolKind::SelfStaticParent {
-                            keyword: "static".to_string(),
-                        },
+                        kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Static),
                     });
                 }
                 Expression::Parent(kw) => {
                     ctx.spans.push(SymbolSpan {
                         start: kw.span.start.offset,
                         end: kw.span.end.offset,
-                        kind: SymbolKind::SelfStaticParent {
-                            keyword: "parent".to_string(),
-                        },
+                        kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Parent),
                     });
                 }
                 _ => {
@@ -1756,10 +1763,15 @@ fn extract_from_expression<'a>(
             match assign.lhs {
                 Expression::Variable(Variable::Direct(dv)) => {
                     let name = dv.name.strip_prefix('$').unwrap_or(dv.name).to_string();
+                    let kind = if assign.operator.is_assign() {
+                        VarDefKind::Assignment
+                    } else {
+                        VarDefKind::CompoundAssignment
+                    };
                     ctx.var_defs.push(VarDefSite {
                         offset: dv.span.start.offset,
                         name,
-                        kind: VarDefKind::Assignment,
+                        kind,
                         scope_start,
                         effective_from: effective,
                     });
@@ -1791,7 +1803,22 @@ fn extract_from_expression<'a>(
         // ── Binary operations ──
         Expression::Binary(bin) => {
             extract_from_expression(bin.lhs, ctx, scope_start);
-            extract_from_expression(bin.rhs, ctx, scope_start);
+            // Tag the RHS of `instanceof` with the Instanceof context.
+            if bin.operator.is_instanceof() {
+                if let Expression::Identifier(ident) = bin.rhs {
+                    let raw = ident.value().to_string();
+                    ctx.spans.push(class_ref_span_ctx(
+                        ident.span().start.offset,
+                        ident.span().end.offset,
+                        &raw,
+                        ClassRefContext::Instanceof,
+                    ));
+                } else {
+                    extract_from_expression(bin.rhs, ctx, scope_start);
+                }
+            } else {
+                extract_from_expression(bin.rhs, ctx, scope_start);
+            }
         }
 
         // ── Unary operations ──
@@ -1846,7 +1873,7 @@ fn extract_from_expression<'a>(
                 // Attributes (PHP 8) on the parameter.
                 extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
                 if let Some(ref hint) = param.hint {
-                    extract_from_hint(hint, &mut ctx.spans);
+                    extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
                 }
                 let name = param
                     .variable
@@ -1899,7 +1926,7 @@ fn extract_from_expression<'a>(
                 }
             }
             if let Some(ref return_type) = closure.return_type_hint {
-                extract_from_hint(&return_type.hint, &mut ctx.spans);
+                extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
             }
             for s in closure.body.statements.iter() {
                 extract_from_statement(s, ctx, closure_scope_start);
@@ -1919,7 +1946,7 @@ fn extract_from_expression<'a>(
                 // Attributes (PHP 8) on the parameter.
                 extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
                 if let Some(ref hint) = param.hint {
-                    extract_from_hint(hint, &mut ctx.spans);
+                    extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
                 }
                 let name = param
                     .variable
@@ -1946,7 +1973,7 @@ fn extract_from_expression<'a>(
                 }
             }
             if let Some(ref return_type) = arrow.return_type_hint {
-                extract_from_hint(&return_type.hint, &mut ctx.spans);
+                extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
             }
             extract_from_expression(arrow.expression, ctx, arrow_scope_start);
         }
@@ -2302,27 +2329,21 @@ fn emit_class_expr_span<'a>(
             ctx.spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "self".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Self_),
             });
         }
         Expression::Static(kw) => {
             ctx.spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "static".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Static),
             });
         }
         Expression::Parent(kw) => {
             ctx.spans.push(SymbolSpan {
                 start: kw.span.start.offset,
                 end: kw.span.end.offset,
-                kind: SymbolKind::SelfStaticParent {
-                    keyword: "parent".to_string(),
-                },
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::Parent),
             });
         }
         _ => {
@@ -2454,7 +2475,7 @@ fn expr_to_subject_text(expr: &Expression<'_>) -> String {
         Expression::Call(Call::Method(mc)) => {
             let obj = expr_to_subject_text(mc.object);
             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
-                let args_text = format_first_class_arg(&mc.argument_list.arguments);
+                let args_text = format_all_call_args(&mc.argument_list.arguments);
                 format!("{}->{}({})", obj, ident.value, args_text)
             } else {
                 format!("{}->?()", obj)
@@ -2463,7 +2484,7 @@ fn expr_to_subject_text(expr: &Expression<'_>) -> String {
         Expression::Call(Call::NullSafeMethod(mc)) => {
             let obj = expr_to_subject_text(mc.object);
             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
-                let args_text = format_first_class_arg(&mc.argument_list.arguments);
+                let args_text = format_all_call_args(&mc.argument_list.arguments);
                 format!("{}?->{}({})", obj, ident.value, args_text)
             } else {
                 format!("{}?->?()", obj)
@@ -2472,7 +2493,7 @@ fn expr_to_subject_text(expr: &Expression<'_>) -> String {
         Expression::Call(Call::StaticMethod(sc)) => {
             let class_text = expr_to_subject_text(sc.class);
             if let ClassLikeMemberSelector::Identifier(ident) = &sc.method {
-                let args_text = format_first_class_arg(&sc.argument_list.arguments);
+                let args_text = format_all_call_args(&sc.argument_list.arguments);
                 format!("{}::{}({})", class_text, ident.value, args_text)
             } else {
                 format!("{}::?()", class_text)
@@ -2480,7 +2501,7 @@ fn expr_to_subject_text(expr: &Expression<'_>) -> String {
         }
         Expression::Call(Call::Function(fc)) => {
             let func_text = expr_to_subject_text(fc.function);
-            let args_text = format_first_class_arg(&fc.argument_list.arguments);
+            let args_text = format_all_call_args(&fc.argument_list.arguments);
             // When the callee is a parenthesized expression (e.g.
             // `($this->formatter)()`), wrap the inner text back in
             // parens so that `SubjectExpr::parse` sees
@@ -2594,77 +2615,128 @@ fn expr_to_subject_text(expr: &Expression<'_>) -> String {
     }
 }
 
-/// Format the first argument of a call expression as source text.
+/// Format all arguments of a call expression as a comma-separated string.
 ///
-/// Preserves `Foo::class`, string/integer/float literals, `null`,
-/// `true`, `false`, and `$variable` references so that conditional
-/// return-type resolution (e.g. `$guard is null ? Factory : Guard`)
-/// can inspect the argument value.  Returns an empty string when the
-/// first argument cannot be represented as simple text.
-fn format_first_class_arg(args: &TokenSeparatedSequence<'_, Argument<'_>>) -> String {
-    if let Some(first) = args.iter().next() {
-        let arg_expr = match first {
+/// Each argument is serialized to a text representation that preserves
+/// enough information for downstream consumers:
+/// - Conditional return-type resolution needs the first argument value
+///   (`Foo::class`, string literals, `null`, etc.)
+/// - Template parameter inference needs closure/arrow-function signatures
+///   (parameter types and return type) and constructor calls (`new Foo()`)
+///
+/// When an argument cannot be represented, it is emitted as `...` so that
+/// positional indices remain correct for template binding resolution.
+fn format_all_call_args(args: &TokenSeparatedSequence<'_, Argument<'_>>) -> String {
+    let mut parts = Vec::new();
+    for arg in args.iter() {
+        let arg_expr = match arg {
             Argument::Positional(pos) => pos.value,
             Argument::Named(named) => named.value,
         };
-        match arg_expr {
-            // Foo::class
-            Expression::Access(Access::ClassConstant(cca)) => {
-                if let ClassLikeConstantSelector::Identifier(ident) = &cca.constant
-                    && ident.value == "class"
-                {
-                    let class_text = expr_to_subject_text(cca.class);
-                    return format!("{}::class", class_text);
-                }
+        let text = format_arg_expr(arg_expr);
+        parts.push(text);
+    }
+    // Trim trailing `...` placeholders so that simple single-arg calls
+    // (the common case) don't produce `method(Foo::class, ...)`.
+    while parts.last().is_some_and(|p| p == "...") {
+        parts.pop();
+    }
+    parts.join(", ")
+}
+
+/// Format a single argument expression to text.
+///
+/// Handles the same cases as the old `format_first_class_arg` plus
+/// closure and arrow-function expressions.  For closures the full body
+/// is replaced with a placeholder (`=> ...` or `{ ... }`) to keep the
+/// subject text compact while preserving parameter types and return
+/// type annotations that template inference depends on.
+fn format_arg_expr(expr: &Expression<'_>) -> String {
+    match expr {
+        // Foo::class
+        Expression::Access(Access::ClassConstant(cca)) => {
+            if let ClassLikeConstantSelector::Identifier(ident) = &cca.constant
+                && ident.value == "class"
+            {
+                let class_text = expr_to_subject_text(cca.class);
+                return format!("{}::class", class_text);
             }
-            // String literals: 'web', "guard"
-            Expression::Literal(Literal::String(lit_str)) => {
-                return lit_str.raw.to_string();
+            "...".to_string()
+        }
+        // String literals: 'web', "guard"
+        Expression::Literal(Literal::String(lit_str)) => lit_str.raw.to_string(),
+        // Integer literals: 0, 42
+        Expression::Literal(Literal::Integer(lit_int)) => lit_int.raw.to_string(),
+        // Float literals: 3.14
+        Expression::Literal(Literal::Float(lit_float)) => lit_float.raw.to_string(),
+        // null
+        Expression::Literal(Literal::Null(_)) => "null".to_string(),
+        // true
+        Expression::Literal(Literal::True(_)) => "true".to_string(),
+        // false
+        Expression::Literal(Literal::False(_)) => "false".to_string(),
+        // $variable
+        Expression::Variable(Variable::Direct(dv)) => dv.name.to_string(),
+        // new ClassName(…) → "new ClassName()"
+        Expression::Instantiation(inst) => {
+            let class_text = expr_to_subject_text(inst.class);
+            if class_text.is_empty() {
+                "...".to_string()
+            } else {
+                format!("new {}()", class_text)
             }
-            // Integer literals: 0, 42
-            Expression::Literal(Literal::Integer(lit_int)) => {
-                return lit_int.raw.to_string();
-            }
-            // Float literals: 3.14
-            Expression::Literal(Literal::Float(lit_float)) => {
-                return lit_float.raw.to_string();
-            }
-            // null
-            Expression::Literal(Literal::Null(_)) => {
-                return "null".to_string();
-            }
-            // true
-            Expression::Literal(Literal::True(_)) => {
-                return "true".to_string();
-            }
-            // false
-            Expression::Literal(Literal::False(_)) => {
-                return "false".to_string();
-            }
-            // $variable
-            Expression::Variable(Variable::Direct(dv)) => {
-                return dv.name.to_string();
-            }
-            // new ClassName(…) → "new ClassName()"
-            Expression::Instantiation(inst) => {
-                let class_text = expr_to_subject_text(inst.class);
-                if !class_text.is_empty() {
-                    return format!("new {}()", class_text);
-                }
-            }
-            // Any other expression (property access, method calls,
-            // static access, array access, etc.) — delegate to the
-            // general subject text formatter so that callers like
-            // `ARRAY_ELEMENT_FUNCS` resolution see the full argument.
-            _ => {
-                let text = expr_to_subject_text(arg_expr);
-                if !text.is_empty() {
-                    return text;
-                }
+        }
+        // Arrow function: fn(Type $a, Type $b): ReturnType => …
+        // Serialize the signature so template inference can extract
+        // parameter types and the return type annotation.
+        Expression::ArrowFunction(arrow) => {
+            let params = format_callable_params(&arrow.parameter_list);
+            let ret = arrow
+                .return_type_hint
+                .as_ref()
+                .map(|rth| format!(": {}", crate::parser::extract_hint_type(&rth.hint)))
+                .unwrap_or_default();
+            format!("fn({}){} => ...", params, ret)
+        }
+        // Closure: function(Type $a, Type $b): ReturnType { … }
+        Expression::Closure(closure) => {
+            let params = format_callable_params(&closure.parameter_list);
+            let ret = closure
+                .return_type_hint
+                .as_ref()
+                .map(|rth| format!(": {}", crate::parser::extract_hint_type(&rth.hint)))
+                .unwrap_or_default();
+            format!("function({}){} {{ ... }}", params, ret)
+        }
+        // Any other expression — delegate to the general subject text
+        // formatter.  Falls back to `...` when it can't be represented.
+        _ => {
+            let text = expr_to_subject_text(expr);
+            if text.is_empty() {
+                "...".to_string()
+            } else {
+                text
             }
         }
     }
-    String::new()
+}
+
+/// Format a callable's parameter list as a comma-separated string of
+/// `Type $name` pairs, preserving type annotations for template inference.
+fn format_callable_params(params: &FunctionLikeParameterList<'_>) -> String {
+    let mut parts = Vec::new();
+    for param in params.parameters.iter() {
+        let name = param.variable.name.to_string();
+        let type_text = param
+            .hint
+            .as_ref()
+            .map(|h| crate::parser::extract_hint_type(h).to_string());
+        match type_text {
+            Some(t) => parts.push(format!("{} {}", t, name)),
+            None => parts.push(name),
+        }
+    }
+    parts.join(", ")
 }
 
 /// Check whether `expr` is an `assert(… instanceof …)` call.
@@ -2687,6 +2759,7 @@ fn is_assert_instanceof(expr: &Expression<'_>) -> bool {
             Expression::Identifier(ident) => ident.value(),
             _ => return false,
         };
+        let func_name = func_name.strip_prefix('\\').unwrap_or(func_name);
         if !func_name.eq_ignore_ascii_case("assert") {
             return false;
         }

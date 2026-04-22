@@ -269,34 +269,7 @@ pub struct ExtractedMembers {
     /// `@use` generics extracted from docblocks on trait `use` statements
     /// inside the class body (e.g. `/** @use BuildsQueries<TModel> */`).
     /// Each entry is `(trait_name, vec_of_type_args)`.
-    pub inline_use_generics: Vec<(String, Vec<String>)>,
-}
-
-// ─── Array Shape Types ──────────────────────────────────────────────────────
-
-/// A single entry in a PHPStan/Psalm array shape type.
-///
-/// Array shapes describe the exact structure of an array, including
-/// named or positional keys and their value types.
-///
-/// # Examples
-///
-/// ```text
-/// array{name: string, age: int}       → two entries with keys "name" and "age"
-/// array{0: User, 1: Address}          → two entries with numeric keys
-/// array{name: string, age?: int}      → "age" is optional
-/// array{string, int}                  → implicit keys "0" and "1"
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArrayShapeEntry {
-    /// The key name (e.g. `"name"`, `"0"`, `"1"`).
-    /// For positional entries without explicit keys, this is the
-    /// stringified index (`"0"`, `"1"`, …).
-    pub key: String,
-    /// The value type string (e.g. `"string"`, `"int"`, `"User"`).
-    pub value_type: String,
-    /// Whether this key is optional (declared with `?` suffix, e.g. `age?: int`).
-    pub optional: bool,
+    pub inline_use_generics: Vec<(String, Vec<PhpType>)>,
 }
 
 /// A type alias definition, either locally defined or imported from another class.
@@ -411,7 +384,7 @@ pub struct ParameterInfo {
     /// means that inside the closure passed as `$callback`, `$this` refers to
     /// `\Illuminate\Routing\Route` rather than the lexically enclosing class.
     /// Common in Laravel where closures are rebound via `Closure::bindTo()`.
-    pub closure_this_type: Option<String>,
+    pub closure_this_type: Option<PhpType>,
 }
 
 impl ParameterInfo {
@@ -582,12 +555,12 @@ pub struct MethodInfo {
     /// methods.  Used by the narrowing engine to apply type guards from
     /// static method calls like `Assert::instanceOf($value, Foo::class)`.
     pub type_assertions: Vec<TypeAssertion>,
-    /// Exception type names declared via `@throws` tags in the method's docblock.
+    /// Exception types declared via `@throws` tags in the method's docblock.
     ///
     /// For example, a method with `@throws \InvalidArgumentException` would have
-    /// `throws: vec!["\\InvalidArgumentException".into()]`.  Used during code
-    /// generation and analysis to propagate exception information.
-    pub throws: Vec<String>,
+    /// `throws: vec![PhpType::Named("InvalidArgumentException".into())]`.  Used
+    /// during code generation and analysis to propagate exception information.
+    pub throws: Vec<PhpType>,
 }
 
 impl MethodInfo {
@@ -653,6 +626,36 @@ impl MethodInfo {
             name_offset: 0,
             parameters: Vec::new(),
             return_type: return_type.map(PhpType::parse),
+            native_return_type: None,
+            description: None,
+            return_description: None,
+            links: Vec::new(),
+            see_refs: Vec::new(),
+            is_static: false,
+            visibility: Visibility::Public,
+            conditional_return: None,
+            deprecation_message: None,
+            deprecated_replacement: None,
+            template_params: Vec::new(),
+            template_param_bounds: HashMap::new(),
+            template_bindings: Vec::new(),
+            has_scope_attribute: false,
+            is_abstract: false,
+            is_virtual: true,
+            type_assertions: Vec::new(),
+            throws: Vec::new(),
+        }
+    }
+
+    /// Like [`virtual_method`], but accepts the return type as a
+    /// `PhpType` directly, avoiding the `PhpType → String → PhpType`
+    /// round-trip when the caller already holds a `PhpType`.
+    pub fn virtual_method_typed(name: &str, return_type: Option<&PhpType>) -> Self {
+        Self {
+            name: name.to_string(),
+            name_offset: 0,
+            parameters: Vec::new(),
+            return_type: return_type.cloned(),
             native_return_type: None,
             description: None,
             return_description: None,
@@ -785,10 +788,19 @@ impl PropertyInfo {
     /// }
     /// ```
     pub fn virtual_property(name: &str, type_hint: Option<&str>) -> Self {
+        Self::virtual_property_typed(name, type_hint.map(PhpType::parse).as_ref())
+    }
+
+    /// Create a virtual property from a pre-parsed [`PhpType`].
+    ///
+    /// Same as [`virtual_property`](Self::virtual_property) but avoids a
+    /// `PhpType → String → PhpType` round-trip when the caller already
+    /// holds a `PhpType`.
+    pub fn virtual_property_typed(name: &str, type_hint: Option<&PhpType>) -> Self {
         Self {
             name: name.to_string(),
             name_offset: 0,
-            type_hint: type_hint.map(PhpType::parse),
+            type_hint: type_hint.cloned(),
             native_type_hint: None,
             description: None,
             is_static: false,
@@ -1064,12 +1076,20 @@ pub struct FunctionInfo {
     /// bindings to infer concrete types for each template parameter
     /// from the actual argument expressions.
     pub template_bindings: Vec<(String, String)>,
-    /// Exception type names from `@throws` docblock tags.
+    /// Upper bounds for function-level template parameters
+    /// (`@template T of Foo` → maps `"T"` to `Foo`).
+    ///
+    /// Used by `build_function_template_subs` to replace unbound
+    /// template parameters with their declared bound (or `mixed`
+    /// when no bound exists) so that raw template names never leak
+    /// into downstream consumers.
+    pub template_param_bounds: HashMap<String, PhpType>,
+    /// Exception types from `@throws` docblock tags.
     ///
     /// Populated during parsing from the function's docblock.  Used by
     /// the cross-file throws analysis to propagate exceptions from
     /// standalone function calls.
-    pub throws: Vec<String>,
+    pub throws: Vec<PhpType>,
     /// Whether this function was extracted from inside a
     /// `if (! function_exists('name'))` guard.
     ///
@@ -1212,6 +1232,28 @@ pub enum ClassLikeKind {
     Enum,
 }
 
+/// The backing type of a PHP backed enum.
+///
+/// PHP enums can optionally declare a scalar backing type, which must be
+/// either `string` or `int`.  Unit enums (no backing type) are represented
+/// by `None` at the `ClassInfo` level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackedEnumType {
+    /// `enum Foo: string { ... }`
+    String,
+    /// `enum Foo: int { ... }`
+    Int,
+}
+
+impl fmt::Display for BackedEnumType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackedEnumType::String => write!(f, "string"),
+            BackedEnumType::Int => write!(f, "int"),
+        }
+    }
+}
+
 /// PHP `\Attribute` target flags.
 ///
 /// These mirror the constants defined on the built-in `\Attribute` class
@@ -1242,7 +1284,7 @@ pub mod attribute_target {
 /// Grouped into a sub-struct to keep the core `ClassInfo` focused on
 /// PHP semantics. All fields default to empty/`None`, so non-Laravel
 /// classes carry no overhead beyond a single struct value.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LaravelMetadata {
     /// Custom collection class for Eloquent models.
     ///
@@ -1258,7 +1300,7 @@ pub struct LaravelMetadata {
     /// `\Illuminate\Database\Eloquent\Collection` with this class in
     /// relationship property types and Builder-forwarded return types
     /// (e.g. `get()`, `all()`).
-    pub custom_collection: Option<String>,
+    pub custom_collection: Option<PhpType>,
     /// Eloquent cast definitions extracted from the `$casts` property
     /// initializer or the `casts()` method body.
     ///
@@ -1285,7 +1327,7 @@ pub struct LaravelMetadata {
     /// `("is_active", "bool")`, `("login_count", "int")`).
     /// The `LaravelModelProvider` uses these as a fallback when no
     /// `$casts` entry exists for the same column.
-    pub attributes_definitions: Vec<(String, String)>,
+    pub attributes_definitions: Vec<(String, PhpType)>,
     /// Column names extracted from `$fillable`, `$guarded`, `$hidden`,
     /// and `$appends` property arrays.
     ///
@@ -1431,7 +1473,7 @@ pub struct ClassInfo {
     /// When a conditional return type references a template parameter that
     /// has no explicit binding at the call site, the resolver uses the
     /// default value to evaluate the condition.
-    pub template_param_defaults: HashMap<String, String>,
+    pub template_param_defaults: HashMap<String, PhpType>,
     /// Generic type arguments from `@extends` / `@phpstan-extends` tags.
     ///
     /// Each entry is `(ClassName, [TypeArg1, TypeArg2, …])`.
@@ -1502,9 +1544,9 @@ pub struct ClassInfo {
     /// namespace blocks (e.g. `Illuminate\Database\Eloquent\Builder` vs
     /// `Illuminate\Database\Query\Builder`).
     pub file_namespace: Option<String>,
-    /// The backing type of a backed enum (e.g. `"string"` or `"int"`).
+    /// The backing type of a backed enum (e.g. `string` or `int`).
     /// `None` for unit enums and non-enum class-like declarations.
-    pub backed_type: Option<String>,
+    pub backed_type: Option<BackedEnumType>,
     /// PHP attribute target bitmask.
     ///
     /// `0` means this class is **not** a PHP attribute.  A non-zero value
@@ -1775,6 +1817,39 @@ impl ResolvedType {
         }
     }
 
+    /// Strip null from the type, preserving class info (since
+    /// null-stripping never invalidates the class).
+    pub(crate) fn strip_null(&mut self) {
+        if let Some(non_null) = self.type_string.non_null_type() {
+            self.type_string = non_null;
+        }
+    }
+
+    /// Replace the type string and clear `class_info` when the new type
+    /// no longer matches the original class.
+    pub(crate) fn replace_type(&mut self, new_type: PhpType) {
+        let still_matches = self.class_info.as_ref().is_some_and(|ci| {
+            // Check base_name first (fast path for simple Named/Generic types).
+            if let Some(bn) = new_type.base_name() {
+                let bn = bn.strip_prefix('\\').unwrap_or(bn);
+                if bn == ci.name || bn == ci.fqn() {
+                    return true;
+                }
+            }
+            // For unions/intersections, check whether the class still
+            // appears as a top-level member (e.g. `Foobar|int` still
+            // contains `Foobar`).
+            new_type.top_level_class_names().iter().any(|name| {
+                let name = name.strip_prefix('\\').unwrap_or(name);
+                name == ci.name || name == ci.fqn()
+            })
+        });
+        if !still_matches {
+            self.class_info = None;
+        }
+        self.type_string = new_type;
+    }
+
     /// Extract just the class info, discarding the type string.
     ///
     /// Convenience method for callers that only need the `ClassInfo`
@@ -1811,7 +1886,7 @@ impl ResolvedType {
     /// class's name as the type string.
     ///
     /// This is a migration helper for code paths that still produce
-    /// `Vec<ClassInfo>` internally (e.g. `type_hint_to_classes`).
+    /// `Vec<ClassInfo>` internally (e.g. `type_hint_to_classes_typed`).
     /// Future sprints will populate proper type strings at the source.
     pub(crate) fn from_classes(classes: Vec<ClassInfo>) -> Vec<ResolvedType> {
         classes.into_iter().map(ResolvedType::from_class).collect()
@@ -1823,7 +1898,7 @@ impl ResolvedType {
     /// When exactly one class was resolved, the full `type_hint` is
     /// attached (preserving generics like `"Collection<int, User>"`).
     /// When multiple classes were resolved (union split by
-    /// `type_hint_to_classes`), each class uses its own name as the
+    /// `type_hint_to_classes_typed`), each class uses its own name as the
     /// type string because the hint was already split into parts.
     pub(crate) fn from_classes_with_hint(
         classes: Vec<ClassInfo>,
@@ -1832,6 +1907,17 @@ impl ResolvedType {
         if classes.len() == 1 {
             let class = classes.into_iter().next().unwrap();
             vec![ResolvedType::from_both(type_hint, class)]
+        } else if matches!(&type_hint, PhpType::Intersection(_)) {
+            // Intersection types: all classes contribute members to a
+            // single value.  Emit one ResolvedType per class (so
+            // `into_arced_classes` sees every member set) but tag each
+            // entry with the full intersection PhpType so that
+            // `types_joined` can reconstruct the intersection instead
+            // of wrapping them in a union.
+            classes
+                .into_iter()
+                .map(|c| ResolvedType::from_both(type_hint.clone(), c))
+                .collect()
         } else {
             classes.into_iter().map(ResolvedType::from_class).collect()
         }
@@ -1846,6 +1932,20 @@ impl ResolvedType {
         resolved
             .into_iter()
             .filter_map(|rt| rt.class_info)
+            .collect()
+    }
+
+    /// Extract `Vec<Arc<ClassInfo>>` from `Vec<ResolvedType>`, wrapping
+    /// each class in an `Arc` and discarding entries that have no class
+    /// info (scalars, shapes, unresolvable types).
+    ///
+    /// This is the primary conversion used by callers of
+    /// `resolve_target_classes` that need `Arc<ClassInfo>` for
+    /// downstream resolution (completion, hover, definition, etc.).
+    pub(crate) fn into_arced_classes(resolved: Vec<ResolvedType>) -> Vec<Arc<ClassInfo>> {
+        resolved
+            .into_iter()
+            .filter_map(|rt| rt.class_info.map(Arc::new))
             .collect()
     }
 
@@ -1896,18 +1996,6 @@ impl ResolvedType {
         }
     }
 
-    /// Join the type strings of all entries with `|`.
-    ///
-    /// Useful for hover display and other consumers that need a single
-    /// union type string from the resolved types.
-    pub(crate) fn type_strings_joined(resolved: &[ResolvedType]) -> String {
-        resolved
-            .iter()
-            .map(|rt| rt.type_string.to_string())
-            .collect::<Vec<_>>()
-            .join("|")
-    }
-
     /// Combine the type strings of all entries into a single [`PhpType`].
     ///
     /// When there is exactly one entry, returns its `type_string` directly.
@@ -1915,14 +2003,25 @@ impl ResolvedType {
     /// When the slice is empty, returns `PhpType::Named("mixed")` as a
     /// safe fallback (callers should check emptiness beforehand).
     ///
-    /// This is the structured counterpart of [`type_strings_joined`] and
-    /// avoids the `PhpType → String → PhpType` round-trip that occurs
-    /// when callers join types into a string and then re-parse them.
+    /// Callers that need a display string can use `.to_string()` on the
+    /// result, which produces the same `|`-joined output that the former
+    /// `type_strings_joined` helper returned, but preserves the structured
+    /// [`PhpType`] for any intermediate consumers that benefit from it.
     pub(crate) fn types_joined(resolved: &[ResolvedType]) -> PhpType {
         match resolved.len() {
-            0 => PhpType::Named("mixed".to_owned()),
+            0 => PhpType::mixed(),
             1 => resolved[0].type_string.clone(),
             _ => {
+                // When all entries share the same intersection type,
+                // they came from a single intersection — return it
+                // directly instead of wrapping in a Union.
+                if let PhpType::Intersection(_) = &resolved[0].type_string
+                    && resolved
+                        .iter()
+                        .all(|rt| rt.type_string == resolved[0].type_string)
+                {
+                    return resolved[0].type_string.clone();
+                }
                 let members: Vec<PhpType> =
                     resolved.iter().map(|rt| rt.type_string.clone()).collect();
                 PhpType::Union(members)
@@ -2245,7 +2344,7 @@ mod tests {
     #[test]
     fn method_signature_eq_detects_conditional_return() {
         let mut a = method("foo");
-        a.conditional_return = Some(PhpType::Named("int".to_string()));
+        a.conditional_return = Some(PhpType::int());
         let b = method("foo");
         assert!(!a.signature_eq(&b));
     }
@@ -2687,13 +2786,13 @@ mod tests {
         let a = ClassInfo {
             name: "Status".to_string(),
             kind: ClassLikeKind::Enum,
-            backed_type: Some("string".to_string()),
+            backed_type: Some(BackedEnumType::String),
             ..Default::default()
         };
         let b = ClassInfo {
             name: "Status".to_string(),
             kind: ClassLikeKind::Enum,
-            backed_type: Some("int".to_string()),
+            backed_type: Some(BackedEnumType::Int),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2705,7 +2804,7 @@ mod tests {
             name: "User".to_string(),
             ..Default::default()
         };
-        a.laravel_mut().custom_collection = Some("UserCollection".to_string());
+        a.laravel_mut().custom_collection = Some(PhpType::Named("UserCollection".to_string()));
 
         let b = ClassInfo {
             name: "User".to_string(),
@@ -2800,5 +2899,185 @@ mod tests {
             a.signature_eq(&b),
             "Body-only changes (offsets, descriptions, links) must not break signature_eq"
         );
+    }
+
+    // ── ResolvedType helpers ────────────────────────────────────────
+
+    /// Helper: create a minimal ClassInfo with only a name.
+    fn class(name: &str) -> ClassInfo {
+        ClassInfo {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Helper: create a ClassInfo with a namespace.
+    fn class_with_ns(name: &str, ns: &str) -> ClassInfo {
+        ClassInfo {
+            name: name.to_string(),
+            file_namespace: Some(ns.to_string()),
+            ..Default::default()
+        }
+    }
+
+    // ── from_classes_with_hint: intersection ────────────────────────
+
+    #[test]
+    fn from_classes_with_hint_single_class_uses_hint() {
+        let hint = PhpType::Named("Foo".to_owned());
+        let result = ResolvedType::from_classes_with_hint(vec![class("Foo")], hint.clone());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].type_string, hint);
+        assert!(result[0].class_info.is_some());
+    }
+
+    #[test]
+    fn from_classes_with_hint_intersection_preserves_type() {
+        let hint = PhpType::Intersection(vec![
+            PhpType::Named("Countable".to_owned()),
+            PhpType::Named("Serializable".to_owned()),
+        ]);
+        let classes = vec![class("Countable"), class("Serializable")];
+        let result = ResolvedType::from_classes_with_hint(classes, hint.clone());
+        assert_eq!(result.len(), 2);
+        // Both entries carry the full intersection type.
+        for rt in &result {
+            assert_eq!(rt.type_string, hint);
+            assert!(rt.class_info.is_some());
+        }
+    }
+
+    #[test]
+    fn from_classes_with_hint_union_uses_class_names() {
+        let hint = PhpType::Union(vec![
+            PhpType::Named("Foo".to_owned()),
+            PhpType::Named("Bar".to_owned()),
+        ]);
+        let classes = vec![class("Foo"), class("Bar")];
+        let result = ResolvedType::from_classes_with_hint(classes, hint);
+        assert_eq!(result.len(), 2);
+        // Union: each entry uses the class's own name (old behaviour).
+        assert_eq!(result[0].type_string, PhpType::Named("Foo".to_owned()));
+        assert_eq!(result[1].type_string, PhpType::Named("Bar".to_owned()));
+    }
+
+    // ── types_joined: intersection ──────────────────────────────────
+
+    #[test]
+    fn types_joined_single_entry() {
+        let entries = vec![ResolvedType::from_type_string(PhpType::Named(
+            "Foo".to_owned(),
+        ))];
+        assert_eq!(
+            ResolvedType::types_joined(&entries),
+            PhpType::Named("Foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn types_joined_intersection_entries_return_intersection() {
+        let intersection = PhpType::Intersection(vec![
+            PhpType::Named("Countable".to_owned()),
+            PhpType::Named("Serializable".to_owned()),
+        ]);
+        let entries = vec![
+            ResolvedType::from_both(intersection.clone(), class("Countable")),
+            ResolvedType::from_both(intersection.clone(), class("Serializable")),
+        ];
+        let joined = ResolvedType::types_joined(&entries);
+        assert_eq!(joined, intersection);
+    }
+
+    #[test]
+    fn types_joined_mixed_entries_return_union() {
+        let entries = vec![
+            ResolvedType::from_type_string(PhpType::Named("Foo".to_owned())),
+            ResolvedType::from_type_string(PhpType::Named("Bar".to_owned())),
+        ];
+        let joined = ResolvedType::types_joined(&entries);
+        assert_eq!(
+            joined,
+            PhpType::Union(vec![
+                PhpType::Named("Foo".to_owned()),
+                PhpType::Named("Bar".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn types_joined_empty_returns_mixed() {
+        let entries: Vec<ResolvedType> = vec![];
+        assert_eq!(ResolvedType::types_joined(&entries), PhpType::mixed());
+    }
+
+    // ── strip_null ──────────────────────────────────────────────────
+
+    #[test]
+    fn strip_null_removes_nullable() {
+        let mut rt = ResolvedType::from_both(
+            PhpType::Nullable(Box::new(PhpType::Named("Foo".to_owned()))),
+            class("Foo"),
+        );
+        rt.strip_null();
+        assert_eq!(rt.type_string, PhpType::Named("Foo".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    #[test]
+    fn strip_null_no_op_when_not_nullable() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("Foo".to_owned()), class("Foo"));
+        rt.strip_null();
+        assert_eq!(rt.type_string, PhpType::Named("Foo".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    // ── replace_type ────────────────────────────────────────────────
+
+    #[test]
+    fn replace_type_keeps_class_info_when_matching() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("Foo".to_owned()), class("Foo"));
+        rt.replace_type(PhpType::Named("Foo".to_owned()));
+        assert_eq!(rt.type_string, PhpType::Named("Foo".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    #[test]
+    fn replace_type_clears_class_info_when_mismatched() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("Foo".to_owned()), class("Foo"));
+        rt.replace_type(PhpType::Named("array".to_owned()));
+        assert_eq!(rt.type_string, PhpType::Named("array".to_owned()));
+        assert!(rt.class_info.is_none());
+    }
+
+    #[test]
+    fn replace_type_matches_fqn_with_leading_backslash() {
+        let mut rt = ResolvedType::from_both(
+            PhpType::Named("App\\Models\\User".to_owned()),
+            class_with_ns("User", "App\\Models"),
+        );
+        rt.replace_type(PhpType::Named("\\App\\Models\\User".to_owned()));
+        assert_eq!(
+            rt.type_string,
+            PhpType::Named("\\App\\Models\\User".to_owned())
+        );
+        assert!(
+            rt.class_info.is_some(),
+            "class_info should be preserved when FQN matches modulo leading backslash"
+        );
+    }
+
+    #[test]
+    fn replace_type_matches_short_name() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("User".to_owned()), class("User"));
+        rt.replace_type(PhpType::Named("User".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    #[test]
+    fn replace_type_clears_when_no_class_info() {
+        let mut rt = ResolvedType::from_type_string(PhpType::Named("int".to_owned()));
+        rt.replace_type(PhpType::Named("string".to_owned()));
+        assert_eq!(rt.type_string, PhpType::Named("string".to_owned()));
+        assert!(rt.class_info.is_none());
     }
 }

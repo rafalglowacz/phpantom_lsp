@@ -1,23 +1,24 @@
-//! Variable type string resolution for hover.
+//! Variable type resolution for hover.
 //!
 //! Unlike the completion pipeline (which resolves variables to
-//! `Vec<ClassInfo>`), hover needs the **full type string** so that
+//! `Vec<ClassInfo>`), hover needs the **full type** so that
 //! generic parameters and scalar types are preserved.  For example,
 //! a parameter typed as `\Generator<int, Pencil>` should display
 //! exactly that, not just `Generator`.
 //!
-//! The entry point is [`resolve_variable_type_string`], which walks
+//! The entry point is [`resolve_variable_type`], which walks
 //! the AST to find the variable's definition context and returns the
-//! effective type string (docblock overriding native where applicable).
+//! effective type as a [`PhpType`] (docblock overriding native where
+//! applicable).
 
 use std::sync::Arc;
 
 use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
-use crate::completion::types::narrowing::is_subtype_of;
 use crate::docblock;
-use crate::parser::{extract_hint_string, with_parsed_program};
+use crate::parser::{extract_hint_type, with_parsed_program};
+use crate::php_type::PhpType;
 use crate::types::{AccessKind, ClassInfo, ResolvedType};
 use crate::util::short_name;
 
@@ -66,17 +67,17 @@ fn is_cursor_in_self_assignment_rhs(content: &str, cursor_offset: usize, var_nam
     false
 }
 
-/// Resolve the type string for a variable at `cursor_offset` for hover.
+/// Resolve the type for a variable at `cursor_offset` for hover.
 ///
 /// Tries, in order:
 /// 1. Inline `/** @var Type $var */` docblock override
 /// 2. Parameter type (native + `@param` → effective)
 /// 3. Foreach value/key binding (iterable element type from `@param`/`@var`)
-/// 4. Catch variable (catch clause hint string)
+/// 4. Catch variable (catch clause hint)
 /// 5. Assignment type via [`resolve_variable_types_branch_aware`]
 ///
 /// Returns `None` when no type information could be determined.
-pub(crate) fn resolve_variable_type_string(
+pub(crate) fn resolve_variable_type(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
@@ -85,7 +86,7 @@ pub(crate) fn resolve_variable_type_string(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
     phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // 1. Inline @var override: `/** @var Type $var */`
     //
     // Skip when the cursor is inside the RHS of an assignment whose
@@ -107,8 +108,8 @@ pub(crate) fn resolve_variable_type_string(
         class_loader,
         content,
     };
-    let ast_result: Option<String> =
-        with_parsed_program(content, "resolve_variable_type_string", |program, _| {
+    let ast_result: Option<PhpType> =
+        with_parsed_program(content, "resolve_variable_type", |program, _| {
             find_variable_type_in_statements(
                 program.statements.iter(),
                 var_name,
@@ -133,7 +134,7 @@ pub(crate) fn resolve_variable_type_string(
                 &dummy_class
             }
         };
-        let foreach_result: Option<String> =
+        let foreach_result: Option<PhpType> =
             with_parsed_program(content, "resolve_foreach_via_class", |program, _| {
                 resolve_foreach_type_via_class(
                     &program.statements.iter().collect::<Vec<_>>(),
@@ -175,30 +176,28 @@ pub(crate) fn resolve_variable_type_string(
         phpstorm_meta,
     );
     if !resolved.is_empty() {
-        let joined = ResolvedType::type_strings_joined(&resolved);
-        if !joined.is_empty() {
-            // When the AST-based result (step 2–4) carries richer type
-            // information than the unified pipeline (e.g. the docblock
-            // says `Generator<int, Pencil>` but the pipeline only
-            // resolved the bare class name `Generator`), prefer the
-            // AST result.  The AST path preserves the full `@param` /
-            // `@var` type string including generic parameters, while
-            // the unified pipeline resolves to ClassInfo objects that
-            // may lose that detail.
-            if let Some(ref ast) = ast_result
-                && ast.len() > joined.len()
-                && ast.starts_with(&joined)
-            {
-                // Don't prefer the AST result when the only difference
-                // is a trailing `|null` — the unified pipeline may have
-                // stripped it via guard clause narrowing.
-                let suffix = &ast[joined.len()..];
-                if suffix != "|null" {
-                    return ast_result;
-                }
+        let joined = ResolvedType::types_joined(&resolved);
+        // When the AST-based result (step 2–4) carries richer type
+        // information than the unified pipeline (e.g. the docblock
+        // says `Generator<int, Pencil>` but the pipeline only
+        // resolved the bare class name `Generator`), prefer the
+        // AST result.  Skip when the only difference is a trailing
+        // `|null` — the unified pipeline may have stripped it via
+        // guard clause narrowing.
+        if let Some(ref ast) = ast_result
+            && !ast.equivalent(&joined)
+            && ast.has_type_structure()
+        {
+            // Check that the extra detail is not just `|null`.
+            // If the AST type without null is equivalent to the
+            // joined type, the only difference is a trailing null
+            // component — prefer the narrowed `joined` result.
+            let only_null_diff = ast.non_null_type().is_some_and(|nn| nn.equivalent(&joined));
+            if !only_null_diff {
+                return ast_result;
             }
-            return Some(joined);
         }
+        return Some(joined);
     }
 
     // Fall back to the AST-based parameter/foreach/catch type.
@@ -213,7 +212,7 @@ fn find_variable_type_in_statements<'a, I>(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String>
+) -> Option<PhpType>
 where
     I: Iterator<Item = &'a Statement<'a>>,
 {
@@ -353,7 +352,7 @@ fn find_type_in_class_members<'a, I>(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String>
+) -> Option<PhpType>
 where
     I: Iterator<Item = &'a ClassLikeMember<'a>>,
 {
@@ -400,7 +399,7 @@ where
     None
 }
 
-/// Extract the effective type string for a parameter matching `var_name`.
+/// Extract the effective type for a parameter matching `var_name`.
 ///
 /// Uses the native type hint and `@param` docblock type, preferring the
 /// docblock when it is more specific (via `resolve_effective_type`).
@@ -410,14 +409,14 @@ fn find_type_in_params(
     content: &str,
     _cursor_offset: u32,
     method_start_offset: usize,
-) -> Option<String> {
+) -> Option<PhpType> {
     for param in parameter_list.parameters.iter() {
         let pname = param.variable.name.to_string();
         if pname != var_name {
             continue;
         }
 
-        let native_type = param.hint.as_ref().map(|h| extract_hint_string(h));
+        let native_parsed = param.hint.as_ref().map(|h| extract_hint_type(h));
 
         // Try @param docblock type
         let docblock_type =
@@ -431,27 +430,26 @@ fn find_type_in_params(
                 });
 
         let effective =
-            docblock::resolve_effective_type(native_type.as_deref(), docblock_type.as_deref())
-                .map(|t| t.to_string());
+            docblock::resolve_effective_type_typed(native_parsed.as_ref(), docblock_type.as_ref());
 
         if effective.is_some() {
             return effective;
         }
 
         // Return native type if no effective type
-        return native_type;
+        return native_parsed;
     }
     None
 }
 
-/// Walk body statements looking for foreach/catch/closure type strings.
+/// Walk body statements looking for foreach/catch/closure types.
 fn find_type_in_body_stmts(
     stmts: &[&Statement<'_>],
     var_name: &str,
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for &stmt in stmts {
         let stmt_span = stmt.span();
         if cursor_offset < stmt_span.start.offset || cursor_offset > stmt_span.end.offset {
@@ -481,8 +479,8 @@ fn find_type_in_body_stmts(
     None
 }
 
-/// Extract the catch clause type hint string for a matching variable.
-fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) -> Option<String> {
+/// Extract the catch clause type hint for a matching variable.
+fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) -> Option<PhpType> {
     match stmt {
         Statement::Try(try_stmt) => {
             for catch in try_stmt.catch_clauses.iter() {
@@ -492,7 +490,7 @@ fn find_type_in_catch(stmt: &Statement<'_>, var_name: &str, cursor_offset: u32) 
                     let var_start = var.span.start.offset;
                     let var_end = var.span.end.offset;
                     if cursor_offset >= var_start && cursor_offset < var_end {
-                        return Some(extract_hint_string(&catch.hint));
+                        return Some(extract_hint_type(&catch.hint));
                     }
                 }
                 // Recurse into catch block
@@ -599,7 +597,7 @@ fn find_type_in_foreach(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Check if the cursor is on the foreach value or key variable, or inside the body
     let foreach_start = foreach.foreach.span().start.offset;
     let body_end = foreach.body.span().end.offset;
@@ -661,37 +659,33 @@ fn find_type_in_foreach(
         }
     }
 
-    // Get the iterable expression's raw type from docblock annotations
+    // Get the iterable expression's type from docblock annotations
     let foreach_offset = foreach.foreach.span().start.offset as usize;
-    let raw_type = extract_foreach_expression_raw_type(foreach, content, foreach_offset);
+    let iterable_type = extract_foreach_expression_type(foreach, content, foreach_offset);
 
-    if let Some(ref rt) = raw_type {
+    if let Some(ref it) = iterable_type {
         if is_value_var {
             // Extract value type: `list<User>` → `User`,
             // `Generator<int, Pencil>` → `Pencil`,
             // `User[]` → `User`
-            let parsed = crate::php_type::PhpType::parse(rt);
-            if let Some(element_type) = parsed.extract_value_type(true) {
-                return Some(element_type.to_string());
+            if let Some(element_type) = it.extract_value_type(true) {
+                return Some(element_type.clone());
             }
-        } else if is_key_var {
-            let parsed = crate::php_type::PhpType::parse(rt);
-            if let Some(key_type) = parsed.extract_key_type(true) {
-                return Some(key_type.to_string());
-            }
+        } else if is_key_var && let Some(key_type) = it.extract_key_type(true) {
+            return Some(key_type.clone());
         }
     }
 
     None
 }
 
-/// Extract the raw iterable type string from the foreach expression's
-/// surrounding docblock annotations.
-fn extract_foreach_expression_raw_type(
+/// Extract the iterable type from the foreach expression's surrounding
+/// docblock annotations, returning the already-parsed `PhpType` directly.
+fn extract_foreach_expression_type(
     foreach: &Foreach<'_>,
     content: &str,
     foreach_offset: usize,
-) -> Option<String> {
+) -> Option<PhpType> {
     let expr_span = foreach.expression.span();
     let expr_start = expr_span.start.offset as usize;
     let expr_end = expr_span.end.offset as usize;
@@ -733,7 +727,7 @@ fn resolve_foreach_type_via_class(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for stmt in stmts {
         match stmt {
             Statement::Class(class) => {
@@ -798,7 +792,7 @@ fn resolve_foreach_in_members<'a>(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for member in members {
         if let ClassLikeMember::Method(method) = member
             && let MethodBody::Concrete(block) = &method.body
@@ -832,7 +826,7 @@ fn resolve_foreach_in_body(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     for stmt in stmts {
         if let Statement::Foreach(foreach) = stmt {
             let stmt_span = stmt.span();
@@ -893,7 +887,7 @@ fn resolve_foreach_binding_via_class(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let foreach_start = foreach.foreach.span().start.offset;
     let body_end = foreach.body.span().end.offset;
     if cursor_offset < foreach_start || cursor_offset > body_end {
@@ -995,7 +989,7 @@ fn resolve_expression_to_classes(
         if let Some(raw_type) =
             docblock::find_var_raw_type_in_source(content, cursor_offset as usize, expr_text)
         {
-            return crate::completion::type_resolution::type_hint_to_classes(
+            return crate::completion::type_resolution::type_hint_to_classes_typed(
                 &raw_type,
                 &current_class.name,
                 all_classes,
@@ -1030,15 +1024,15 @@ fn extract_iterable_type_from_merged(
     class: &ClassInfo,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     is_key: bool,
-) -> Option<String> {
+) -> Option<PhpType> {
     // 1. Direct check on implements_generics.
     for (name, args) in &class.implements_generics {
         let s = short_name(name);
         if ITERABLE_IFACE_NAMES.contains(&s) {
             if is_key && args.len() >= 2 {
-                return Some(args[0].to_string());
+                return Some(args[0].clone());
             } else if !is_key && !args.is_empty() {
-                return Some(args.last().unwrap().to_string());
+                return Some(args.last().unwrap().clone());
             }
         }
     }
@@ -1053,9 +1047,9 @@ fn extract_iterable_type_from_merged(
             && !args.is_empty()
         {
             if is_key && args.len() >= 2 {
-                return Some(args[0].to_string());
+                return Some(args[0].clone());
             } else if !is_key {
-                return Some(args.last().unwrap().to_string());
+                return Some(args.last().unwrap().clone());
             }
         }
     }
@@ -1073,9 +1067,9 @@ fn extract_iterable_type_from_merged(
                 .unwrap_or(false);
         if parent_is_iterable {
             if is_key && args.len() >= 2 {
-                return Some(args[0].to_string());
+                return Some(args[0].clone());
             } else if !is_key && !args.is_empty() {
-                return Some(args.last().unwrap().to_string());
+                return Some(args.last().unwrap().clone());
             }
         }
     }
@@ -1149,7 +1143,7 @@ fn find_type_in_closure_stmt(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match stmt {
         Statement::Expression(expr_stmt) => find_type_in_closure_expr(
             expr_stmt.expression,
@@ -1239,7 +1233,7 @@ fn find_type_in_closure_expr(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match expr {
         Expression::Closure(closure) => {
             let closure_span = closure.span();
@@ -1313,7 +1307,7 @@ fn find_type_in_closure_call(
     content: &str,
     cursor_offset: u32,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let arg_list = call.get_argument_list();
 
     for (arg_idx, arg) in arg_list.arguments.iter().enumerate() {
@@ -1354,8 +1348,9 @@ fn find_type_in_closure_call(
                 .find(|(_, p)| *p.variable.name == *var_name);
 
             if let Some((param_idx, param)) = param_hit {
-                // Get the explicit type hint.
-                let explicit_type = param.hint.as_ref().map(|h| extract_hint_string(h));
+                // Get the explicit type hint as a PhpType directly
+                // (no stringify-then-reparse roundtrip).
+                let explicit_type = param.hint.as_ref().map(|h| extract_hint_type(h));
 
                 // If there's an explicit type, check whether the
                 // inferred callable parameter type is more specific.
@@ -1401,20 +1396,17 @@ fn find_type_in_closure_call(
 
 /// Try to infer callable parameter types from the enclosing call
 /// expression and check whether the inferred type is a subclass of
-/// `explicit_type`.  Returns the inferred type string when it is more
+/// `explicit_type`.  Returns the inferred type when it is more
 /// specific, or `None` otherwise.
 fn try_infer_more_specific_type_from_call(
     call: &Call<'_>,
     arg_idx: usize,
     param_idx: usize,
-    explicit_type: &str,
+    explicit_type: &PhpType,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     let inferred_types = infer_callable_param_types_for_call(call, arg_idx, closure_ctx)?;
     let inferred = inferred_types.get(param_idx)?;
-    if inferred.is_empty() {
-        return None;
-    }
 
     // Resolve both the explicit and inferred types to ClassInfo to
     // check the inheritance relationship.
@@ -1424,7 +1416,7 @@ fn try_infer_more_specific_type_from_call(
         .map(|c| c.name.as_str())
         .unwrap_or(&dummy.name);
 
-    let explicit_classes = crate::completion::type_resolution::type_hint_to_classes(
+    let explicit_classes = crate::completion::type_resolution::type_hint_to_classes_typed(
         explicit_type,
         current_name,
         closure_ctx.all_classes,
@@ -1434,7 +1426,7 @@ fn try_infer_more_specific_type_from_call(
         return None;
     }
 
-    let inferred_classes = crate::completion::type_resolution::type_hint_to_classes(
+    let inferred_classes = crate::completion::type_resolution::type_hint_to_classes_typed(
         inferred,
         current_name,
         closure_ctx.all_classes,
@@ -1448,7 +1440,11 @@ fn try_infer_more_specific_type_from_call(
     // subtype of at least one explicit class.
     let all_subtypes = inferred_classes.iter().all(|inferred_cls| {
         explicit_classes.iter().any(|explicit_cls| {
-            is_subtype_of(inferred_cls, &explicit_cls.name, closure_ctx.class_loader)
+            crate::util::is_subtype_of_names(
+                &inferred_cls.fqn(),
+                &explicit_cls.fqn(),
+                closure_ctx.class_loader,
+            )
         })
     });
 
@@ -1473,7 +1469,7 @@ fn infer_callable_param_types_for_call(
     call: &Call<'_>,
     arg_idx: usize,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     match call {
         Call::Method(mc) => {
             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
@@ -1498,10 +1494,12 @@ fn infer_callable_param_types_for_call(
                     resolved_class_cache: None,
                     phpstorm_meta: None,
                 };
-                let receiver_classes = crate::completion::resolver::resolve_target_classes(
-                    obj_text,
-                    AccessKind::Arrow,
-                    &rctx,
+                let receiver_classes = ResolvedType::into_arced_classes(
+                    crate::completion::resolver::resolve_target_classes(
+                        obj_text,
+                        AccessKind::Arrow,
+                        &rctx,
+                    ),
                 );
                 find_callable_params_on_receiver_classes(
                     &receiver_classes,
@@ -1534,10 +1532,12 @@ fn infer_callable_param_types_for_call(
                     resolved_class_cache: None,
                     phpstorm_meta: None,
                 };
-                let receiver_classes = crate::completion::resolver::resolve_target_classes(
-                    obj_text,
-                    AccessKind::Arrow,
-                    &rctx,
+                let receiver_classes = ResolvedType::into_arced_classes(
+                    crate::completion::resolver::resolve_target_classes(
+                        obj_text,
+                        AccessKind::Arrow,
+                        &rctx,
+                    ),
                 );
                 find_callable_params_on_receiver_classes(
                     &receiver_classes,
@@ -1573,7 +1573,13 @@ fn infer_callable_param_types_for_call(
                 if let Some(ref c) = cls {
                     let resolved =
                         crate::virtual_members::resolve_class_fully(c, closure_ctx.class_loader);
-                    find_callable_params_on_method(&resolved, &method_name, arg_idx)
+                    let receiver_fqn = c.fqn();
+                    find_callable_params_on_method(&resolved, &method_name, arg_idx).map(|params| {
+                        params
+                            .into_iter()
+                            .map(|ty| ty.replace_self(&receiver_fqn))
+                            .collect()
+                    })
                 } else {
                     None
                 }
@@ -1601,7 +1607,7 @@ fn find_callable_params_on_receiver_classes(
     method_name: &str,
     arg_idx: usize,
     closure_ctx: &HoverClosureCtx<'_>,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     for cls in classes {
         let resolved = crate::virtual_members::resolve_class_fully(cls, closure_ctx.class_loader);
         if let Some(params) = find_callable_params_on_method(&resolved, method_name, arg_idx) {
@@ -1609,11 +1615,7 @@ fn find_callable_params_on_receiver_classes(
             let receiver_fqn = cls.fqn();
             let result = params
                 .into_iter()
-                .map(|ty| {
-                    crate::php_type::PhpType::parse(&ty)
-                        .replace_self(&receiver_fqn)
-                        .to_string()
-                })
+                .map(|ty| ty.replace_self(&receiver_fqn))
                 .collect();
             return Some(result);
         }
@@ -1626,7 +1628,7 @@ fn find_callable_params_on_method(
     class: &ClassInfo,
     method_name: &str,
     arg_idx: usize,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     let method = class.methods.iter().find(|m| m.name == method_name)?;
     let param = method.parameters.get(arg_idx)?;
     let hint = param.type_hint.as_ref()?;
@@ -1637,7 +1639,7 @@ fn find_callable_params_on_method(
         Some(
             callable_params
                 .iter()
-                .map(|cp| cp.type_hint.to_string())
+                .map(|cp| cp.type_hint.clone())
                 .collect(),
         )
     }

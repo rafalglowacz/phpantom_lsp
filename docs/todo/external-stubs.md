@@ -591,6 +591,7 @@ embedded stubs, built-in symbols would be invisible.
 | E2  | Project-level stubs as a type resolution source           | Medium | indexing.md (byte-level function/constant scanner) |
 | E3  | IDE-provided and `.phpantom.toml` stub paths              | Low    | E2                                                 |
 | E4  | Ship SPL overlay stubs, let external stubs override       | Low    | E2                                                 |
+| E7  | Stub-based framework patches (replace Rust patch system)  | Medium | E2 or E3                                           |
 
 E1 can be done immediately and independently. It provides
 immediate value (GTD on `array_map`, `PDO`, `Iterator`, etc.) with
@@ -663,3 +664,117 @@ answer (`true` or `false`) is written to `[stubs] install` in
 This is not implemented yet. The config writing infrastructure
 (using `toml_edit` to preserve comments and formatting) is a
 prerequisite.
+
+---
+
+## E7. Stub-based framework patches
+
+**Impact: Medium · Effort: Medium · Dependencies: E2 or E3**
+
+Replace the Rust-coded Laravel class patch system
+(`virtual_members/laravel/patches.rs`) with plain PHP stub files that
+override specific declarations. Instead of patching return types in
+Rust after resolution, ship corrected stubs that the normal stub
+loading pipeline picks up at a higher priority than the framework's
+own declarations.
+
+### Motivation
+
+The current patch system (`apply_laravel_patches`) fixes framework
+type inaccuracies by mutating resolved `ClassInfo` in Rust code.
+This works but has drawbacks:
+
+- **Contributor barrier.** Adding a patch for a new framework (Symfony,
+  WordPress, Drupal) or fixing a Laravel type requires Rust knowledge.
+- **Maintenance burden.** Framework updates may change signatures;
+  keeping Rust code in sync is harder than updating a PHP stub file.
+- **Not user-extensible.** Users cannot add their own patches for
+  project-specific quirks without forking PHPantom.
+
+Stub overrides solve all three. A PHP developer who understands the
+framework can write a corrected stub, submit a PR, and never touch
+Rust. Users can drop override stubs into their `.phpantom.toml`
+`[stubs] paths` to fix types locally.
+
+### What the stubs would look like
+
+For the Conditionable `when()`/`unless()` patch, the override stub
+would be:
+
+```php
+namespace Illuminate\Support\Traits;
+
+trait Conditionable {
+    /** @return $this */
+    public function when(mixed $value = null, ?callable $callback = null, ?callable $default = null): mixed {}
+
+    /** @return $this */
+    public function unless(mixed $value = null, ?callable $callback = null, ?callable $default = null): mixed {}
+}
+```
+
+For the Eloquent Builder `__call` patch:
+
+```php
+namespace Illuminate\Database\Eloquent;
+
+class Builder {
+    /** @return static */
+    public function __call(string $method, array $parameters): mixed {}
+
+    /** @return static */
+    public static function __callStatic(string $method, array $parameters): mixed {}
+}
+```
+
+These are standard PHP stub files. They declare only the members that
+need overriding. The stub loading pipeline merges them at a higher
+priority than the framework's own declarations, so the corrected
+`@return` types win.
+
+### Bundled override stubs
+
+PHPantom would ship a set of override stubs for common frameworks,
+organized by framework:
+
+```
+stubs/overrides/
+├── laravel/
+│   ├── Conditionable.stub.php
+│   ├── EloquentBuilder.stub.php
+│   └── ...
+├── symfony/
+│   └── ...
+└── wordpress/
+    └── ...
+```
+
+These would be embedded at build time (like phpstorm-stubs today) and
+loaded into the stub index at a priority above vendor stubs but below
+user `.phpantom.toml` paths. Framework detection (already done for
+Laravel via `composer.json` inspection) controls which set is loaded.
+
+### User-provided override stubs
+
+Once E3 lands, users can place their own override stubs in a
+`.phpantom.toml` `[stubs] paths` directory. Since user paths have the
+highest priority, they override both bundled overrides and vendor
+stubs. This makes the system fully extensible without code changes.
+
+### Migration path
+
+1. Implement E2 or E3 (external stub loading with priority).
+2. Write override stubs for the patches currently in
+   `patches.rs` (Builder `__call`, Conditionable `when`/`unless`).
+3. Add a bundled-overrides loading phase to the stub pipeline,
+   between vendor stubs and user stubs.
+4. Remove the Rust patch functions from `patches.rs`.
+5. Document how to contribute framework override stubs (just PHP,
+   no Rust needed).
+
+### Scope of the Rust patch system until then
+
+The current `patches.rs` module handles the known cases correctly
+and is well-tested. It stays in place until the stub override
+infrastructure from E2/E3 is ready. New patches can still be added
+in Rust in the interim.

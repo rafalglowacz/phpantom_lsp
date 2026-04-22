@@ -111,7 +111,7 @@ fn accessor_type_with_single_generic_arg() {
         "firstName",
         Some("Illuminate\\Database\\Eloquent\\Casts\\Attribute<string>"),
     );
-    assert_eq!(extract_modern_accessor_type(&method), "string");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "string");
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn accessor_type_with_two_generic_args() {
         "firstName",
         Some("Illuminate\\Database\\Eloquent\\Casts\\Attribute<string, never>"),
     );
-    assert_eq!(extract_modern_accessor_type(&method), "string");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "string");
 }
 
 #[test]
@@ -129,13 +129,13 @@ fn accessor_type_canonical_fqn() {
         "firstName",
         Some("Illuminate\\Database\\Eloquent\\Casts\\Attribute<int>"),
     );
-    assert_eq!(extract_modern_accessor_type(&method), "int");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "int");
 }
 
 #[test]
 fn accessor_type_short_name_with_generic() {
     let method = make_method("firstName", Some("Attribute<bool>"));
-    assert_eq!(extract_modern_accessor_type(&method), "bool");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "bool");
 }
 
 #[test]
@@ -144,25 +144,28 @@ fn accessor_type_no_generic_falls_back_to_mixed() {
         "firstName",
         Some("Illuminate\\Database\\Eloquent\\Casts\\Attribute"),
     );
-    assert_eq!(extract_modern_accessor_type(&method), "mixed");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "mixed");
 }
 
 #[test]
 fn accessor_type_no_return_type_falls_back_to_mixed() {
     let method = make_method("firstName", None);
-    assert_eq!(extract_modern_accessor_type(&method), "mixed");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "mixed");
 }
 
 #[test]
 fn accessor_type_nullable_generic_arg() {
     let method = make_method("firstName", Some("Attribute<?string>"));
-    assert_eq!(extract_modern_accessor_type(&method), "?string");
+    assert_eq!(extract_modern_accessor_type(&method).to_string(), "?string");
 }
 
 #[test]
 fn accessor_type_union_generic_arg() {
     let method = make_method("firstName", Some("Attribute<string|null>"));
-    assert_eq!(extract_modern_accessor_type(&method), "string|null");
+    assert_eq!(
+        extract_modern_accessor_type(&method).to_string(),
+        "string|null"
+    );
 }
 
 // ── is_accessor_method ──────────────────────────────────────────

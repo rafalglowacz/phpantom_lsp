@@ -63,7 +63,7 @@ thread_local! {
     static IN_CLOSURE_THIS_OVERRIDE: Cell<bool> = const { Cell::new(false) };
 }
 
-use crate::parser::extract_hint_string;
+use crate::parser::extract_hint_type;
 use crate::parser::with_parsed_program;
 use crate::types::{AccessKind, ClassInfo, FunctionInfo, MethodInfo, ResolvedType};
 
@@ -506,8 +506,8 @@ fn closure_this_from_function_params(
     ctx: &ResolutionCtx<'_>,
 ) -> Option<ClassInfo> {
     let param = fi.parameters.get(arg_idx)?;
-    let raw_type = param.closure_this_type.as_deref()?;
-    resolve_closure_this_type(raw_type, None, ctx)
+    let php_type = param.closure_this_type.as_ref()?;
+    resolve_closure_this_type(php_type, None, ctx)
 }
 
 /// Look up `closure_this_type` on an instance method's parameter at
@@ -525,8 +525,9 @@ fn closure_this_from_receiver(
         return None;
     }
     let obj_text = ctx.content[start..end].trim();
-    let receiver_classes =
-        crate::completion::resolver::resolve_target_classes(obj_text, AccessKind::Arrow, ctx);
+    let receiver_classes = ResolvedType::into_arced_classes(
+        crate::completion::resolver::resolve_target_classes(obj_text, AccessKind::Arrow, ctx),
+    );
     for cls in &receiver_classes {
         let resolved = crate::virtual_members::resolve_class_fully_maybe_cached(
             cls,
@@ -583,8 +584,8 @@ fn closure_this_from_method_params(
     ctx: &ResolutionCtx<'_>,
 ) -> Option<ClassInfo> {
     let param = method.parameters.get(arg_idx)?;
-    let raw_type = param.closure_this_type.as_deref()?;
-    resolve_closure_this_type(raw_type, owner, ctx)
+    let php_type = param.closure_this_type.as_ref()?;
+    resolve_closure_this_type(php_type, owner, ctx)
 }
 
 /// Resolve a raw `@param-closure-this` type string to a `ClassInfo`.
@@ -593,16 +594,17 @@ fn closure_this_from_method_params(
 /// declaring class (owner), and resolves fully-qualified class names
 /// through the class loader.
 fn resolve_closure_this_type(
-    raw_type: &str,
+    php_type: &PhpType,
     owner: Option<&ClassInfo>,
     ctx: &ResolutionCtx<'_>,
 ) -> Option<ClassInfo> {
-    let type_str = raw_type.trim_start_matches('\\');
-
     // `$this`, `static`, and `self` all refer to the declaring class.
-    if type_str == "$this" || type_str == "static" || type_str == "self" {
+    if php_type.is_self_like() {
         return owner.cloned().or_else(|| ctx.current_class.cloned());
     }
+
+    // Extract the base class name without stringifying.
+    let type_str = php_type.base_name()?;
 
     // Try local classes first, then the cross-file loader.
     if let Some(cls) = ctx.all_classes.iter().find(|c| c.name == type_str) {
@@ -1129,7 +1131,7 @@ fn try_resolve_closure_in_call_args<'b, F>(
     infer_fn: F,
 ) -> bool
 where
-    F: Fn(usize) -> Vec<String>,
+    F: Fn(usize) -> Vec<PhpType>,
 {
     for (arg_idx, arg) in arguments.iter().enumerate() {
         let arg_expr = match arg {
@@ -1239,22 +1241,18 @@ pub(in crate::completion) fn try_standalone_var_docblock(
         ctx.cursor_offset as usize,
         ctx.var_name,
     ) {
-        let resolved = crate::completion::type_resolution::type_hint_to_classes(
-            &raw_type,
+        let parsed = raw_type;
+        let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+            &parsed,
             &ctx.current_class.name,
             ctx.all_classes,
             ctx.class_loader,
         );
         if !resolved.is_empty() {
-            *results = ResolvedType::from_classes_with_hint(
-                resolved,
-                crate::php_type::PhpType::parse(&raw_type),
-            );
-        } else if crate::php_type::PhpType::parse(&raw_type).is_informative() {
+            *results = ResolvedType::from_classes_with_hint(resolved, parsed);
+        } else if parsed.is_informative() {
             // Non-class types like `array{key: string}` or `int[]`.
-            *results = vec![ResolvedType::from_type_string(
-                crate::php_type::PhpType::parse(&raw_type),
-            )];
+            *results = vec![ResolvedType::from_type_string(parsed)];
         }
     }
 }
@@ -1276,16 +1274,19 @@ fn resolve_closure_params_with_inferred(
     parameter_list: &FunctionLikeParameterList<'_>,
     ctx: &VarResolutionCtx<'_>,
     results: &mut Vec<ResolvedType>,
-    inferred_types: &[String],
+    inferred_types: &[PhpType],
 ) {
     let mut matched_param_is_variadic = false;
     for (idx, param) in parameter_list.parameters.iter().enumerate() {
         let pname = param.variable.name.to_string();
         if pname == ctx.var_name {
             matched_param_is_variadic = param.ellipsis.is_some();
+            // Clone the inferred type (if any) so that all branches
+            // below can reuse it without reborrowing the slice.
+            let parsed_inferred = inferred_types.get(idx).cloned();
             // 1. Try the explicit type hint first.
             if let Some(hint) = &param.hint {
-                let type_str = extract_hint_string(hint);
+                let hint_type = extract_hint_type(hint);
 
                 // When the explicit hint is a bare class name (no
                 // generic args) and the inferred type from the callable
@@ -1297,10 +1298,11 @@ fn resolve_closure_params_with_inferred(
                 // template substitution so that foreach iteration resolves
                 // the element type.
                 if let Some(inferred) = inferred_types.get(idx)
-                    && inferred_type_is_more_specific(&type_str, inferred)
+                    && inferred_type_is_more_specific(&hint_type, inferred)
                 {
-                    let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                        inferred,
+                    let pi = parsed_inferred.as_ref().unwrap();
+                    let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                        pi,
                         &ctx.current_class.name,
                         ctx.all_classes,
                         ctx.class_loader,
@@ -1308,18 +1310,19 @@ fn resolve_closure_params_with_inferred(
                     if !resolved.is_empty() {
                         *results = ResolvedType::from_classes_with_hint(
                             resolved,
-                            PhpType::parse(inferred),
+                            parsed_inferred.unwrap(),
                         );
                         break;
                     }
                 }
 
-                let resolved_classes = crate::completion::type_resolution::type_hint_to_classes(
-                    &type_str,
-                    &ctx.current_class.name,
-                    ctx.all_classes,
-                    ctx.class_loader,
-                );
+                let resolved_classes =
+                    crate::completion::type_resolution::type_hint_to_classes_typed(
+                        &hint_type,
+                        &ctx.current_class.name,
+                        ctx.all_classes,
+                        ctx.class_loader,
+                    );
                 if !resolved_classes.is_empty() {
                     // When the inferred type from the callable signature
                     // is a subclass of the explicit type hint, prefer
@@ -1328,10 +1331,10 @@ fn resolve_closure_params_with_inferred(
                     // says `callable(BrandTranslation): void` where
                     // `BrandTranslation extends Model`.  The narrower
                     // inferred type gives better completion results.
-                    if let Some(inferred) = inferred_types.get(idx) {
+                    if let Some(ref pi) = parsed_inferred {
                         let inferred_resolved =
-                            crate::completion::type_resolution::type_hint_to_classes(
-                                inferred,
+                            crate::completion::type_resolution::type_hint_to_classes_typed(
+                                pi,
                                 &ctx.current_class.name,
                                 ctx.all_classes,
                                 ctx.class_loader,
@@ -1339,9 +1342,9 @@ fn resolve_closure_params_with_inferred(
                         if !inferred_resolved.is_empty()
                             && inferred_resolved.iter().all(|inferred_cls| {
                                 resolved_classes.iter().any(|explicit_cls| {
-                                    crate::completion::types::narrowing::is_subtype_of(
-                                        inferred_cls,
-                                        &explicit_cls.name,
+                                    crate::util::is_subtype_of_names(
+                                        &inferred_cls.fqn(),
+                                        &explicit_cls.fqn(),
                                         ctx.class_loader,
                                     )
                                 })
@@ -1349,12 +1352,13 @@ fn resolve_closure_params_with_inferred(
                         {
                             *results = ResolvedType::from_classes_with_hint(
                                 inferred_resolved,
-                                PhpType::parse(inferred),
+                                parsed_inferred.unwrap(),
                             );
                             break;
                         }
                     }
-                    *results = ResolvedType::from_classes(resolved_classes);
+                    *results =
+                        ResolvedType::from_classes_with_hint(resolved_classes, hint_type.clone());
                     break;
                 }
 
@@ -1369,16 +1373,16 @@ fn resolve_closure_params_with_inferred(
                     param_start,
                     ctx.var_name,
                 );
-                if let Some(ref dt) = docblock_type {
-                    let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                        dt,
+                if let Some(ref parsed_dt) = docblock_type {
+                    let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                        parsed_dt,
                         &ctx.current_class.name,
                         ctx.all_classes,
                         ctx.class_loader,
                     );
                     if !resolved.is_empty() {
                         *results =
-                            ResolvedType::from_classes_with_hint(resolved, PhpType::parse(dt));
+                            ResolvedType::from_classes_with_hint(resolved, parsed_dt.clone());
                         break;
                     }
                 }
@@ -1387,22 +1391,22 @@ fn resolve_closure_params_with_inferred(
                 // hover and diagnostics can see the parameter's type
                 // even when it's a scalar.  Prefer the docblock type
                 // over the native type when available.
-                let best_type = docblock_type.unwrap_or(type_str);
-                *results = vec![ResolvedType::from_type_string(PhpType::parse(&best_type))];
+                let best_type = docblock_type.unwrap_or_else(|| hint_type.clone());
+                *results = vec![ResolvedType::from_type_string(best_type)];
                 break;
             }
             // 2. Fall back to the inferred type from the callable
             //    signature of the enclosing method/function call.
-            if let Some(inferred) = inferred_types.get(idx) {
-                let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                    inferred,
+            if let Some(ref pi) = parsed_inferred {
+                let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                    pi,
                     &ctx.current_class.name,
                     ctx.all_classes,
                     ctx.class_loader,
                 );
                 if !resolved.is_empty() {
                     *results =
-                        ResolvedType::from_classes_with_hint(resolved, PhpType::parse(inferred));
+                        ResolvedType::from_classes_with_hint(resolved, parsed_inferred.unwrap());
                 }
             }
             break;
@@ -1418,7 +1422,7 @@ fn resolve_closure_params_with_inferred(
     // `PhpType::extract_value_type`.
     if matched_param_is_variadic && !results.is_empty() {
         for rt in results.iter_mut() {
-            rt.type_string = PhpType::Generic("list".to_string(), vec![rt.type_string.clone()]);
+            rt.type_string = PhpType::list(rt.type_string.clone());
             // The variable is now an array, not a class instance,
             // so clear the class_info.
             rt.class_info = None;
@@ -1434,18 +1438,15 @@ fn resolve_closure_params_with_inferred(
 /// arguments (e.g. `Collection<int, Customer>`).  Namespace-qualified
 /// names are compared by their last segment so that `Collection` matches
 /// `Illuminate\Support\Collection<int, Customer>`.
-fn inferred_type_is_more_specific(explicit_hint: &str, inferred: &str) -> bool {
-    let explicit_parsed = PhpType::parse(explicit_hint);
-    let inferred_parsed = PhpType::parse(inferred);
-
+fn inferred_type_is_more_specific(explicit_hint: &PhpType, inferred: &PhpType) -> bool {
     // The explicit hint must be a bare class name (no generic args).
-    let explicit_base = match &explicit_parsed {
+    let explicit_base = match explicit_hint {
         PhpType::Named(name) => name.as_str(),
         _ => return false,
     };
 
     // The inferred type must be a generic type (carries generic args).
-    let inferred_base = match &inferred_parsed {
+    let inferred_base = match inferred {
         PhpType::Generic(name, _) => name.as_str(),
         _ => return false,
     };
@@ -1482,7 +1483,7 @@ fn infer_callable_params_from_function(
     arg_idx: usize,
     arguments: &TokenSeparatedSequence<'_, argument::Argument<'_>>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let rctx = ctx.as_resolution_ctx();
     let func_info = if let Some(fl) = rctx.function_loader {
         fl(func_name)
@@ -1500,18 +1501,10 @@ fn infer_callable_params_from_function(
         // concrete element type (`PurchaseFileProduct`).
         if !params.is_empty() && !fi.template_params.is_empty() && !fi.template_bindings.is_empty()
         {
-            let text_args = extract_argument_texts(arguments, ctx.content);
-            let text_args_joined = text_args.join(", ");
-            let subs =
-                super::rhs_resolution::build_function_template_subs(&fi, &text_args_joined, &rctx);
+            let arg_texts = extract_argument_texts(arguments, ctx.content);
+            let subs = super::rhs_resolution::build_function_template_subs(&fi, &arg_texts, &rctx);
             if !subs.is_empty() {
-                params = params
-                    .into_iter()
-                    .map(|p| {
-                        let substituted = crate::inheritance::apply_substitution(&p, &subs);
-                        substituted.into_owned()
-                    })
-                    .collect();
+                params = params.into_iter().map(|p| p.substitute(&subs)).collect();
             }
         }
 
@@ -1555,7 +1548,7 @@ fn infer_callable_params_from_receiver(
     arg_idx: usize,
     first_arg_text: Option<&str>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     // Guard against infinite recursion when nested closures reuse the
     // same variable name (e.g. `$q` in both an outer and inner closure).
     // The cycle is: infer_callable_params_from_receiver →
@@ -1576,8 +1569,9 @@ fn infer_callable_params_from_receiver(
     }
     let obj_text = ctx.content[start..end].trim();
     let rctx = ctx.as_resolution_ctx();
-    let receiver_classes =
-        crate::completion::resolver::resolve_target_classes(obj_text, AccessKind::Arrow, &rctx);
+    let receiver_classes = ResolvedType::into_arced_classes(
+        crate::completion::resolver::resolve_target_classes(obj_text, AccessKind::Arrow, &rctx),
+    );
 
     // For relation-query methods (whereHas, etc.), override the closure
     // parameter type with Builder<RelatedModel> resolved from the
@@ -1594,18 +1588,21 @@ fn infer_callable_params_from_receiver(
 
     let params = find_callable_params_on_classes(&receiver_classes, method_name, arg_idx, ctx);
 
-    // Replace `$this` / `static` tokens with the receiver class FQN
+    // Replace `$this` / `static` tokens with the receiver's full type
     // so that `resolve_closure_params_with_inferred` resolves them
     // against the declaring class rather than the user's current class.
+    //
+    // When the receiver is a generic class whose template params have
+    // already been substituted (e.g. `Builder<Product>`), we need to
+    // reconstruct the full generic type so that the inferred callable
+    // param type carries the generic args.  Without this, `$this` on
+    // `Builder<Product>` would degrade to bare `Builder`, losing the
+    // model type and preventing scope method resolution.
     let result = if let Some(receiver) = receiver_classes.first() {
-        let receiver_fqn = receiver.fqn();
+        let receiver_type = build_receiver_self_type(receiver, ctx.class_loader);
         params
             .into_iter()
-            .map(|ty| {
-                crate::php_type::PhpType::parse(&ty)
-                    .replace_self(&receiver_fqn)
-                    .to_string()
-            })
+            .map(|p| p.replace_self_with_type(&receiver_type))
             .collect()
     } else {
         params
@@ -1623,7 +1620,7 @@ fn infer_callable_params_from_static_receiver(
     arg_idx: usize,
     first_arg_text: Option<&str>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let class_name = match class_expr {
         Expression::Self_(_) => Some(ctx.current_class.name.clone()),
         Expression::Static(_) => Some(ctx.current_class.name.clone()),
@@ -1660,11 +1657,7 @@ fn infer_callable_params_from_static_receiver(
         let owner_fqn = cls.fqn();
         params
             .into_iter()
-            .map(|ty| {
-                crate::php_type::PhpType::parse(&ty)
-                    .replace_self(&owner_fqn)
-                    .to_string()
-            })
+            .map(|p| p.replace_self(&owner_fqn))
             .collect()
     } else {
         vec![]
@@ -1678,7 +1671,7 @@ fn find_callable_params_on_classes(
     method_name: &str,
     arg_idx: usize,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     for cls in classes {
         let resolved = crate::virtual_members::resolve_class_fully_maybe_cached(
             cls,
@@ -1700,7 +1693,7 @@ fn find_callable_params_on_method(
     method_name: &str,
     arg_idx: usize,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let method = class.methods.iter().find(|m| m.name == method_name);
     if let Some(m) = method {
         extract_callable_params_at(&m.parameters, arg_idx, ctx)
@@ -1716,7 +1709,7 @@ fn extract_callable_params_at(
     params: &[crate::types::ParameterInfo],
     arg_idx: usize,
     _ctx: &VarResolutionCtx<'_>,
-) -> Vec<String> {
+) -> Vec<PhpType> {
     let param = params.get(arg_idx);
     if let Some(p) = param
         && let Some(ref hint) = p.type_hint
@@ -1724,7 +1717,7 @@ fn extract_callable_params_at(
     {
         return callable_params
             .iter()
-            .map(|cp| cp.type_hint.to_string())
+            .map(|cp| cp.type_hint.clone())
             .collect();
     }
     vec![]
@@ -1772,7 +1765,7 @@ fn try_relation_query_override(
     method_name: &str,
     first_arg_text: Option<&str>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<Vec<String>> {
+) -> Option<Vec<PhpType>> {
     // Only applies to the known relation-query methods.
     if !RELATION_QUERY_METHODS.contains(&method_name) {
         return None;
@@ -1795,8 +1788,7 @@ fn try_relation_query_override(
     let builder_type = PhpType::Generic(
         ELOQUENT_BUILDER_FQN.to_string(),
         vec![PhpType::Named(related_fqn)],
-    )
-    .to_string();
+    );
 
     Some(vec![builder_type])
 }
@@ -1807,6 +1799,98 @@ fn try_relation_query_override(
 /// `Builder<Model>`, extract the model from the Builder's method return
 /// types (which contain the substituted generic arg, e.g.
 /// `Builder<Brand>` → `Brand`).
+/// Build a `PhpType` representing the receiver class for `$this`/`static`
+/// replacement in callable parameter inference.
+///
+/// For most classes this returns `PhpType::Named(fqn)`.  For classes
+/// whose template parameters have been concretely substituted (detected
+/// by scanning method return types for generic signatures), the full
+/// generic type is reconstructed.  For example, an Eloquent
+/// `Builder<Product>` receiver produces
+/// `PhpType::Generic("Illuminate\\Database\\Eloquent\\Builder", [Named("App\\Product")])`
+/// instead of a bare `PhpType::Named("Illuminate\\Database\\Eloquent\\Builder")`.
+///
+/// This preserves generic args through callable param inference so that
+/// `callable($this)` on `Builder<Product>` infers `Builder<Product>`,
+/// not bare `Builder`.
+fn build_receiver_self_type(
+    receiver: &ClassInfo,
+    _class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> PhpType {
+    let fqn = receiver.fqn();
+
+    // Only attempt reconstruction when the class declares template
+    // params — otherwise there are no generic args to recover.
+    if receiver.template_params.is_empty() {
+        return PhpType::Named(fqn);
+    }
+
+    // For Eloquent Builder, extract the model name from method return
+    // types where generic substitution has already been applied.
+    if (receiver.name == "Builder" || fqn == ELOQUENT_BUILDER_FQN)
+        && let Some(model_type) = extract_model_from_builder(receiver)
+    {
+        return PhpType::Generic(ELOQUENT_BUILDER_FQN.to_string(), vec![model_type]);
+    }
+
+    // General case: try to recover concrete generic args from method
+    // return types that reference the class itself with generic params.
+    // For example, if a `Collection<int, User>` has a method returning
+    // `Collection<int, User>`, we can extract `[int, User]` as the
+    // concrete args.
+    if let Some(args) = extract_generic_args_from_methods(receiver, &fqn) {
+        return PhpType::Generic(fqn, args);
+    }
+
+    // Fallback: if we have a parent class with @extends generics and
+    // only one template param, try to extract from the parent chain.
+    // This covers cases like Relation<TRelatedModel> subclasses.
+    if !receiver.extends_generics.is_empty() && receiver.template_params.len() == 1 {
+        for (_, args) in &receiver.extends_generics {
+            if let Some(first_arg) = args.first() {
+                // Skip raw template param names that weren't substituted.
+                let is_unsubstituted = if let PhpType::Named(name) = first_arg {
+                    receiver.template_params.contains(name)
+                } else {
+                    false
+                };
+                if !is_unsubstituted {
+                    return PhpType::Generic(fqn, vec![first_arg.clone()]);
+                }
+            }
+        }
+    }
+
+    PhpType::Named(fqn)
+}
+
+/// Try to extract concrete generic args from a class's own methods.
+///
+/// Scans method return types for `ClassName<Arg1, Arg2, ...>` patterns
+/// where the base name matches the class, and the args are concrete
+/// (not raw template param names).
+fn extract_generic_args_from_methods(class: &ClassInfo, class_fqn: &str) -> Option<Vec<PhpType>> {
+    let class_short = crate::util::short_name(class_fqn);
+    for method in &class.methods {
+        if let Some(PhpType::Generic(base, args)) = &method.return_type {
+            let base_short = crate::util::short_name(base);
+            if (base == class_fqn || base_short.eq_ignore_ascii_case(class_short))
+                && !args.is_empty()
+                && args.iter().all(|a| {
+                    if let PhpType::Named(n) = a {
+                        !class.template_params.contains(n)
+                    } else {
+                        true
+                    }
+                })
+            {
+                return Some(args.clone());
+            }
+        }
+    }
+    None
+}
+
 fn find_model_from_receivers(
     receiver_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
@@ -1823,8 +1907,8 @@ fn find_model_from_receivers(
         // from any method's return type that is `Builder<X>`.
         let cls_fqn = cls.fqn();
         if (cls.name == "Builder" || cls_fqn == ELOQUENT_BUILDER_FQN)
-            && let Some(model_fqn) = extract_model_from_builder(cls)
-            && let Some(model_cls) = class_loader(&model_fqn)
+            && let Some(model_type) = extract_model_from_builder(cls)
+            && let Some(model_cls) = model_type.base_name().and_then(class_loader)
             && extends_eloquent_model(&model_cls, class_loader)
         {
             return Some(model_cls);
@@ -1833,22 +1917,18 @@ fn find_model_from_receivers(
     None
 }
 
-/// Extract the model FQN from a resolved `Builder<Model>` class by
+/// Extract the model type from a resolved `Builder<Model>` class by
 /// scanning its method return types for `Builder<X>` and returning `X`.
-fn extract_model_from_builder(builder: &ClassInfo) -> Option<String> {
+fn extract_model_from_builder(builder: &ClassInfo) -> Option<PhpType> {
     for method in &builder.methods {
-        if let Some(ref ret) = method.return_type {
-            let ret_str = ret.to_string();
-            let parsed = PhpType::parse(&ret_str);
-            if let PhpType::Generic(base, args) = &parsed
-                && !args.is_empty()
-                && (base == ELOQUENT_BUILDER_FQN || base == "Builder")
-            {
-                let model = args[0].to_string();
-                // Skip unsubstituted template params like "TModel".
-                if !model.is_empty() && model != "TModel" {
-                    return Some(model);
-                }
+        if let Some(ref ret) = method.return_type
+            && let PhpType::Generic(base, args) = ret
+            && !args.is_empty()
+            && (base == ELOQUENT_BUILDER_FQN || base == "Builder")
+        {
+            // Skip unsubstituted template params like "TModel".
+            if !args[0].is_empty() && !args[0].is_named("TModel") {
+                return Some(args[0].clone());
             }
         }
     }

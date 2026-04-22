@@ -64,6 +64,7 @@ use crate::inheritance::{
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, ConstantInfo, MethodInfo, PropertyInfo};
 use crate::util::short_name;
+use crate::virtual_members::laravel::patches::apply_laravel_patches;
 
 /// Cache key for [`ResolvedClassCache`]: fully-qualified class name
 /// paired with the concrete generic type arguments used at this
@@ -94,7 +95,7 @@ pub fn new_resolved_class_cache() -> ResolvedClassCache {
 
 // ─── Thread-local resolved-class cache access ───────────────────────────────
 //
-// Many code paths (e.g. `type_hint_to_classes`) call `resolve_class_fully`
+// Many code paths (e.g. `type_hint_to_classes_typed`) call `resolve_class_fully`
 // without access to the `Backend`'s `resolved_class_cache`.  Rather than
 // threading the cache through dozens of function signatures, we use the
 // same thread-local guard pattern as the parse cache: the caller activates
@@ -452,7 +453,7 @@ pub fn merge_virtual_members(class: &mut ClassInfo, virtual_members: VirtualMemb
 fn type_specificity(hint: &Option<PhpType>) -> u8 {
     match hint {
         None => 0,
-        Some(PhpType::Named(n)) if n == "mixed" => 0,
+        Some(t) if t.is_mixed() => 0,
         Some(PhpType::Raw(s)) if s.trim().is_empty() => 0,
         Some(t) if t.has_type_structure() => 2,
         Some(_) => 1,
@@ -590,16 +591,62 @@ pub fn resolve_class_fully_maybe_cached(
     resolve_class_fully_inner(class, class_loader, cache, &[])
 }
 
-/// Compute the fully-qualified name used as the cache key.
+/// Resolve a class fully and apply generic type argument substitution,
+/// caching the combined result under `(FQN, generic_arg_strings)`.
 ///
-/// Mirrors the FQN construction in `update_ast_inner` and
-/// `parse_and_cache_content`: `namespace\ClassName` when a namespace
-/// is present, or just the short name otherwise.
-fn class_fqn(class: &ClassInfo) -> String {
-    match &class.file_namespace {
-        Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, class.name),
-        _ => class.name.clone(),
+/// For generic classes like `Builder<Product>`, calling
+/// [`resolve_class_fully_maybe_cached`] followed by
+/// [`apply_generic_args`](crate::inheritance::apply_generic_args) is
+/// expensive because `apply_generic_args` clones the entire class and
+/// substitutes template parameters in every method and property.  On
+/// an Eloquent model with hundreds of virtual members this takes
+/// milliseconds per call, and a large service file can trigger it
+/// hundreds of times for the same `(FQN, generic_args)` pair.
+///
+/// This function fuses the two steps and caches the result so the
+/// substitution is performed at most once per `(FQN, generic_args)`.
+/// When `generic_args` is empty or the class has no template
+/// parameters, this behaves identically to
+/// [`resolve_class_fully_maybe_cached`].
+pub fn resolve_class_fully_with_generics(
+    class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    cache: Option<&ResolvedClassCache>,
+    generic_arg_strings: &[String],
+    generic_args: &[crate::php_type::PhpType],
+) -> Arc<ClassInfo> {
+    // Fast path: no generics — just do the base resolution.
+    if generic_args.is_empty() {
+        return resolve_class_fully_inner(class, class_loader, cache, &[]);
     }
+
+    // Check the cache for (FQN, generic_args).
+    let fqn = class.fqn();
+    let cache_key: ResolvedClassCacheKey = (fqn, generic_arg_strings.to_vec());
+
+    if let Some(c) = cache {
+        let map = c.lock();
+        if let Some(cached) = map.get(&cache_key) {
+            return Arc::clone(cached);
+        }
+    }
+
+    // Resolve the base class (cached at (FQN, [])).
+    let base = resolve_class_fully_inner(class, class_loader, cache, &[]);
+
+    // Apply generic substitution.
+    let result = if !base.template_params.is_empty() {
+        Arc::new(crate::inheritance::apply_generic_args(&base, generic_args))
+    } else {
+        base
+    };
+
+    // Store the substituted result.
+    if let Some(c) = cache {
+        c.lock().insert(cache_key, Arc::clone(&result));
+    }
+
+    result
 }
 
 /// Shared implementation behind [`resolve_class_fully`] and
@@ -610,7 +657,7 @@ fn resolve_class_fully_inner(
     cache: Option<&ResolvedClassCache>,
     generic_args: &[String],
 ) -> Arc<ClassInfo> {
-    let fqn = class_fqn(class);
+    let fqn = class.fqn();
     let cache_key: ResolvedClassCacheKey = (fqn.clone(), generic_args.to_vec());
 
     // ── Cache lookup ────────────────────────────────────────────────
@@ -623,6 +670,17 @@ fn resolve_class_fully_inner(
 
     // ── Uncached resolution ─────────────────────────────────────────
     let mut merged = resolve_class_with_inheritance(class, class_loader);
+
+    // ── Pre-provider patches ────────────────────────────────────────
+    // Inject missing `@mixin` annotations before virtual member
+    // providers run, so that `collect_mixin_members` picks them up.
+    if fqn == "Illuminate\\Redis\\Connections\\Connection" {
+        let mixin = "Redis".to_string();
+        if !merged.mixins.contains(&mixin) {
+            merged.mixins.push(mixin);
+        }
+    }
+
     let providers = default_providers();
     if !providers.is_empty() {
         apply_virtual_members(&mut merged, class_loader, &providers, cache);
@@ -755,8 +813,24 @@ fn resolve_class_fully_inner(
             // this interface.  If the class (or a parent) declared
             // `@implements ThisInterface<Type1, Type2>`, map the
             // interface's template params to those concrete types.
-            let iface_subs =
+            let mut iface_subs =
                 build_implements_substitution_map(&iface_name, &iface, &all_implements_generics);
+
+            // When no @implements generics were provided but the interface
+            // declares template parameters, substitute each template param
+            // with its declared upper bound (or `mixed`).  Without this,
+            // raw template names like `TKey` / `TValue` leak through
+            // inherited method signatures into downstream consumers.
+            if iface_subs.is_empty() && !iface.template_params.is_empty() {
+                for param in &iface.template_params {
+                    let bound = iface
+                        .template_param_bounds
+                        .get(param)
+                        .cloned()
+                        .unwrap_or_else(PhpType::mixed);
+                    iface_subs.insert(param.clone(), bound);
+                }
+            }
 
             // Collect @extends / @implements generics from the
             // interface so that template substitutions flow through
@@ -790,7 +864,7 @@ fn resolve_class_fully_inner(
             // has unsubstituted template parameters.  Only use the cache
             // for interfaces without generic substitutions.
             if iface_subs.is_empty() {
-                let iface_key: ResolvedClassCacheKey = (class_fqn(&iface), Vec::new());
+                let iface_key: ResolvedClassCacheKey = (iface.fqn(), Vec::new());
                 if let Some(c) = cache {
                     let map = c.lock();
                     if let Some(cached) = map.get(&iface_key) {
@@ -819,16 +893,19 @@ fn resolve_class_fully_inner(
     // the merged Test2 class gets `implements_generics` containing
     // `("MyIterator", ["int", "string"])`.
     for (name, args) in &all_implements_generics {
-        if !merged
-            .implements_generics
-            .iter()
-            .any(|(n, _)| short_name(n) == short_name(name))
-        {
+        if !merged.implements_generics.iter().any(|(n, _)| n == name) {
             merged
                 .implements_generics
                 .push((name.clone(), args.clone()));
         }
     }
+
+    // ── Laravel class patches ──────────────────────────────────────
+    // Apply centralized post-resolution patches for Laravel classes.
+    // These modify existing members' type information (e.g. fixing
+    // return types) rather than adding new members.  See
+    // `laravel/patches.rs` for the full patch inventory.
+    apply_laravel_patches(&mut merged, &fqn);
 
     // ── Cache store ─────────────────────────────────────────────────
     let result = Arc::new(merged);
@@ -935,7 +1012,7 @@ fn merge_interface_members_into(
 /// `@implements` generics.
 ///
 /// Searches `all_implements_generics` for an entry whose class name
-/// matches `iface_name` (by short name comparison), then zips the
+/// matches `iface_name` (by FQN comparison), then zips the
 /// type arguments with the interface's `template_params`.
 ///
 /// Returns an empty map if no matching `@implements` annotation exists
@@ -949,11 +1026,9 @@ fn build_implements_substitution_map(
         return HashMap::new();
     }
 
-    let iface_short = short_name(iface_name);
-
     let type_args = all_implements_generics
         .iter()
-        .find(|(name, _)| short_name(name) == iface_short)
+        .find(|(name, _)| name == iface_name)
         .map(|(_, args)| args);
 
     let type_args = match type_args {

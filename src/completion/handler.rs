@@ -38,12 +38,40 @@ use crate::Backend;
 use crate::completion::class_completion::{
     ClassCompletionParams, ClassNameContext, detect_class_name_context, is_class_declaration_name,
 };
-use crate::completion::named_args::{NamedArgContext, parse_existing_args};
+use crate::completion::named_args::{
+    NamedArgContext, cursor_inside_nested_bracket, parse_existing_args,
+};
 use crate::docblock::types::PHPDOC_TYPE_KEYWORDS;
+use crate::php_type::PhpType;
 use crate::symbol_map::SymbolKind;
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 use crate::types::{CompletionTarget, FileContext};
 use crate::util::{find_class_at_offset, position_to_byte_offset, position_to_offset};
+
+/// Append named-argument items into an existing [`CompletionResponse`].
+///
+/// If `named_arg_items` is empty the response is returned unchanged.
+/// Otherwise the items are appended to the response's item list,
+/// preserving the `is_incomplete` flag when the response is a
+/// [`CompletionList`].
+fn merge_named_args_into_response(
+    response: CompletionResponse,
+    named_arg_items: Vec<CompletionItem>,
+) -> CompletionResponse {
+    if named_arg_items.is_empty() {
+        return response;
+    }
+    match response {
+        CompletionResponse::Array(mut items) => {
+            items.extend(named_arg_items);
+            CompletionResponse::Array(items)
+        }
+        CompletionResponse::List(mut list) => {
+            list.items.extend(named_arg_items);
+            CompletionResponse::List(list)
+        }
+    }
+}
 
 /// Check whether a `(` immediately follows the cursor position (past any
 /// partial identifier the user has already typed).
@@ -295,10 +323,11 @@ impl Backend {
                 return Ok(self.complete_type_hint(&content, &th_ctx, &ctx, position, &uri));
             }
 
-            // ── Named argument completion ───────────────────────────
-            if let Some(response) = self.try_named_arg_completion(&uri, &content, position, &ctx) {
-                return Ok(Some(response));
-            }
+            // ── Named argument completion (collected, not short-circuited) ──
+            // Named arg items are always valid alongside normal
+            // completions, so collect them here and merge them into
+            // whatever strategy wins below.
+            let named_arg_items = self.collect_named_arg_items(&uri, &content, position, &ctx);
 
             // ── String context detection ────────────────────────────
             // Classify once and use throughout the remaining pipeline.
@@ -367,7 +396,10 @@ impl Backend {
 
             // ── Smart catch clause completion ───────────────────────
             if let Some(response) = self.try_catch_completion(&content, position, &ctx, &uri) {
-                return Ok(Some(response));
+                return Ok(Some(merge_named_args_into_response(
+                    response,
+                    named_arg_items,
+                )));
             }
 
             // ── `throw new` completion ──────────────────────────────
@@ -387,7 +419,15 @@ impl Backend {
             if let Some(response) =
                 self.try_class_constant_function_completion(&content, position, &ctx, &uri)
             {
-                return Ok(Some(response));
+                return Ok(Some(merge_named_args_into_response(
+                    response,
+                    named_arg_items,
+                )));
+            }
+
+            // No strategy matched, but we may still have named arg items.
+            if !named_arg_items.is_empty() {
+                return Ok(Some(CompletionResponse::Array(named_arg_items)));
             }
         }
 
@@ -433,7 +473,7 @@ impl Backend {
             };
 
         let smart = crate::completion::phpdoc::SmartContext {
-            inferred_inline_var_type: inferred_var_type.as_deref(),
+            inferred_inline_var_type: inferred_var_type,
             class_loader: Some(&class_loader),
             function_loader: Some(&function_loader),
         };
@@ -554,7 +594,10 @@ impl Backend {
                         partial_lower.is_empty() || name.to_lowercase().starts_with(&partial_lower)
                     })
                     .map(|(type_hint, name)| {
-                        let detail = type_hint.as_deref().unwrap_or("mixed").to_string();
+                        let detail = type_hint
+                            .as_ref()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| PhpType::mixed().to_string());
                         CompletionItem {
                             label: name.clone(),
                             kind: Some(CompletionItemKind::VARIABLE),
@@ -667,28 +710,32 @@ impl Backend {
 
     // ─── Strategy: named argument completion ─────────────────────────────
 
-    /// Try to offer `name:` argument completions inside function/method
+    /// Collect `name:` argument completion items inside function/method
     /// call parentheses.
     ///
-    /// Returns `None` when the cursor is not in a named-argument context
-    /// or when no parameters could be resolved.
-    fn try_named_arg_completion(
+    /// Returns an empty `Vec` when the cursor is not in a named-argument
+    /// context or when no parameters could be resolved.  The items are
+    /// meant to be **merged** into whatever other completion strategy
+    /// wins — named args are always valid alongside normal completions.
+    fn collect_named_arg_items(
         &self,
         uri: &str,
         content: &str,
         position: Position,
         ctx: &FileContext,
-    ) -> Option<CompletionResponse> {
+    ) -> Vec<CompletionItem> {
         // ── Primary path: AST-based detection via symbol map ────────
         // The symbol map's `CallSite` data handles chains, nesting,
         // and strings correctly.  Fall back to text scanning when the
         // AST has no hit (typically because the parser couldn't recover
         // from incomplete code).
-        let na_ctx = self
+        let na_ctx = match self
             .detect_named_arg_from_symbol_map(uri, content, position)
-            .or_else(|| {
-                crate::completion::named_args::detect_named_arg_context(content, position)
-            })?;
+            .or_else(|| crate::completion::named_args::detect_named_arg_context(content, position))
+        {
+            Some(ctx) => ctx,
+            None => return Vec::new(),
+        };
 
         let mut params = self.resolve_named_arg_params(&na_ctx, content, position, ctx);
 
@@ -715,16 +762,7 @@ impl Backend {
             }
         }
 
-        if params.is_empty() {
-            return None;
-        }
-
-        let items = crate::completion::named_args::build_named_arg_completions(&na_ctx, &params);
-        if items.is_empty() {
-            None
-        } else {
-            Some(CompletionResponse::Array(items))
-        }
+        crate::completion::named_args::build_named_arg_completions(&na_ctx, &params)
     }
 
     /// Detect a named-argument context using precomputed [`CallSite`] data
@@ -744,6 +782,19 @@ impl Backend {
 
         let cursor_byte_offset = position_to_offset(content, position);
         let cs = symbol_map.find_enclosing_call_site(cursor_byte_offset)?;
+
+        // ── Bail out when cursor is inside a nested `[…]` or `{…}` ─
+        // If the cursor sits inside an array literal or braced
+        // expression that is itself an argument, named-arg completion
+        // for the outer call must not fire — the user wants normal
+        // value completion, not parameter names.
+        if cursor_inside_nested_bracket(
+            content,
+            cs.args_start as usize,
+            cursor_byte_offset as usize,
+        ) {
+            return None;
+        }
 
         // ── Check eligibility at cursor ─────────────────────────────
         // Walk backward from cursor through identifier chars to find the
@@ -852,7 +903,7 @@ impl Backend {
         // `collect($x)->`) doesn't crash the LSP server process.
         // The variable-resolution path already has its own
         // catch_unwind, but the direct call-expression path
-        // (resolve_call_return_types_expr → type_hint_to_classes →
+        // (resolve_call_return_types_expr → type_hint_to_classes_typed →
         // class_loader → find_or_load_class → parse_php →
         // resolve_class_with_inheritance) does not.
         let member_items = crate::util::catch_panic_unwind_safe(
@@ -914,7 +965,7 @@ impl Backend {
                         }
                     }
 
-                    resolved
+                    ResolvedType::into_arced_classes(resolved)
                 };
                 if candidates.is_empty() {
                     return vec![];
@@ -1268,9 +1319,13 @@ impl Backend {
         let partial = match Self::extract_partial_class_name(content, position) {
             Some(p) => p,
             None => {
-                // Allow attribute completion on empty prefix (e.g. `#[`
-                // with nothing typed yet).
-                if matches!(class_ctx, ClassNameContext::Attribute(_)) {
+                // Allow attribute and namespace-declaration completion on
+                // empty prefix (e.g. `#[` or `namespace ` with nothing
+                // typed yet).
+                if matches!(
+                    class_ctx,
+                    ClassNameContext::Attribute(_) | ClassNameContext::NamespaceDeclaration
+                ) {
                     String::new()
                 }
                 // Allow keyword completion on empty prefix inside class-like
@@ -1324,7 +1379,8 @@ impl Backend {
 
         // ── `namespace` declaration → only namespace names ──────────
         if matches!(class_ctx, ClassNameContext::NamespaceDeclaration) {
-            let (ns_items, ns_incomplete) = self.build_namespace_completions(&partial, position);
+            let (ns_items, ns_incomplete) =
+                self.build_namespace_completions(&partial, position, current_uri);
             return Some(CompletionResponse::List(CompletionList {
                 is_incomplete: ns_incomplete,
                 items: ns_items,

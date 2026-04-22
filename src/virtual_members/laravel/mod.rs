@@ -80,6 +80,7 @@ mod builder;
 mod casts;
 mod factory;
 mod helpers;
+pub(crate) mod patches;
 mod relationships;
 mod scopes;
 mod where_property;
@@ -97,14 +98,15 @@ pub(crate) use relationships::count_property_to_relationship_method;
 pub use relationships::infer_relationship_from_body;
 pub(crate) use relationships::{RELATION_QUERY_METHODS, resolve_relation_chain};
 use relationships::{
-    RelationshipKind, build_property_type, classify_relationship, count_property_name,
-    extract_related_type,
+    RelationshipKind, build_property_type, classify_relationship_typed, count_property_name,
+    extract_related_type_typed,
 };
 
 pub use scopes::build_scope_methods_for_builder;
 use scopes::{build_scope_methods, is_scope_method};
 use where_property::{build_where_property_methods_for_class, lowercase_method_names};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use builder::build_builder_forwarded_methods;
@@ -112,6 +114,7 @@ use casts::cast_type_to_php_type;
 pub use factory::LaravelFactoryProvider;
 pub(crate) use factory::{factory_to_model_fqn, model_to_factory_fqn};
 
+use crate::php_type::PhpType;
 use crate::types::{ClassInfo, PropertyInfo};
 
 use super::{ResolvedClassCache, VirtualMemberProvider, VirtualMembers};
@@ -121,6 +124,21 @@ pub(crate) const ELOQUENT_MODEL_FQN: &str = "Illuminate\\Database\\Eloquent\\Mod
 
 /// The fully-qualified name of the Eloquent Builder class.
 pub const ELOQUENT_BUILDER_FQN: &str = "Illuminate\\Database\\Eloquent\\Builder";
+
+/// Build a substitution map that replaces `static`, `$this`, and `self`
+/// with the given type.
+///
+/// This is used across multiple Laravel virtual member providers
+/// (builder forwarding, model virtual methods, scope methods) to
+/// resolve self-referencing return types to concrete model or builder
+/// types.
+pub(super) fn self_ref_subs(ty: PhpType) -> HashMap<String, PhpType> {
+    HashMap::from([
+        ("static".to_owned(), ty.clone()),
+        ("$this".to_owned(), ty.clone()),
+        ("self".to_owned(), ty),
+    ])
+}
 
 // ─── Type-resolution helpers ────────────────────────────────────────────────
 //
@@ -150,7 +168,7 @@ pub const ELOQUENT_BUILDER_FQN: &str = "Illuminate\\Database\\Eloquent\\Builder"
 pub(crate) fn try_swap_custom_collection(
     cls: ClassInfo,
     base_fqn: &str,
-    generic_args: &[&str],
+    generic_args: &[PhpType],
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> ClassInfo {
@@ -159,17 +177,21 @@ pub(crate) fn try_swap_custom_collection(
     }
 
     // The last generic arg is typically the model type.
-    let model_arg = generic_args.last().unwrap();
-    let model_class = find_class_in(all_classes, model_arg)
+    let model_name = match generic_args.last().unwrap().base_name() {
+        Some(name) => name.to_string(),
+        None => return cls,
+    };
+    let model_class = find_class_in(all_classes, &model_name)
         .cloned()
-        .or_else(|| class_loader(model_arg).map(Arc::unwrap_or_clone));
+        .or_else(|| class_loader(&model_name).map(Arc::unwrap_or_clone));
 
     if let Some(ref mc) = model_class
-        && let Some(coll_name) = mc.laravel().and_then(|l| l.custom_collection.as_ref())
+        && let Some(coll_type) = mc.laravel().and_then(|l| l.custom_collection.as_ref())
     {
-        find_class_in(all_classes, coll_name)
+        let coll_name = coll_type.to_string();
+        find_class_in(all_classes, &coll_name)
             .cloned()
-            .or_else(|| class_loader(coll_name).map(Arc::unwrap_or_clone))
+            .or_else(|| class_loader(&coll_name).map(Arc::unwrap_or_clone))
             .unwrap_or(cls)
     } else {
         cls
@@ -199,7 +221,7 @@ pub(crate) fn try_inject_builder_scopes(
     result: &mut ClassInfo,
     raw_cls: &ClassInfo,
     base_fqn: &str,
-    generic_args: &[&str],
+    generic_args: &[PhpType],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) {
     if !is_eloquent_builder_fqn(base_fqn, raw_cls) || generic_args.is_empty() {
@@ -207,9 +229,12 @@ pub(crate) fn try_inject_builder_scopes(
     }
 
     // The first (or only) generic arg is the model type.
-    let model_arg = generic_args.first().unwrap();
+    let model_name = match generic_args.first().unwrap().base_name() {
+        Some(name) => name,
+        None => return,
+    };
 
-    inject_scopes_and_model_methods(result, model_arg, class_loader);
+    inject_scopes_and_model_methods(result, model_name, class_loader);
 }
 
 /// Inject scope methods and model virtual methods onto a class that has
@@ -231,12 +256,11 @@ pub(crate) fn try_inject_builder_scopes(
 pub(crate) fn try_inject_mixin_builder_scopes(
     result: &mut ClassInfo,
     raw_cls: &ClassInfo,
-    generic_args: &[&str],
+    generic_args: &[PhpType],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) {
     use std::collections::HashMap;
 
-    use crate::php_type::PhpType;
     use crate::types::MAX_INHERITANCE_DEPTH;
     use crate::util::short_name;
 
@@ -251,7 +275,7 @@ pub(crate) fn try_inject_mixin_builder_scopes(
     let mut root_subs: HashMap<String, PhpType> = HashMap::new();
     for (i, param_name) in raw_cls.template_params.iter().enumerate() {
         if let Some(arg) = generic_args.get(i) {
-            root_subs.insert(param_name.clone(), PhpType::parse(arg));
+            root_subs.insert(param_name.clone(), arg.clone());
         }
     }
 
@@ -339,10 +363,7 @@ fn find_builder_mixin_model(
         // Verify it's actually the Eloquent Builder (not some other
         // class named Builder).  If we can't load it, trust the FQN.
         if let Some(ref mixin_cls) = class_loader(mixin_name) {
-            let fqn = match mixin_cls.file_namespace.as_deref() {
-                Some(ns) => format!("{ns}\\{}", mixin_cls.name),
-                None => mixin_cls.name.clone(),
-            };
+            let fqn = mixin_cls.fqn();
             if fqn != ELOQUENT_BUILDER_FQN && mixin_cls.name != ELOQUENT_BUILDER_FQN {
                 continue;
             }
@@ -361,11 +382,10 @@ fn find_builder_mixin_model(
             && let Some(first_arg) = args.first()
         {
             let resolved = first_arg.substitute(active_subs);
-            let model_name = resolved.to_string();
-            // Only inject if we resolved to a concrete type
-            // (not still a template parameter name).
-            if !model_name.is_empty() && !root_cls.template_params.contains(&model_name) {
-                return Some(model_name);
+            if let Some(name) = resolved.base_name()
+                && !root_cls.template_params.iter().any(|p| p == name)
+            {
+                return Some(name.to_string());
             }
         }
     }
@@ -382,11 +402,11 @@ fn inject_scopes_and_model_methods(
     // 1. Inject scope methods.
     let scope_methods = build_scope_methods_for_builder(model_arg, class_loader);
     for method in scope_methods {
-        if !result
+        let already_exists = result
             .methods
             .iter()
-            .any(|m| m.name == method.name && m.is_static == method.is_static)
-        {
+            .any(|m| m.name == method.name && m.is_static == method.is_static);
+        if !already_exists {
             result.methods.push(method);
         }
     }
@@ -436,8 +456,6 @@ fn inject_model_virtual_methods(
     model_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) {
-    use std::collections::HashMap;
-
     use crate::php_type::PhpType;
 
     let model_class = match class_loader(model_name) {
@@ -464,12 +482,8 @@ fn inject_model_virtual_methods(
     // `Builder<static>`), so substituting `static` → model name
     // produces `Builder<Customer>`.  Using `Builder<Model>` here
     // would double-wrap to `Builder<Builder<Customer>>`.
-    let model_fqn = model_name.to_string();
-    let model_type = PhpType::Named(model_fqn.clone());
-    let mut subs = HashMap::new();
-    subs.insert("static".to_string(), model_type.clone());
-    subs.insert("$this".to_string(), model_type.clone());
-    subs.insert("self".to_string(), model_type);
+    let model_type = PhpType::Named(model_name.to_owned());
+    let subs = self_ref_subs(model_type);
 
     for method in &resolved_model.methods {
         // Only inject virtual methods (from @method tags).  Real
@@ -509,13 +523,9 @@ fn inject_model_virtual_methods(
 /// 3. The FQN constructed from `file_namespace + name` (PSR-4 loaded classes
 ///    where `name` is the short name only).
 fn is_eloquent_builder_fqn(base_fqn: &str, cls: &ClassInfo) -> bool {
-    let fqn_from_ns = cls
-        .file_namespace
-        .as_ref()
-        .map(|ns| format!("{ns}\\{}", cls.name));
     base_fqn == ELOQUENT_BUILDER_FQN
         || cls.name == ELOQUENT_BUILDER_FQN
-        || fqn_from_ns.as_deref() == Some(ELOQUENT_BUILDER_FQN)
+        || cls.fqn() == ELOQUENT_BUILDER_FQN
 }
 
 /// Find a class in a slice by name (short or FQN).
@@ -551,6 +561,11 @@ fn find_class_in<'a>(all_classes: &'a [Arc<ClassInfo>], name: &str) -> Option<&'
 /// `\Illuminate\Database\Eloquent\Collection<Post>`.
 pub struct LaravelModelProvider;
 
+/// Pre-built `Carbon\Carbon` type used for date-related virtual properties.
+fn carbon_type() -> PhpType {
+    PhpType::Named("Carbon\\Carbon".to_owned())
+}
+
 impl VirtualMemberProvider for LaravelModelProvider {
     /// Returns `true` if the class extends `Illuminate\Database\Eloquent\Model`.
     fn applies_to(
@@ -580,7 +595,10 @@ impl VirtualMemberProvider for LaravelModelProvider {
             for (column, cast_type) in &laravel.casts_definitions {
                 let php_type = cast_type_to_php_type(cast_type, class_loader);
                 seen_props.insert(column.clone());
-                properties.push(PropertyInfo::virtual_property(column, Some(&php_type)));
+                properties.push(PropertyInfo::virtual_property_typed(
+                    column,
+                    Some(&php_type),
+                ));
             }
 
             // ── $dates properties (deprecated, lower priority than $casts) ──
@@ -590,9 +608,9 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 if !seen_props.insert(column.clone()) {
                     continue;
                 }
-                properties.push(PropertyInfo::virtual_property(
+                properties.push(PropertyInfo::virtual_property_typed(
                     column,
-                    Some("Carbon\\Carbon"),
+                    Some(&carbon_type()),
                 ));
             }
 
@@ -603,7 +621,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 if !seen_props.insert(column.clone()) {
                     continue;
                 }
-                properties.push(PropertyInfo::virtual_property(column, Some(php_type)));
+                properties.push(PropertyInfo::virtual_property_typed(column, Some(php_type)));
             }
 
             // ── Column name properties (last-resort fallback) ───────
@@ -613,7 +631,10 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 if !seen_props.insert(column.clone()) {
                     continue;
                 }
-                properties.push(PropertyInfo::virtual_property(column, Some("mixed")));
+                properties.push(PropertyInfo::virtual_property_typed(
+                    column,
+                    Some(&PhpType::mixed()),
+                ));
             }
 
             // ── Timestamp properties ────────────────────────────────
@@ -636,8 +657,10 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 };
                 for col in [created_col, updated_col].into_iter().flatten() {
                     if seen_props.insert(col.to_string()) {
-                        properties
-                            .push(PropertyInfo::virtual_property(col, Some("Carbon\\Carbon")));
+                        properties.push(PropertyInfo::virtual_property_typed(
+                            col,
+                            Some(&carbon_type()),
+                        ));
                     }
                 }
             }
@@ -660,10 +683,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 let prop_name = legacy_accessor_property_name(&method.name);
                 properties.push(PropertyInfo {
                     deprecation_message: method.deprecation_message.clone(),
-                    ..PropertyInfo::virtual_property(
-                        &prop_name,
-                        method.return_type_str().as_deref(),
-                    )
+                    ..PropertyInfo::virtual_property_typed(&prop_name, method.return_type.as_ref())
                 });
                 continue;
             }
@@ -674,24 +694,23 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 let accessor_type = extract_modern_accessor_type(method);
                 properties.push(PropertyInfo {
                     deprecation_message: method.deprecation_message.clone(),
-                    ..PropertyInfo::virtual_property(&prop_name, Some(&accessor_type))
+                    ..PropertyInfo::virtual_property_typed(&prop_name, Some(&accessor_type))
                 });
                 continue;
             }
 
             // ── Relationship properties ─────────────────────────────
-            let return_type_str = method.return_type_str();
-            let return_type = match return_type_str.as_deref() {
+            let return_type = match method.return_type.as_ref() {
                 Some(rt) => rt,
                 None => continue,
             };
 
-            let kind = match classify_relationship(return_type) {
+            let kind = match classify_relationship_typed(return_type) {
                 Some(k) => k,
                 None => continue,
             };
 
-            let related_type = extract_related_type(return_type);
+            let related_type = extract_related_type_typed(return_type);
 
             // For collection relationships, use the *related* model's
             // custom_collection, not the owning model's.  For example,
@@ -702,23 +721,21 @@ impl VirtualMemberProvider for LaravelModelProvider {
             // `ProductCollection<Review>`.
             let custom_collection = if kind == RelationshipKind::Collection {
                 related_type
-                    .as_deref()
-                    .and_then(class_loader)
+                    .and_then(|t| t.base_name().and_then(class_loader))
                     .and_then(|related_class| {
                         related_class
                             .laravel
                             .as_ref()
-                            .and_then(|l| l.custom_collection.clone())
+                            .and_then(|l| l.custom_collection.as_ref().map(|c| c.to_string()))
                     })
             } else {
                 None
             };
 
-            let type_hint =
-                build_property_type(kind, related_type.as_deref(), custom_collection.as_deref());
+            let type_hint = build_property_type(kind, related_type, custom_collection.as_deref());
 
             if let Some(ref th) = type_hint {
-                properties.push(PropertyInfo::virtual_property(&method.name, Some(th)));
+                properties.push(PropertyInfo::virtual_property_typed(&method.name, Some(th)));
             }
         }
 
@@ -729,19 +746,21 @@ impl VirtualMemberProvider for LaravelModelProvider {
         // property with that name already exists (e.g. from an explicit
         // `@property` tag).
         for method in &class.methods {
-            let return_type_str = method.return_type_str();
-            let return_type = match return_type_str.as_deref() {
+            let return_type = match method.return_type.as_ref() {
                 Some(rt) => rt,
                 None => continue,
             };
-            if classify_relationship(return_type).is_none() {
+            if classify_relationship_typed(return_type).is_none() {
                 continue;
             }
             let count_name = count_property_name(&method.name);
             if !seen_props.insert(count_name.clone()) {
                 continue;
             }
-            properties.push(PropertyInfo::virtual_property(&count_name, Some("int")));
+            properties.push(PropertyInfo::virtual_property_typed(
+                &count_name,
+                Some(&PhpType::int()),
+            ));
         }
 
         // ── Builder-as-static forwarding ────────────────────────────

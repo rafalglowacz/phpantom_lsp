@@ -20,6 +20,7 @@ use crate::completion::named_args::{
     extract_call_expression, find_enclosing_open_paren, position_to_char_offset,
     split_args_top_level,
 };
+use crate::php_type::PhpType;
 
 use crate::symbol_map::SymbolMap;
 use crate::types::*;
@@ -203,37 +204,6 @@ fn format_param_label(param: &ParameterInfo) -> String {
     base
 }
 
-/// Shorten a type string by stripping namespace prefixes from every
-/// fully-qualified name, including names nested inside generic
-/// parameters.
-///
-/// For example `\App\Models\User` → `User`, `string` → `string`,
-/// `\App\User|\App\Admin` → `User|Admin`,
-/// `list<\App\User>` → `list<User>`,
-/// `array<string, \Ns\Cls>` → `array<string, Cls>`.
-fn shorten_type(ty: &str) -> String {
-    // Split on characters that delimit type names in PHP type strings
-    // (|, <, >, comma, space) while preserving the delimiters. Replace
-    // each segment that looks like a FQN with its short name.
-    let mut result = String::with_capacity(ty.len());
-    let mut segment_start = 0;
-    for (i, ch) in ty.char_indices() {
-        if matches!(ch, '|' | '<' | '>' | ',' | ' ' | '(' | ')') {
-            if i > segment_start {
-                let seg = &ty[segment_start..i];
-                result.push_str(crate::util::short_name(seg));
-            }
-            result.push(ch);
-            segment_start = i + ch.len_utf8();
-        }
-    }
-    // Trailing segment after the last delimiter (or the whole string).
-    if segment_start < ty.len() {
-        result.push_str(crate::util::short_name(&ty[segment_start..]));
-    }
-    result
-}
-
 /// Build per-parameter documentation markdown.
 ///
 /// When the effective type (`type_hint`) differs from the native PHP type
@@ -245,7 +215,6 @@ fn shorten_type(ty: &str) -> String {
 /// Returns `None` when there is nothing to show (no description and the
 /// types are identical or absent).
 fn build_param_documentation(param: &ParameterInfo) -> Option<Documentation> {
-    let effective = param.type_hint_str();
     let native = param.native_type_hint.as_ref();
     let desc = param.description.as_deref();
 
@@ -255,7 +224,7 @@ fn build_param_documentation(param: &ParameterInfo) -> Option<Documentation> {
         _ => false,
     };
 
-    let shortened = effective.as_deref().map(shorten_type);
+    let shortened = param.type_hint.as_ref().map(crate::hover::shorten_php_type);
     let value = match (show_effective, desc) {
         (true, Some(d)) => format!("`{}` {}", shortened.as_deref().unwrap_or(""), d),
         (true, None) => format!("`{}`", shortened.as_deref().unwrap_or("")),
@@ -275,7 +244,10 @@ fn build_param_documentation(param: &ParameterInfo) -> Option<Documentation> {
 /// (base-name) effective return type.  Per-parameter documentation shows
 /// the `@param` description, optionally prefixed with the effective type
 /// when it differs from the native type.
-fn build_signature(params: &[ParameterInfo], return_type: Option<&str>) -> SignatureInformation {
+fn build_signature(
+    params: &[ParameterInfo],
+    return_type: Option<&PhpType>,
+) -> SignatureInformation {
     // Build the label: `(param1, param2, ...): ReturnType`
     // The callable name is omitted — the user already knows what they
     // are calling and the editor shows it in the surrounding code.
@@ -283,7 +255,10 @@ fn build_signature(params: &[ParameterInfo], return_type: Option<&str>) -> Signa
     let params_str = param_labels.join(", ");
     let ret = format!(
         ": {}",
-        return_type.map_or("mixed".to_string(), shorten_type)
+        return_type.map_or_else(
+            || PhpType::mixed().to_string(),
+            crate::hover::shorten_php_type
+        )
     );
     let label = format!("({}){}", params_str, ret);
 
@@ -328,15 +303,15 @@ fn build_signature(params: &[ParameterInfo], return_type: Option<&str>) -> Signa
 struct ResolvedCallable {
     /// The parameters of the callable.
     parameters: Vec<ParameterInfo>,
-    /// Optional return type string (effective / docblock-enriched).
-    return_type: Option<String>,
+    /// Optional return type (effective / docblock-enriched).
+    return_type: Option<PhpType>,
 }
 
 impl From<crate::types::ResolvedCallableTarget> for ResolvedCallable {
     fn from(t: crate::types::ResolvedCallableTarget) -> Self {
         Self {
             parameters: t.parameters,
-            return_type: t.return_type.map(|t| t.to_string()),
+            return_type: t.return_type,
         }
     }
 }
@@ -434,7 +409,7 @@ impl Backend {
     ) -> Option<SignatureHelp> {
         let resolved = self.resolve_callable(&site.call_expression, content, position, ctx)?;
 
-        let sig = build_signature(&resolved.parameters, resolved.return_type.as_deref());
+        let sig = build_signature(&resolved.parameters, resolved.return_type.as_ref());
         Some(SignatureHelp {
             signatures: vec![sig],
             active_signature: Some(0),

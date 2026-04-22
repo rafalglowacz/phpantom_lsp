@@ -13,14 +13,13 @@
 // ─── Re-exports: type_strings ───────────────────────────────────────────────
 
 pub(crate) use super::type_strings::PHPDOC_TYPE_KEYWORDS;
-pub use super::type_strings::clean_type;
 pub(crate) use super::type_strings::split_type_token;
 
 // ─── Re-exports: shapes ─────────────────────────────────────────────────────
 
 pub use super::shapes::{
-    extract_array_shape_value_type, extract_object_shape_property_type, is_object_shape,
-    parse_array_shape, parse_object_shape,
+    extract_array_shape_value_type_typed, extract_object_shape_property_type_typed,
+    is_object_shape_typed, parse_array_shape_typed, parse_object_shape_typed,
 };
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

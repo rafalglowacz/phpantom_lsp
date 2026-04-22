@@ -36,7 +36,14 @@
 //! - **Fix return void mismatch** — when PHPStan reports
 //!   `return.void` (void function returns a value) or `return.empty`
 //!   (non-void function has bare return), offer to strip the return
-//!   expression or change the return type to `void`.
+//!   expression or change the return type to `void`.  For
+//!   `return.type` (return type doesn't match actual return), offer
+//!   to change the native return type or update/create a `@return`
+//!   docblock tag.
+//! - **Remove unused return type** — when PHPStan reports
+//!   `return.unusedType` (a union or intersection member is never
+//!   returned), offer to remove the unused type from both the native
+//!   return type and the `@return` docblock tag.
 //! - **Add iterable return type** — when PHPStan reports
 //!   `missingType.iterableValue` for a return type, offer to add a
 //!   `@return` tag with `<mixed>` (e.g. `@return array<mixed>`).
@@ -59,6 +66,7 @@ pub(crate) mod remove_assert;
 pub(crate) mod remove_override;
 mod remove_throws;
 pub(crate) mod remove_unreachable;
+pub(crate) mod remove_unused_return_type;
 
 use tower_lsp::lsp_types::*;
 
@@ -124,6 +132,9 @@ impl Backend {
 
         // ── Fix return type (return.void / return.empty / return.type / missingType.return) ─
         self.collect_fix_return_type_actions(uri, content, params, out);
+
+        // ── Remove unused return type (return.unusedType) ───────────
+        self.collect_remove_unused_return_type_actions(uri, content, params, out);
 
         // ── Add iterable return type (missingType.iterableValue) ────
         self.collect_add_iterable_type_actions(uri, content, params, out);

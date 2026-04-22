@@ -203,12 +203,11 @@ impl Backend {
                 let fqn = key.clone();
                 let is_deprecated = info.deprecation_message.is_some();
 
-                let return_type_string = info.return_type_str();
-                let native_ret_str = info.native_return_type.as_ref().map(|t| t.to_string());
-                let return_type = return_type_string
-                    .as_deref()
-                    .or(native_ret_str.as_deref())
-                    .map(crate::hover::shorten_type_string);
+                let return_type = info
+                    .return_type
+                    .as_ref()
+                    .or(info.native_return_type.as_ref())
+                    .map(crate::hover::shorten_php_type);
 
                 if for_use_import {
                     let label = if is_namespaced {

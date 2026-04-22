@@ -14,7 +14,7 @@ use super::parser::{DocblockInfo, collapse_newlines, parse_docblock_for_tags};
 use super::types::split_type_token;
 use crate::php_type::PhpType;
 use crate::types::{TemplateVariance, TypeAliasDef};
-use crate::util::{strip_fqn_prefix, strip_nullable};
+use crate::util::strip_fqn_prefix;
 
 // ─── Template Parameters ────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ pub fn extract_template_params_from_info(info: &DocblockInfo) -> Vec<String> {
 ///   - `@template-covariant TValue of Stringable` → `("TValue", Some("Stringable"))`
 ///
 /// Returns a list of `(name, optional_bound)` pairs.
-pub fn extract_template_params_with_bounds(docblock: &str) -> Vec<(String, Option<String>)> {
+pub fn extract_template_params_with_bounds(docblock: &str) -> Vec<(String, Option<PhpType>)> {
     extract_template_params_full(docblock)
         .into_iter()
         .map(|(name, bound, _, _)| (name, bound))
@@ -63,7 +63,7 @@ pub fn extract_template_params_with_bounds(docblock: &str) -> Vec<(String, Optio
 /// Like [`extract_template_params_with_bounds`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_template_params_with_bounds_from_info(
     info: &DocblockInfo,
-) -> Vec<(String, Option<String>)> {
+) -> Vec<(String, Option<PhpType>)> {
     extract_template_params_full_from_info(info)
         .into_iter()
         .map(|(name, bound, _, _)| (name, bound))
@@ -80,7 +80,7 @@ pub fn extract_template_params_with_bounds_from_info(
 ///   - `@template-contravariant TInput of Foo` → `("TInput", Some("Foo"), Contravariant)`
 pub fn extract_template_params_full(
     docblock: &str,
-) -> Vec<(String, Option<String>, TemplateVariance, Option<String>)> {
+) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -116,7 +116,7 @@ pub(crate) const TEMPLATE_KINDS: &[TagKind] = &[
 /// Like [`extract_template_params_full`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_template_params_full_from_info(
     info: &DocblockInfo,
-) -> Vec<(String, Option<String>, TemplateVariance, Option<String>)> {
+) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<PhpType>)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kinds(TEMPLATE_KINDS) {
@@ -136,21 +136,49 @@ pub fn extract_template_params_full_from_info(
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             {
+                // Everything after the parameter name, used for
+                // `split_type_token`-based parsing that respects `<>` nesting.
+                let rest = desc[name.len()..].trim_start();
+
                 // Check for an `of` bound: `@template T of SomeClass`
-                let mut next_token = tokens.next();
-                let bound = if next_token.as_ref().is_some_and(|kw| *kw == "of") {
-                    let b = tokens.next().map(|b| b.to_string());
-                    next_token = tokens.next();
-                    b
+                let (bound, rest_after_bound) = if let Some(after_of) =
+                    rest.strip_prefix("of").and_then(|s| {
+                        // "of" must be followed by whitespace (not "offer", etc.)
+                        s.strip_prefix(|c: char| c.is_whitespace())
+                    }) {
+                    let after_of = after_of.trim_start();
+                    if after_of.is_empty() {
+                        (None, "")
+                    } else {
+                        let (type_tok, remainder) = split_type_token(after_of);
+                        if type_tok.is_empty() {
+                            (None, remainder)
+                        } else {
+                            (Some(PhpType::parse(type_tok)), remainder)
+                        }
+                    }
                 } else {
-                    None
+                    (None, rest)
                 };
+
                 // Check for a `= default` value: `@template T of bool = false`
-                let default = if next_token.is_some_and(|kw| kw == "=") {
-                    tokens.next().map(|d| d.to_string())
+                let rest_trimmed = rest_after_bound.trim_start();
+                let default = if let Some(after_eq) = rest_trimmed.strip_prefix('=') {
+                    let after_eq = after_eq.trim_start();
+                    if after_eq.is_empty() {
+                        None
+                    } else {
+                        let (default_tok, _) = split_type_token(after_eq);
+                        if default_tok.is_empty() {
+                            None
+                        } else {
+                            Some(PhpType::parse(default_tok))
+                        }
+                    }
                 } else {
                     None
                 };
+
                 results.push((name.to_string(), bound, variance, default));
             }
         }
@@ -194,7 +222,7 @@ pub fn extract_template_param_bindings_from_info(
 
     let mut results = Vec::new();
 
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::Param]) {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -237,7 +265,7 @@ pub fn extract_template_param_bindings_from_info(
 ///   - `@phpstan-extends Collection<int, Language>`
 ///   - `@implements ArrayAccess<string, User>`
 ///   - Nested generics: `@extends Base<array<int, string>, User>`
-pub fn extract_generics_tag(docblock: &str, tag: &str) -> Vec<(String, Vec<String>)> {
+pub fn extract_generics_tag(docblock: &str, tag: &str) -> Vec<(String, Vec<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -320,7 +348,7 @@ fn collect_template_bindings(
 pub fn extract_generics_tag_from_info(
     info: &DocblockInfo,
     tag: &str,
-) -> Vec<(String, Vec<String>)> {
+) -> Vec<(String, Vec<PhpType>)> {
     // Map the tag string to the corresponding TagKinds.
     // For `@extends` we also accept `@phpstan-extends` and `@template-extends`.
     // Note: `@phpstan-extends`, `@phpstan-implements`, and `@phpstan-use`
@@ -368,7 +396,7 @@ pub fn extract_generics_tag_from_info(
 
 /// Parse a generics tag description (e.g. `"Collection<int, Language>"`) into
 /// a `(base_name, generic_args)` tuple.
-fn parse_generics_from_description(desc: &str) -> Option<(String, Vec<String>)> {
+fn parse_generics_from_description(desc: &str) -> Option<(String, Vec<PhpType>)> {
     let desc = desc.trim();
     if desc.is_empty() {
         return None;
@@ -389,14 +417,7 @@ fn parse_generics_from_description(desc: &str) -> Option<(String, Vec<String>)> 
             if base_name.is_empty() {
                 return None;
             }
-            let arg_strings: Vec<String> = args
-                .iter()
-                .map(|a| {
-                    let s = a.to_string();
-                    strip_fqn_prefix(&s).to_string()
-                })
-                .collect();
-            Some((base_name, arg_strings))
+            Some((base_name, args))
         }
         _ => None,
     }
@@ -551,7 +572,7 @@ fn parse_import_type_alias(rest: &str) -> Option<(String, TypeAliasDef)> {
 pub fn synthesize_template_conditional(
     docblock: &str,
     template_params: &[String],
-    return_type: Option<&str>,
+    return_type: Option<&PhpType>,
     has_existing_conditional: bool,
 ) -> Option<PhpType> {
     let info = parse_docblock_for_tags(docblock)?;
@@ -567,7 +588,7 @@ pub fn synthesize_template_conditional(
 pub fn synthesize_template_conditional_from_info(
     info: &DocblockInfo,
     template_params: &[String],
-    return_type: Option<&str>,
+    return_type: Option<&PhpType>,
     has_existing_conditional: bool,
 ) -> Option<PhpType> {
     // Don't override an existing conditional return type.
@@ -581,24 +602,34 @@ pub fn synthesize_template_conditional_from_info(
 
     let ret = return_type?;
 
-    // Strip nullable prefix so that `?T` matches template param `T`.
-    let stripped = strip_nullable(ret);
+    // Strip nullable wrapper so that `?T` matches template param `T`.
+    let stripped_name = match ret {
+        PhpType::Nullable(inner) => {
+            if let PhpType::Named(n) = inner.as_ref() {
+                n.as_str()
+            } else {
+                return None;
+            }
+        }
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
 
     // Check if the (stripped) return type is one of the template params.
-    if !template_params.iter().any(|t| t == stripped) {
+    if !template_params.iter().any(|t| t == stripped_name) {
         return None;
     }
 
     // Find a `@param class-string<T> $paramName` annotation for this
     // template param, and extract the parameter name (without `$`).
-    let param_name = find_class_string_param_name_from_info(info, stripped)?;
+    let param_name = find_class_string_param_name_from_info(info, stripped_name)?;
 
     Some(PhpType::Conditional {
         param: format!("${param_name}"),
         negated: false,
         condition: Box::new(PhpType::ClassString(None)),
-        then_type: Box::new(PhpType::Named("mixed".into())),
-        else_type: Box::new(PhpType::Named("mixed".into())),
+        then_type: Box::new(PhpType::mixed()),
+        else_type: Box::new(PhpType::mixed()),
     })
 }
 
@@ -616,7 +647,7 @@ fn find_class_string_param_name_from_info(
     info: &DocblockInfo,
     template_name: &str,
 ) -> Option<String> {
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::Param]) {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;

@@ -402,10 +402,15 @@ fn parse_callee(call_body: &str) -> SubjectExpr {
     }
 
     // ── `new ClassName` ─────────────────────────────────────────
-    if let Some(class_name) = call_body
-        .strip_prefix("new ")
-        .map(|s| s.trim().trim_start_matches('\\'))
-        .filter(|s| !s.is_empty())
+    // Only match when there is no `->` chain after the constructor
+    // args (e.g. `new Decimal($x)->toFixed(2)` should be parsed as
+    // a method call, not a bare `new` expression).
+    if call_body.starts_with("new ")
+        && !call_body.contains("->")
+        && let Some(class_name) = call_body
+            .strip_prefix("new ")
+            .map(|s| s.trim().trim_start_matches('\\'))
+            .filter(|s| !s.is_empty())
     {
         // Strip trailing parens content if any (e.g. from `(new Foo(…))`)
         let clean = class_name
@@ -532,6 +537,26 @@ pub(crate) fn parse_new_expression_class(s: &str) -> Option<String> {
     let end = rest
         .find(|c: char| c == '(' || c.is_whitespace())
         .unwrap_or(rest.len());
+
+    // If there is a `->` chain after the constructor call (e.g.
+    // `new Decimal($x)->toFixed(2)`), bail out so that the call
+    // expression / property chain parsers handle the full expression.
+    if let Some(paren_start) = rest[end..].find('(') {
+        let after_class = &rest[end + paren_start..];
+        if let Some(close) = find_matching_paren(after_class) {
+            let remainder = after_class[close + 1..].trim_start();
+            if remainder.starts_with("->") {
+                return None;
+            }
+        }
+    } else {
+        // No opening paren found — check for `->` after the class name.
+        let after_name = rest[end..].trim_start();
+        if after_name.starts_with("->") {
+            return None;
+        }
+    }
+
     let class_name = rest[..end].trim_start_matches('\\');
     if class_name.is_empty()
         || class_name == "class"
@@ -542,6 +567,39 @@ pub(crate) fn parse_new_expression_class(s: &str) -> Option<String> {
         return None;
     }
     Some(class_name.to_string())
+}
+
+/// Find the index of the closing `)` that matches the opening `(` at the
+/// start of `s`.  Returns `None` if `s` doesn't start with `(` or the
+/// parens are unbalanced.
+fn find_matching_paren(s: &str) -> Option<usize> {
+    if !s.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0u32;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut prev_backslash = false;
+    for (i, ch) in s.char_indices() {
+        if prev_backslash {
+            prev_backslash = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_single || in_double => prev_backslash = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '(' if !in_single && !in_double => depth += 1,
+            ')' if !in_single && !in_double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Parse a variable with bracket access like `$var['key'][0]`.
@@ -572,10 +630,76 @@ fn parse_variable_array_access(subject: &str) -> Option<SubjectExpr> {
         return None;
     }
 
-    Some(SubjectExpr::ArrayAccess {
+    let mut result = SubjectExpr::ArrayAccess {
         base: Box::new(SubjectExpr::parse(base_var)),
         segments,
-    })
+    };
+
+    // Handle interleaved property-arrow and bracket access patterns.
+    // After consuming the first set of bracket segments, there may be
+    // a continuation like `->activities[]` (or `?->prop['key']`).
+    // Build up the result by alternating PropertyChain and ArrayAccess
+    // nodes until the remaining text is consumed.
+    while !rest.is_empty() {
+        let (arrow_len, is_nullsafe) = if rest.starts_with("?->") {
+            (3, true)
+        } else if rest.starts_with("->") {
+            (2, false)
+        } else {
+            // Unexpected continuation — bail out with what we have.
+            break;
+        };
+
+        let after_arrow = &rest[arrow_len..];
+        if after_arrow.is_empty() {
+            break;
+        }
+
+        // Find where the property name ends (at the next `[` or end).
+        let prop_end = after_arrow.find('[').unwrap_or(after_arrow.len());
+        let prop_name = &after_arrow[..prop_end];
+        if prop_name.is_empty() {
+            break;
+        }
+
+        // Build PropertyChain (or NullSafe — but SubjectExpr doesn't
+        // distinguish at the PropertyChain level; the `?->` is already
+        // encoded in `to_subject_text` via the base's text, and the
+        // resolver handles both equally).
+        let _ = is_nullsafe; // reserved for future use
+        result = SubjectExpr::PropertyChain {
+            base: Box::new(result),
+            property: prop_name.to_string(),
+        };
+
+        rest = &after_arrow[prop_end..];
+
+        // If the property is followed by bracket segments, consume them.
+        if rest.starts_with('[') {
+            let mut new_segments = Vec::new();
+            while rest.starts_with('[') {
+                let close = match rest.find(']') {
+                    Some(c) => c,
+                    None => break,
+                };
+                let inner = rest[1..close].trim();
+                if let Some(key) = crate::util::unquote_php_string(inner) {
+                    new_segments.push(BracketSegment::StringKey(key.to_string()));
+                } else {
+                    new_segments.push(BracketSegment::ElementAccess);
+                }
+                rest = &rest[close + 1..];
+            }
+            if !new_segments.is_empty() {
+                result = SubjectExpr::ArrayAccess {
+                    base: Box::new(result),
+                    segments: new_segments,
+                };
+            }
+        }
+    }
+
+    Some(result)
 }
 
 /// Parse a call expression followed by bracket access: `$c->items()[]`,

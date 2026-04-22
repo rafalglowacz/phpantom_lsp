@@ -5,10 +5,10 @@
 //! `@deprecated`, and `@phpstan-assert` / `@psalm-assert` tags.
 //!
 //! It also provides:
-//!   - [`should_override_type`]: compatibility check so that a docblock type
+//!   - [`should_override_type_typed`]: compatibility check so that a docblock type
 //!     only overrides a native type hint when the native hint is broad enough
 //!     to be refined.
-//!   - [`resolve_effective_type`]: pick the best type between docblock and
+//!   - [`resolve_effective_type_typed`]: pick the best type between docblock and
 //!     native hints.
 //!   - [`get_docblock_text_for_node`]: extract raw docblock text from an AST
 //!     node's preceding trivia.
@@ -23,10 +23,9 @@ use mago_syntax::ast::*;
 
 use crate::symbol_map::docblock::get_docblock_text_with_offset;
 use crate::types::{AssertionKind, PhpVersion, TypeAssertion};
-use crate::util::strip_fqn_prefix;
 
 use super::parser::{DocblockInfo, collapse_newlines, parse_docblock_for_tags};
-use super::types::{clean_type, split_type_token};
+use super::types::split_type_token;
 use crate::php_type::PhpType;
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -42,13 +41,27 @@ use crate::php_type::PhpType;
 ///
 /// Returns the cleaned type string (leading `\` stripped) or `None` if no
 /// `@return` tag is found.
-pub fn extract_return_type(docblock: &str) -> Option<String> {
-    extract_type_via_mago(docblock, &[TagKind::PhpstanReturn, TagKind::Return])
+pub fn extract_return_type(docblock: &str) -> Option<PhpType> {
+    extract_type_via_mago(
+        docblock,
+        &[
+            TagKind::PhpstanReturn,
+            TagKind::PsalmReturn,
+            TagKind::Return,
+        ],
+    )
 }
 
 /// Like [`extract_return_type`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_return_type_from_info(info: &DocblockInfo) -> Option<String> {
-    extract_type_via_mago_from_info(info, &[TagKind::PhpstanReturn, TagKind::Return])
+pub fn extract_return_type_from_info(info: &DocblockInfo) -> Option<PhpType> {
+    extract_type_via_mago_from_info(
+        info,
+        &[
+            TagKind::PhpstanReturn,
+            TagKind::PsalmReturn,
+            TagKind::Return,
+        ],
+    )
 }
 
 /// Extract the deprecation message from a `@deprecated` PHPDoc tag.
@@ -184,7 +197,7 @@ pub fn extract_deprecation_with_see_from_info(info: &DocblockInfo) -> Option<Str
 /// Returns a list of `(base_class_name, generic_args)` tuples.  The base
 /// class name has its leading `\` and generic parameters stripped.  The
 /// `generic_args` vector is empty when the tag has no `<…>` suffix.
-pub fn extract_mixin_tags(docblock: &str) -> Vec<(String, Vec<String>)> {
+pub fn extract_mixin_tags(docblock: &str) -> Vec<(String, Vec<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -193,7 +206,7 @@ pub fn extract_mixin_tags(docblock: &str) -> Vec<(String, Vec<String>)> {
 }
 
 /// Like [`extract_mixin_tags`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<String>)> {
+pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<PhpType>)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kind(TagKind::Mixin) {
@@ -211,27 +224,16 @@ pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<Str
         let parsed = PhpType::parse(type_token);
         let (base, generic_args) = match &parsed {
             PhpType::Generic(name, args) => {
-                let arg_strs: Vec<String> = args
-                    .iter()
-                    .map(|a| {
-                        let s = a.to_string();
-                        strip_fqn_prefix(&s).to_string()
-                    })
-                    .collect();
-                (name.clone(), arg_strs)
+                let cleaned_args: Vec<PhpType> = args.iter().map(strip_fqn_prefix_typed).collect();
+                (name.clone(), cleaned_args)
             }
             PhpType::Named(name) => (name.clone(), vec![]),
             PhpType::Nullable(inner) => match inner.as_ref() {
                 PhpType::Named(name) => (name.clone(), vec![]),
                 PhpType::Generic(name, args) => {
-                    let arg_strs: Vec<String> = args
-                        .iter()
-                        .map(|a| {
-                            let s = a.to_string();
-                            strip_fqn_prefix(&s).to_string()
-                        })
-                        .collect();
-                    (name.clone(), arg_strs)
+                    let cleaned_args: Vec<PhpType> =
+                        args.iter().map(strip_fqn_prefix_typed).collect();
+                    (name.clone(), cleaned_args)
                 }
                 _ => continue,
             },
@@ -246,6 +248,13 @@ pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<Str
     results
 }
 
+/// Strip a leading `\` from a `PhpType` without a `to_string()` →
+/// `PhpType::parse()` round-trip.  Uses `resolve_names` which already
+/// walks the entire type structure recursively.
+fn strip_fqn_prefix_typed(ty: &PhpType) -> PhpType {
+    ty.resolve_names(&|name| name.strip_prefix('\\').unwrap_or(name).to_string())
+}
+
 /// Extract all `@throws` tags from a method-level docblock.
 ///
 /// PHPDoc `@throws` tags declare which exceptions a method may throw.
@@ -255,8 +264,8 @@ pub fn extract_mixin_tags_from_info(info: &DocblockInfo) -> Vec<(String, Vec<Str
 ///   - `@throws \Fully\Qualified\ExceptionType`
 ///   - `@throws ExceptionType Some description text`
 ///
-/// Returns a list of cleaned type name strings (leading `\` stripped).
-pub fn extract_throws_tags(docblock: &str) -> Vec<String> {
+/// Returns a list of parsed [`PhpType`] values (leading `\` stripped).
+pub fn extract_throws_tags(docblock: &str) -> Vec<PhpType> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -265,7 +274,7 @@ pub fn extract_throws_tags(docblock: &str) -> Vec<String> {
 }
 
 /// Like [`extract_throws_tags`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_throws_tags_from_info(info: &DocblockInfo) -> Vec<String> {
+pub fn extract_throws_tags_from_info(info: &DocblockInfo) -> Vec<PhpType> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kind(TagKind::Throws) {
@@ -282,7 +291,7 @@ pub fn extract_throws_tags_from_info(info: &DocblockInfo) -> Vec<String> {
 
         let cleaned = type_name.trim_start_matches('\\');
         if !cleaned.is_empty() {
-            results.push(cleaned.to_string());
+            results.push(PhpType::parse(cleaned));
         }
     }
 
@@ -352,13 +361,13 @@ pub fn extract_type_assertions_from_info(info: &DocblockInfo) -> Vec<TypeAsserti
             (false, desc)
         };
 
-        // Next token is the type, then the parameter name.
-        let mut tokens = rest.split_whitespace();
-        let type_str = match tokens.next() {
-            Some(t) => t,
-            None => continue,
-        };
-        let param_str = match tokens.next() {
+        // Next token is the type (which may contain spaces in generics).
+        let (type_str, remainder) = split_type_token(rest);
+        if type_str.is_empty() {
+            continue;
+        }
+        // The parameter name follows the type token.
+        let param_str = match remainder.split_whitespace().next() {
             Some(p) if p.starts_with('$') => p,
             _ => continue,
         };
@@ -366,7 +375,7 @@ pub fn extract_type_assertions_from_info(info: &DocblockInfo) -> Vec<TypeAsserti
         results.push(TypeAssertion {
             kind: assertion_kind_for(tag.kind),
             param_name: param_str.to_string(),
-            asserted_type: PhpType::parse(&clean_type(type_str)),
+            asserted_type: PhpType::parse(type_str.trim_end_matches(['.', ','])),
             negated,
         });
     }
@@ -379,13 +388,19 @@ pub fn extract_type_assertions_from_info(info: &DocblockInfo) -> Vec<TypeAsserti
 /// Used for property type annotations like:
 ///   - `/** @var Session */`
 ///   - `/** @var \App\Models\User */`
-pub fn extract_var_type(docblock: &str) -> Option<String> {
-    extract_type_via_mago(docblock, &[TagKind::PhpstanVar, TagKind::Var])
+pub fn extract_var_type(docblock: &str) -> Option<PhpType> {
+    extract_type_via_mago(
+        docblock,
+        &[TagKind::PhpstanVar, TagKind::PsalmVar, TagKind::Var],
+    )
 }
 
 /// Like [`extract_var_type`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_var_type_from_info(info: &DocblockInfo) -> Option<String> {
-    extract_type_via_mago_from_info(info, &[TagKind::PhpstanVar, TagKind::Var])
+pub fn extract_var_type_from_info(info: &DocblockInfo) -> Option<PhpType> {
+    extract_type_via_mago_from_info(
+        info,
+        &[TagKind::PhpstanVar, TagKind::PsalmVar, TagKind::Var],
+    )
 }
 
 /// Extract the type and optional variable name from a `@var` PHPDoc tag.
@@ -396,15 +411,15 @@ pub fn extract_var_type_from_info(info: &DocblockInfo) -> Option<String> {
 ///
 /// The variable name (if present) is returned **with** the `$` prefix so
 /// callers can compare directly against AST variable names.
-pub fn extract_var_type_with_name(docblock: &str) -> Option<(String, Option<String>)> {
+pub fn extract_var_type_with_name(docblock: &str) -> Option<(PhpType, Option<String>)> {
     extract_var_type_with_name_from_info(&parse_docblock_for_tags(docblock)?)
 }
 
 /// Like [`extract_var_type_with_name`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_var_type_with_name_from_info(
     info: &DocblockInfo,
-) -> Option<(String, Option<String>)> {
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanVar, TagKind::Var]) {
+) -> Option<(PhpType, Option<String>)> {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanVar, TagKind::PsalmVar, TagKind::Var]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -413,7 +428,7 @@ pub fn extract_var_type_with_name_from_info(
         // Extract the type token, respecting `<…>` nesting so that
         // generics like `Collection<int, User>` are treated as one unit.
         let (type_str, remainder) = split_type_token(desc);
-        let cleaned_type = clean_type(type_str);
+        let cleaned_type = type_str.trim_end_matches(['.', ',']);
         if cleaned_type.is_empty() {
             return None;
         }
@@ -425,7 +440,8 @@ pub fn extract_var_type_with_name_from_info(
             .filter(|t| t.starts_with('$'))
             .map(|t| t.to_string());
 
-        return Some((cleaned_type, var_name));
+        let parsed = sanitise_and_parse_docblock_type(cleaned_type)?;
+        return Some((parsed, var_name));
     }
     None
 }
@@ -440,7 +456,7 @@ pub fn extract_var_type_with_name_from_info(
 pub fn find_inline_var_docblock(
     content: &str,
     stmt_start: usize,
-) -> Option<(String, Option<String>)> {
+) -> Option<(PhpType, Option<String>)> {
     let before = content.get(..stmt_start)?;
 
     // Walk backward past whitespace / newlines.
@@ -478,7 +494,7 @@ pub fn find_var_raw_type_in_source(
     content: &str,
     before_offset: usize,
     var_name: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     let search_area = content.get(..before_offset)?;
 
     // Track brace depth so that annotations inside other function/method
@@ -514,10 +530,14 @@ pub fn find_var_raw_type_in_source(
         min_depth = min_depth.min(brace_depth);
 
         // Once we have exited our containing scope (min_depth < 0) and
-        // re-entered a block at depth >= 0, we are inside a sibling
-        // scope (e.g. a different method in the same class).  From that
-        // point on every annotation belongs to a foreign scope.
-        if min_depth < 0 && brace_depth >= 0 {
+        // re-entered a block close to that level, we are inside a
+        // sibling scope (e.g. a different method in the same class).
+        // From that point on every annotation belongs to a foreign
+        // scope.  The threshold is `min_depth + 1` rather than `>= 0`
+        // because the cursor may be inside a nested block (foreach,
+        // if, etc.) whose extra depth prevents brace_depth from ever
+        // reaching 0 when traversing sibling classes.
+        if min_depth < 0 && brace_depth > min_depth {
             seen_sibling_scope = true;
         }
         if seen_sibling_scope {
@@ -555,7 +575,7 @@ pub fn find_var_raw_type_in_source(
             if let Some(name) = remainder.split_whitespace().next()
                 && name == var_name
             {
-                return Some(type_token.to_string());
+                return Some(PhpType::parse(type_token));
             }
         }
     }
@@ -572,13 +592,13 @@ pub fn find_var_raw_type_in_source(
 /// Example:
 ///   docblock containing `@param list<User> $users` with var_name `"$users"`
 ///   → `Some("list<User>")`
-pub fn extract_param_raw_type(docblock: &str, var_name: &str) -> Option<String> {
+pub fn extract_param_raw_type(docblock: &str, var_name: &str) -> Option<PhpType> {
     extract_param_raw_type_from_info(&parse_docblock_for_tags(docblock)?, var_name)
 }
 
 /// Like [`extract_param_raw_type`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> Option<String> {
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::Param]) {
+pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> Option<PhpType> {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -592,7 +612,7 @@ pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> 
         if let Some(name) = remainder.split_whitespace().next() {
             let name = name.strip_prefix("...").unwrap_or(name);
             if name == var_name {
-                return Some(type_token.to_string());
+                return sanitise_and_parse_docblock_type(type_token);
             }
         }
     }
@@ -609,7 +629,7 @@ pub fn extract_param_raw_type_from_info(info: &DocblockInfo, var_name: &str) -> 
 /// This is used to discover extra `@param` tags that document parameters
 /// not present in the native function signature (e.g. parameters accessed
 /// via `func_get_args()`).
-pub fn extract_all_param_tags(docblock: &str) -> Vec<(String, String)> {
+pub fn extract_all_param_tags(docblock: &str) -> Vec<(String, PhpType)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -618,12 +638,12 @@ pub fn extract_all_param_tags(docblock: &str) -> Vec<(String, String)> {
 }
 
 /// Like [`extract_all_param_tags`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, String)> {
+pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, PhpType)> {
     let mut results = Vec::new();
 
     // Only match `@param` and `@phpstan-param`, not compound tags like
     // `@param-closure-this` (those have their own TagKind).
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::Param]) {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -636,8 +656,10 @@ pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, Str
         // Handle `...$name` (variadic) by stripping the leading `...`.
         if let Some(name) = remainder.split_whitespace().next() {
             let name = name.strip_prefix("...").unwrap_or(name);
-            if name.starts_with('$') {
-                results.push((name.to_string(), type_token.to_string()));
+            if name.starts_with('$')
+                && let Some(parsed) = sanitise_and_parse_docblock_type(type_token)
+            {
+                results.push((name.to_string(), parsed));
             }
         }
     }
@@ -659,10 +681,10 @@ pub fn extract_all_param_tags_from_info(info: &DocblockInfo) -> Vec<(String, Str
 /// type for a parameter.
 pub fn extract_param_types_positional_from_info(
     info: &DocblockInfo,
-) -> Vec<(Option<String>, String)> {
+) -> Vec<(Option<String>, PhpType)> {
     let mut results = Vec::new();
 
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::Param]) {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -679,7 +701,9 @@ pub fn extract_param_types_positional_from_info(
             }
         });
 
-        results.push((param_name, type_token.to_string()));
+        if let Some(parsed) = sanitise_and_parse_docblock_type(type_token) {
+            results.push((param_name, parsed));
+        }
     }
 
     results
@@ -693,10 +717,9 @@ pub fn extract_param_types_positional_from_info(
 /// `Closure::bindTo()` and is used heavily in Laravel (routing, macros,
 /// testing).
 ///
-/// Returns a list of `(type_name, param_name)` pairs.  The `param_name`
-/// includes the `$` prefix.  The `type_name` is the raw type string
-/// (e.g. `\Illuminate\Routing\Route`, `$this`, `static`).
-pub fn extract_param_closure_this(docblock: &str) -> Vec<(String, String)> {
+/// Returns a list of `(type, param_name)` pairs.  The `param_name`
+/// includes the `$` prefix.  The type is parsed into a [`PhpType`].
+pub fn extract_param_closure_this(docblock: &str) -> Vec<(PhpType, String)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -705,7 +728,7 @@ pub fn extract_param_closure_this(docblock: &str) -> Vec<(String, String)> {
 }
 
 /// Like [`extract_param_closure_this`], but operates on a pre-parsed [`DocblockInfo`].
-pub fn extract_param_closure_this_from_info(info: &DocblockInfo) -> Vec<(String, String)> {
+pub fn extract_param_closure_this_from_info(info: &DocblockInfo) -> Vec<(PhpType, String)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kind(TagKind::ParamClosureThis) {
@@ -724,7 +747,7 @@ pub fn extract_param_closure_this_from_info(info: &DocblockInfo) -> Vec<(String,
         if let Some(name) = remainder.split_whitespace().next()
             && name.starts_with('$')
         {
-            results.push((type_token.to_string(), name.to_string()));
+            results.push((PhpType::parse(type_token), name.to_string()));
         }
     }
 
@@ -749,7 +772,7 @@ pub fn extract_param_description(docblock: &str, var_name: &str) -> Option<Strin
 
 /// Like [`extract_param_description`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_param_description_from_info(info: &DocblockInfo, var_name: &str) -> Option<String> {
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::Param]) {
+    for tag in info.tags_by_kinds(&[TagKind::PhpstanParam, TagKind::PsalmParam, TagKind::Param]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -802,7 +825,11 @@ pub fn extract_return_description(docblock: &str) -> Option<String> {
 
 /// Like [`extract_return_description`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_return_description_from_info(info: &DocblockInfo) -> Option<String> {
-    for tag in info.tags_by_kinds(&[TagKind::PhpstanReturn, TagKind::Return]) {
+    for tag in info.tags_by_kinds(&[
+        TagKind::PhpstanReturn,
+        TagKind::PsalmReturn,
+        TagKind::Return,
+    ]) {
         let desc = tag.description.trim();
         if desc.is_empty() {
             continue;
@@ -929,7 +956,7 @@ pub fn find_iterable_raw_type_in_source(
     content: &str,
     before_offset: usize,
     var_name: &str,
-) -> Option<String> {
+) -> Option<PhpType> {
     let search_area = content.get(..before_offset)?;
 
     // Track brace depth so that annotations inside class/function bodies
@@ -966,10 +993,19 @@ pub fn find_iterable_raw_type_in_source(
         min_depth = min_depth.min(brace_depth);
 
         // Once we have exited our containing scope (min_depth < 0) and
-        // re-entered a block at depth >= 0, we are inside a sibling
-        // scope (e.g. a different method in the same class).  From that
-        // point on every annotation belongs to a foreign scope.
-        if min_depth < 0 && brace_depth >= 0 {
+        // re-entered a block close to that level, we are inside a
+        // sibling scope (e.g. a different method in the same class).
+        // From that point on every annotation belongs to a foreign
+        // scope.
+        //
+        // The threshold is `min_depth + 1` rather than `>= 0` because
+        // the cursor may be inside a nested block (foreach, if, etc.)
+        // that adds extra depth.  When starting inside a foreach in a
+        // class method, min_depth reaches -3 (foreach { + method { +
+        // class {), so a sibling method body at depth -1 would never
+        // reach 0.  Using `min_depth + 1` catches the first rise back
+        // toward our exit point.
+        if min_depth < 0 && brace_depth > min_depth {
             seen_sibling_scope = true;
         }
         if seen_sibling_scope {
@@ -1015,7 +1051,7 @@ pub fn find_iterable_raw_type_in_source(
                     if let Some(name) = remainder.split_whitespace().next()
                         && name == var_name
                     {
-                        return Some(type_token.to_string());
+                        return Some(PhpType::parse(type_token));
                     }
                 }
             }
@@ -1059,7 +1095,7 @@ pub fn find_iterable_raw_type_in_source(
                             .next()
                             .is_some_and(|t| t.starts_with('$'));
                         if !has_var_name {
-                            return Some(type_token.to_string());
+                            return Some(PhpType::parse(type_token));
                         }
                     }
                 }
@@ -1086,7 +1122,7 @@ pub fn find_iterable_raw_type_in_source(
 ///
 /// Returns `None` when no enclosing function docblock or `@return` tag
 /// can be found.
-pub fn find_enclosing_return_type(content: &str, cursor_offset: usize) -> Option<String> {
+pub fn find_enclosing_return_type(content: &str, cursor_offset: usize) -> Option<PhpType> {
     let search_area = content.get(..cursor_offset)?;
 
     // Walk backward, tracking brace depth.  We start inside a function
@@ -1159,22 +1195,19 @@ pub fn find_enclosing_return_type(content: &str, cursor_offset: usize) -> Option
 /// information than the native hint (e.g. `Collection<int, User>` vs
 /// bare `object`), and `false` when overriding would lose precision
 /// (e.g. both are scalars).
-pub fn should_override_type(docblock_type: &str, native_type: &str) -> bool {
-    let doc_parsed = PhpType::parse(docblock_type);
-    let native_parsed = PhpType::parse(native_type);
-
+pub fn should_override_type_typed(docblock_type: &PhpType, native_type: &PhpType) -> bool {
     // If the docblock type is semantically equivalent to the native type
     // (handles `?X` ↔ `X|null`, reordered unions, FQN vs short names),
     // there is no value in overriding — the docblock doesn't carry any
     // extra information.
-    if doc_parsed.equivalent(&native_parsed) {
+    if docblock_type.equivalent(native_type) {
         return false;
     }
 
     // Unwrap nullable wrappers for further analysis.  `?Foo` → `Foo`,
     // `Foo|null` → `Foo`.  For non-nullable types, use as-is.
-    let doc_inner = unwrap_nullable(&doc_parsed);
-    let native_inner = unwrap_nullable(&native_parsed);
+    let doc_inner = docblock_type.unwrap_nullable();
+    let native_inner = native_type.unwrap_nullable();
 
     // If the docblock type is a bare, unparameterised primitive scalar
     // (`int`, `string`, `bool`, etc.), there's no value in overriding.
@@ -1184,24 +1217,17 @@ pub fn should_override_type(docblock_type: &str, native_type: &str) -> bool {
     //  - Parameterised types (`array<int>`, `int<0, max>`) — these
     //    carry type information the native hint doesn't have.
     //  - Shapes, callables, slices — these also carry extra info.
-    if is_bare_primitive_scalar(doc_inner) {
+    if doc_inner.is_bare_primitive_scalar() {
         return false;
     }
 
     // Produce a lowercased base name for the native type's inner part
-    // (stripping nullable).  This is used for broad-type and refinement
-    // checks below.
-    let native_inner_str = native_inner.to_string();
-    let native_lower = native_inner_str.to_ascii_lowercase();
-
     // `array`, `iterable`, `callable`, and `Closure` are broad types
     // that docblocks commonly refine (e.g. `array` → `list<User>`,
     // `iterable` → `Collection<int, Order>`,
     // `callable` → `callable(Task): void`).
-    if matches!(
-        native_lower.as_str(),
-        "array" | "iterable" | "callable" | "closure" | "\\closure"
-    ) {
+    // `is_callable()` covers both `callable` and `Closure` (including `\Closure`).
+    if native_inner.is_bare_array() || native_inner.is_iterable() || native_inner.is_callable() {
         return true;
     }
 
@@ -1220,7 +1246,7 @@ pub fn should_override_type(docblock_type: &str, native_type: &str) -> bool {
     // *compatible refinement*.  For example `string` → `class-string<Foo>`
     // is valid, but `string` → `array<int>` is not.
     if native_inner.is_scalar() {
-        return is_compatible_refinement_typed(doc_inner, &native_lower);
+        return is_compatible_refinement_typed(doc_inner, native_inner);
     }
 
     // If the docblock type carries generic parameters or shape braces,
@@ -1241,18 +1267,6 @@ pub fn should_override_type(docblock_type: &str, native_type: &str) -> bool {
     true
 }
 
-/// Unwrap nullable wrappers from a `PhpType`.
-///
-/// `Nullable(X)` → `X`.  For non-nullable types, returns the type
-/// unchanged.  Note: `Union([X, Named("null")])` is NOT unwrapped
-/// here — the caller should use `non_null_type()` if needed.
-fn unwrap_nullable(ty: &PhpType) -> &PhpType {
-    match ty {
-        PhpType::Nullable(inner) => inner.as_ref(),
-        _ => ty,
-    }
-}
-
 /// Check whether a `PhpType` has generic parameters or shape braces.
 fn has_parameterisation(ty: &PhpType) -> bool {
     matches!(
@@ -1261,51 +1275,9 @@ fn has_parameterisation(ty: &PhpType) -> bool {
     )
 }
 
-/// Check whether a `PhpType` is a bare, unparameterised primitive scalar.
-///
-/// Returns `true` for simple type names like `int`, `string`, `bool`,
-/// `void`, `null`, `array`, `callable`, `iterable`, `resource` (and
-/// aliases like `integer`, `double`, `boolean`).
-///
-/// Returns `false` for:
-/// - PHPDoc pseudo-types (`non-empty-string`, `class-string`, `positive-int`)
-/// - Parameterised types (`array<int>`, `int<0, max>`, `list<User>`)
-/// - Shapes, callables with signatures, slices (`Foo[]`)
-/// - Class names, unions, intersections, etc.
-fn is_bare_primitive_scalar(ty: &PhpType) -> bool {
-    matches!(ty, PhpType::Named(s) if is_bare_primitive_name(s))
-}
-
-/// Whether a type name is one of the basic PHP primitive / built-in names.
-///
-/// This is intentionally narrower than `PhpType::is_scalar()` — it
-/// excludes `mixed`, `object`, `self`, `static`, `parent`, `$this`,
-/// and all PHPDoc pseudo-types like `class-string`, `non-empty-string`.
-fn is_bare_primitive_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "int"
-            | "integer"
-            | "float"
-            | "double"
-            | "string"
-            | "bool"
-            | "boolean"
-            | "void"
-            | "never"
-            | "null"
-            | "false"
-            | "true"
-            | "array"
-            | "callable"
-            | "iterable"
-            | "resource"
-    )
-}
-
 /// Check whether a docblock type is a compatible refinement of a native
 /// type.  Both parameters should be stripped of nullable wrappers before
-/// calling.  `native_lower` must already be lowercased.
+/// calling.
 ///
 /// A refinement is compatible when the docblock's base type narrows the
 /// native type without changing its fundamental kind.  For example:
@@ -1326,53 +1298,53 @@ fn is_bare_primitive_name(name: &str) -> bool {
 /// stripping generic parameters, shape braces, and callable signatures.
 /// Unlike `base_name()` this includes scalar names (`array`, `int`, ...)
 /// which are needed for the refinement checks.
-pub(crate) fn is_compatible_refinement_typed(doc_type: &PhpType, native_lower: &str) -> bool {
-    let doc_base = extract_base_name_lower(doc_type);
-
-    match native_lower {
-        // `string` is refined by `class-string`, `non-empty-string`,
-        // `literal-string`, `numeric-string`, `callable-string`,
-        // `lowercase-string`, `truthy-string` etc.
-        "string" => doc_base.contains("string"),
-        // `int` / `integer` is refined by `positive-int`, `negative-int`,
-        // `non-negative-int`, `non-positive-int`, `int-mask`, `int-mask-of`,
-        // `int` (with range syntax like `int<0, max>`).
-        "int" | "integer" => doc_base.contains("int"),
-        // `float` / `double` can be refined by `non-negative-float` etc.
-        "float" | "double" => doc_base.contains("float") || doc_base.contains("double"),
-        // `bool` / `boolean` can be refined by `true` or `false` (already
-        // handled as scalars earlier, but include for completeness).
-        "bool" | "boolean" => {
-            doc_base == "true" || doc_base == "false" || doc_base.contains("bool")
-        }
-        // `array` is refined by `list`, `non-empty-array`, `non-empty-list`,
-        // `associative-array`, `callable-array`, `array<…>`, `array{…}`.
-        "array" => {
-            doc_base.contains("array") || doc_base.contains("list") || doc_base == "iterable"
-        }
-        // `iterable` is refined by `array`, `list`, or any Collection-like.
-        // Since any class implementing Traversable/Iterator could be a valid
-        // refinement, allow all non-scalar docblock types.
-        "iterable" => true,
-        // `callable` / `Closure` are broad — any callable signature refines them.
-        "callable" => true,
-        "closure" => true,
-        // `object` is refined by any class name, `callable-object`,
-        // or an object shape like `object{name: string, age: int}`.
-        "object" => !doc_type.is_scalar() || matches!(doc_type, PhpType::ObjectShape(_)),
-        // `mixed` can be refined by anything.
-        "mixed" => true,
-        // `resource` is refined by `closed-resource`, `open-resource`.
-        "resource" => doc_base.contains("resource"),
-        // `self`, `static`, `parent`, `$this` — these are late-bound
-        // type references that any concrete class name refines.
-        "self" | "static" | "parent" | "$this" => !doc_type.is_scalar(),
-        // `void`, `never`, `null`, `true`, `false` — these are so narrow
-        // that docblock refinement is never meaningful.
-        "void" | "never" | "null" | "true" | "false" => false,
-        // For any other type, be conservative — don't override.
-        _ => false,
+pub(crate) fn is_compatible_refinement_typed(doc_type: &PhpType, native_type: &PhpType) -> bool {
+    if native_type.is_string_type() {
+        return doc_type.is_string_subtype();
     }
+    if native_type.is_int() {
+        return doc_type.is_int_subtype();
+    }
+    if native_type.is_float() {
+        return doc_type.is_float_subtype();
+    }
+    if native_type.is_bool() {
+        return doc_type.is_bool() || doc_type.is_true() || doc_type.is_false();
+    }
+    if native_type.is_bare_array() {
+        return doc_type.is_array_like() || doc_type.is_iterable();
+    }
+    if native_type.is_mixed() {
+        return true;
+    }
+    if native_type.is_object() {
+        return !doc_type.is_scalar() || matches!(doc_type, PhpType::ObjectShape(_));
+    }
+    if native_type.is_self_like() {
+        return !doc_type.is_scalar();
+    }
+    if native_type.is_void()
+        || native_type.is_never()
+        || native_type.is_null()
+        || native_type.is_true()
+        || native_type.is_false()
+    {
+        return false;
+    }
+    if native_type.is_callable() {
+        return true;
+    }
+
+    if native_type.is_iterable() {
+        return true;
+    }
+    if native_type.is_closure() {
+        return true;
+    }
+    if native_type.is_resource() {
+        return doc_type.is_resource();
+    }
+    false
 }
 
 /// Extract the outermost type name from a `PhpType` as a lowercased string.
@@ -1381,15 +1353,15 @@ pub(crate) fn is_compatible_refinement_typed(doc_type: &PhpType, native_lower: &
 /// nullable wrappers.  Returns the base identifier lowercased (e.g.
 /// `Generic("Collection", _)` → `"collection"`, `Named("int")` → `"int"`).
 ///
-/// For types that don't have a simple base name (e.g. unions, literals),
-/// falls back to the full `Display` output lowercased.
+/// For complex types without a simple base name (e.g. unions, callables,
+/// shapes), returns an empty string.
+///
+/// Used by `should_override_type_typed` for its hyphen-based pseudo-type
+/// heuristic.
 fn extract_base_name_lower(ty: &PhpType) -> String {
-    match ty {
-        PhpType::Named(name) => name.to_ascii_lowercase(),
-        PhpType::Generic(name, _) => name.to_ascii_lowercase(),
-        PhpType::Nullable(inner) => extract_base_name_lower(inner),
-        _ => ty.to_string().to_ascii_lowercase(),
-    }
+    ty.base_name()
+        .map(|n| n.to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 // ─── Docblock Text Extraction ───────────────────────────────────────────────
@@ -1427,51 +1399,57 @@ pub fn get_docblock_info_for_node(
 
 // ─── Effective Type Resolution ──────────────────────────────────────────────
 
+/// Parse a raw docblock type string into a [`PhpType`], applying
+/// unclosed-bracket recovery when necessary.
+///
+/// Raw docblock strings from `extract_return_type`, `extract_var_type`,
+/// `extract_param_raw_type`, etc. may contain malformed type expressions
+/// (e.g. `"static<"`, `"Collection<int"`) when multi-line annotations
+/// couldn't be fully joined.  This helper recovers the base type in such
+/// cases, matching the sanitisation logic in [`resolve_effective_type_typed`].
+///
+/// Returns `None` when the string is completely unrecoverable (e.g.
+/// `"<garbage"` with no base type).
+pub fn sanitise_and_parse_docblock_type(raw: &str) -> Option<PhpType> {
+    if crate::util::has_unclosed_delimiters(raw) {
+        let base = recover_base_type(raw);
+        if base.is_empty() {
+            None
+        } else {
+            Some(PhpType::parse(base))
+        }
+    } else {
+        Some(PhpType::parse(raw))
+    }
+}
+
 /// Pick the best available type between a native type hint and a docblock
 /// annotation, returning a parsed [`PhpType`].
 ///
 /// When both are present, the docblock type is used only if
-/// [`should_override_type`] approves (i.e. the native hint is broad enough
-/// to refine).  Malformed docblock types with unclosed brackets are
-/// partially recovered or discarded.
+/// [`should_override_type_typed`] approves (i.e. the native hint is broad
+/// enough to refine).
 ///
-/// Callers that need a string representation can use
-/// [`PhpType::to_string()`] on the result.
-pub fn resolve_effective_type(
-    native_type: Option<&str>,
-    docblock_type: Option<&str>,
+/// This function does not perform unclosed-bracket recovery; callers with
+/// raw docblock strings should use [`sanitise_and_parse_docblock_type`]
+/// first.
+pub fn resolve_effective_type_typed(
+    native_type: Option<&PhpType>,
+    docblock_type: Option<&PhpType>,
 ) -> Option<PhpType> {
-    // When the docblock type has unclosed brackets (e.g. a multi-line
-    // `@return` that couldn't be fully joined), treat it as broken and
-    // attempt partial recovery.  If recovery yields nothing useful, fall
-    // back to the native type so that resolution is never blocked by a
-    // malformed PHPDoc annotation.
-    let sanitised_doc = docblock_type.and_then(|doc| {
-        if crate::util::has_unclosed_delimiters(doc) {
-            let base = recover_base_type(doc);
-            if base.is_empty() {
-                None
-            } else {
-                Some(base.to_string())
-            }
-        } else {
-            Some(doc.to_string())
-        }
-    });
-
-    match (native_type, sanitised_doc.as_deref()) {
+    match (native_type, docblock_type) {
         // Docblock provided, no native hint → use docblock.
-        (None, Some(doc)) => Some(PhpType::parse(doc)),
+        (None, Some(doc)) => Some(doc.clone()),
         // Both present → override only if compatible.
         (Some(native), Some(doc)) => {
-            if should_override_type(doc, native) {
-                Some(PhpType::parse(doc))
+            if should_override_type_typed(doc, native) {
+                Some(doc.clone())
             } else {
-                Some(PhpType::parse(native))
+                Some(native.clone())
             }
         }
         // Native only → keep it.
-        (Some(native), None) => Some(PhpType::parse(native)),
+        (Some(native), None) => Some(native.clone()),
         // Neither → nothing.
         (None, None) => None,
     }
@@ -1528,15 +1506,15 @@ fn count_braces_on_line(line: &str) -> (i32, i32) {
 ///
 /// The tag's `description` field already contains the joined, multi-line
 /// content after the tag name.  We extract the type portion using
-/// `split_type_token` and clean it with `clean_type`.
+/// `split_type_token`, stripping trailing punctuation.
 ///
 /// Skips PHPStan conditional return types (descriptions starting with `(`).
-fn extract_type_via_mago(docblock: &str, kinds: &[TagKind]) -> Option<String> {
+fn extract_type_via_mago(docblock: &str, kinds: &[TagKind]) -> Option<PhpType> {
     extract_type_via_mago_from_info(&parse_docblock_for_tags(docblock)?, kinds)
 }
 
 /// Like [`extract_type_via_mago`], but operates on a pre-parsed [`DocblockInfo`].
-fn extract_type_via_mago_from_info(info: &DocblockInfo, kinds: &[TagKind]) -> Option<String> {
+fn extract_type_via_mago_from_info(info: &DocblockInfo, kinds: &[TagKind]) -> Option<PhpType> {
     // Try each kind in priority order; return on the first match.
     for &kind in kinds {
         for tag in info.tags_by_kind(kind) {
@@ -1554,16 +1532,16 @@ fn extract_type_via_mago_from_info(info: &DocblockInfo, kinds: &[TagKind]) -> Op
             // mago-docblock joins multi-line tag descriptions with `\n`.
             // Normalise newlines (and surrounding whitespace from
             // indentation) into a single space so that `split_type_token`
-            // and `clean_type` see the same single-line input the old
-            // line-by-line scanner produced after trimming and joining
-            // continuation lines.
+            // sees the same single-line input the old line-by-line scanner
+            // produced after trimming and joining continuation lines.
             let normalised = collapse_newlines(desc);
             let (type_str, _remainder) = split_type_token(&normalised);
             if type_str.is_empty() {
                 continue;
             }
 
-            return Some(clean_type(type_str));
+            let raw = type_str.trim_end_matches(['.', ',']);
+            return sanitise_and_parse_docblock_type(raw);
         }
     }
 
@@ -1889,5 +1867,224 @@ mod tests {
     fn other_tags_but_no_removed() {
         let doc = "/**\n * @deprecated Use foo() instead.\n * @see NewClass\n * @return int\n */";
         assert_eq!(extract_removed_version(doc), None);
+    }
+
+    // ── find_var_raw_type_in_source — scope isolation ───────────────
+
+    #[test]
+    fn var_docblock_does_not_leak_across_sibling_methods() {
+        // A `@var` in one class method must not be visible in another.
+        let src = concat!(
+            "<?php\n",
+            "class A {\n",
+            "    public function first(): void {\n",
+            "        /** @var object{title: string} $item */\n",
+            "        $item = foo();\n",
+            "    }\n",
+            "}\n",
+            "class B {\n",
+            "    public function second(): void {\n",
+            "        $item->\n", // cursor here
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from A::first() must not leak into B::second()"
+        );
+    }
+
+    #[test]
+    fn var_docblock_does_not_leak_across_sibling_methods_same_class() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function first(): void {\n",
+            "        /** @var Pen $item */\n",
+            "        $item = foo();\n",
+            "    }\n",
+            "    public function second(): void {\n",
+            "        $item->\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from first() must not leak into second()"
+        );
+    }
+
+    #[test]
+    fn var_docblock_does_not_leak_when_cursor_inside_nested_block() {
+        // The original bug: when the cursor is inside a foreach (or if,
+        // while, etc.), the extra nesting depth prevented the sibling
+        // scope detection from firing, allowing @var from a method in a
+        // completely different class to leak through.
+        let src = concat!(
+            "<?php\n",
+            "class ObjectShapeDemo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var object{title: string, score: float} $item */\n",
+            "        $item = getUnknownValue();\n",
+            "    }\n",
+            "}\n",
+            "class Other {\n",
+            "    public function demo(): void {\n",
+            "        foreach ($things as $item) {\n",
+            "            $item->\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from ObjectShapeDemo must not leak into Other when cursor is inside foreach"
+        );
+    }
+
+    #[test]
+    fn var_docblock_found_in_own_scope() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var Pen $item */\n",
+            "        $item = foo();\n",
+            "        $item->\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result.as_ref().map(|t| t.to_string()),
+            Some("Pen".to_string())
+        );
+    }
+
+    #[test]
+    fn var_docblock_found_inside_nested_block_in_own_scope() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var Pen $item */\n",
+            "        $item = foo();\n",
+            "        if (true) {\n",
+            "            $item->\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_var_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result.as_ref().map(|t| t.to_string()),
+            Some("Pen".to_string())
+        );
+    }
+
+    // ── find_iterable_raw_type_in_source — scope isolation ──────────
+
+    #[test]
+    fn iterable_docblock_does_not_leak_across_sibling_classes_nested() {
+        // Same bug scenario for find_iterable_raw_type_in_source:
+        // @var in a sibling class method leaks when cursor is nested.
+        let src = concat!(
+            "<?php\n",
+            "class A {\n",
+            "    public function demo(): void {\n",
+            "        /** @var object{title: string} $item */\n",
+            "        $item = foo();\n",
+            "    }\n",
+            "}\n",
+            "class B {\n",
+            "    public function demo(): void {\n",
+            "        foreach ($things as $x) {\n",
+            "            $item->\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("$item->").unwrap();
+        let result = find_iterable_raw_type_in_source(src, cursor, "$item");
+        assert_eq!(
+            result, None,
+            "@var from A::demo() must not leak into B::demo() foreach body"
+        );
+    }
+
+    #[test]
+    fn iterable_param_found_in_own_method_from_nested_block() {
+        // @param in the enclosing method's docblock must still be found
+        // even when the cursor is inside a nested block.
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    /**\n",
+            "     * @param list<Pen> $items\n",
+            "     */\n",
+            "    public function demo(array $items): void {\n",
+            "        foreach ($items as $x) {\n",
+            "            // cursor\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("// cursor").unwrap();
+        let result = find_iterable_raw_type_in_source(src, cursor, "$items");
+        assert_eq!(
+            result.as_ref().map(|t| t.to_string()),
+            Some("list<Pen>".to_string())
+        );
+    }
+
+    // ── extract_type_assertions (generic types) ─────────────────────
+
+    #[test]
+    fn assert_generic_type_with_spaces() {
+        let doc = "/** @phpstan-assert Collection<int, User> $param */";
+        let result = extract_type_assertions(doc);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].asserted_type.to_string(), "Collection<int, User>");
+        assert_eq!(result[0].param_name, "$param");
+        assert!(!result[0].negated);
+    }
+
+    #[test]
+    fn assert_negated_generic_type() {
+        let doc = "/** @phpstan-assert !Collection<int, User> $param */";
+        let result = extract_type_assertions(doc);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].negated);
+        assert_eq!(result[0].asserted_type.to_string(), "Collection<int, User>");
+    }
+
+    #[test]
+    fn iterable_var_found_in_own_scope_nested() {
+        let src = concat!(
+            "<?php\n",
+            "class Demo {\n",
+            "    public function demo(): void {\n",
+            "        /** @var list<Pen> $items */\n",
+            "        $items = foo();\n",
+            "        foreach ($items as $x) {\n",
+            "            // cursor\n",
+            "        }\n",
+            "    }\n",
+            "}\n",
+        );
+        let cursor = src.find("// cursor").unwrap();
+        let result = find_iterable_raw_type_in_source(src, cursor, "$items");
+        assert_eq!(
+            result.as_ref().map(|t| t.to_string()),
+            Some("list<Pen>".to_string())
+        );
     }
 }

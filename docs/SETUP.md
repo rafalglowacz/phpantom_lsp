@@ -120,9 +120,6 @@ vim.lsp.enable('phpantom')
 <details>
 <summary><b>Sublime Text</b></summary>
 
-> [!NOTE]
-> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
-
 With [LSP for Sublime Text](https://github.com/sublimelsp/LSP):
 
 ```json
@@ -131,7 +128,84 @@ With [LSP for Sublime Text](https://github.com/sublimelsp/LSP):
     "phpantom": {
       "enabled": true,
       "command": ["/path/to/phpantom_lsp"],
-      "selector": "source.php"
+      "selector": "embedding.php",
+      "priority_selector": "source.php"
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Helix</b></summary>
+
+Helix has built-in LSP support. Add PHPantom to your `languages.toml` (typically `~/.config/helix/languages.toml`):
+
+```toml
+[language-server.phpantom]
+command = "phpantom_lsp"
+
+[[language]]
+name = "php"
+language-servers = ["phpantom"]
+```
+
+</details>
+
+<details>
+<summary><b>Emacs (eglot)</b></summary>
+
+> [!NOTE]
+> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
+
+Eglot is built into Emacs 29+. Add to your `init.el`:
+
+```elisp
+(with-eval-after-load 'eglot
+  (add-to-list 'eglot-server-programs
+               '(php-mode . ("phpantom_lsp"))))
+```
+
+Then open a PHP file and run `M-x eglot`.
+
+</details>
+
+<details>
+<summary><b>Emacs (lsp-mode)</b></summary>
+
+> [!NOTE]
+> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
+
+Add to your `init.el`:
+
+```elisp
+(with-eval-after-load 'lsp-mode
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-stdio-connection '("phpantom_lsp"))
+    :activation-fn (lsp-activate-on "php")
+    :server-id 'phpantom)))
+```
+
+Then open a PHP file and run `M-x lsp`.
+
+</details>
+
+<details>
+<summary><b>Kate</b></summary>
+
+> [!NOTE]
+> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
+
+Kate (KDE) has built-in LSP support. Open **Settings → Configure Kate → LSP Client → User Server Settings** and add:
+
+```json
+{
+  "servers": {
+    "php": {
+      "command": ["/path/to/phpantom_lsp"],
+      "url": "https://github.com/AJenbo/phpantom_lsp"
     }
   }
 }
@@ -150,7 +224,7 @@ PHPantom supports an optional per-project configuration file for settings like P
 To generate a default config file with all options documented and commented out:
 
 ```bash
-phpantom_lsp --init
+phpantom_lsp init
 ```
 
 This creates a `.phpantom.toml` in the current directory. Currently supported settings:

@@ -134,6 +134,9 @@ impl LanguageServer for Backend {
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(
+                    true,
+                )),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
                         code_action_kinds: Some(vec![
@@ -312,6 +315,14 @@ impl LanguageServer for Backend {
             phpstan_backend.phpstan_worker().await;
         });
 
+        // Spawn the PHPCS worker as a separate background task.
+        // Same pattern as the PHPStan worker: dedicated task, own
+        // debounce timer, single pending-URI slot.
+        let phpcs_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            phpcs_backend.phpcs_worker().await;
+        });
+
         // ── Dynamic capability registration ─────────────────────────
         // lsp-types 0.94 does not expose a `type_hierarchy_provider`
         // field on `ServerCapabilities`, so we register the capability
@@ -328,15 +339,16 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        // Signal background workers (diagnostic, PHPStan) to stop.
-        // The PHPStan `run_command_with_timeout` poll loop also checks
-        // this flag, so a running child process is killed within 50ms
-        // instead of waiting up to 60 seconds.
+        // Signal background workers (diagnostic, PHPStan, PHPCS) to
+        // stop.  The PHPStan/PHPCS poll loops also check this flag,
+        // so running child processes are killed within 50ms instead
+        // of waiting up to 60 seconds.
         self.shutdown_flag.store(true, Ordering::Release);
-        // Wake both workers so they see the flag immediately instead
+        // Wake all workers so they see the flag immediately instead
         // of sleeping until the next edit arrives.
         self.diag_notify.notify_one();
         self.phpstan_notify.notify_one();
+        self.phpcs_notify.notify_one();
         Ok(())
     }
 
@@ -596,6 +608,22 @@ impl LanguageServer for Backend {
 
         self.handle_with_position("document_highlight", &uri, position, |content| {
             self.handle_document_highlight(&uri, content, position)
+        })
+    }
+
+    async fn linked_editing_range(
+        &self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+
+        self.handle_with_position("linked_editing_range", &uri, position, |content| {
+            self.handle_linked_editing_range(&uri, content, position)
         })
     }
 

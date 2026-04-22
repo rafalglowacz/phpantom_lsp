@@ -30,6 +30,7 @@
 /// to the [`crate::completion::type_narrowing`] module.  Closure/arrow-function scope
 /// handling is delegated to [`super::closure_resolution`].
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use mago_span::HasSpan;
@@ -37,9 +38,9 @@ use mago_syntax::ast::*;
 
 use crate::completion::types::narrowing;
 use crate::docblock;
-use crate::parser::{extract_hint_string, with_parsed_program};
-use crate::php_type::PhpType;
-use crate::types::{ClassInfo, ResolvedType};
+use crate::parser::{extract_hint_type, with_parsed_program};
+use crate::php_type::{PhpType, ShapeEntry, is_keyword_type};
+use crate::types::{ClassInfo, ParameterInfo, ResolvedType};
 
 use crate::completion::resolver::{Loaders, VarResolutionCtx};
 
@@ -62,17 +63,25 @@ thread_local! {
 
 /// Maximum nesting depth for `resolve_variable_types` calls.
 ///
-/// Three levels covers legitimate nested resolution such as:
-///   depth 0: resolve `$item` in a foreach body
-///   depth 1: resolve `$collection` (the foreach iterator expression)
-///   depth 2: resolve `$node` (RHS of `$collection = $node->method()`)
+/// Six levels covers legitimate nested resolution chains where each
+/// variable assignment depends on the previous variable's type:
+///
+///   depth 0: resolve `$debt`       (from `$order->getDebtCollection()`)
+///   depth 1: resolve `$order`      (from `$period->getOrder()`)
+///   depth 2: resolve `$period`     (from `$agreement->getPeriods()->…->lastPeriod()`)
+///   depth 3: resolve `$agreement`  (from `$customer->getLatestAgreement()`)
+///   depth 4: resolve `$customer`   (from `$event->token->getCustomer()`)
+///   depth 5: resolve `$event`      (method parameter — no further recursion)
+///
+/// This pattern is common in Laravel code where each step guards
+/// against null and then chains to the next model accessor.
 ///
 /// Cycles like `foreach ($x->method() as $x)` are caught by a
 /// targeted check in `try_resolve_foreach_value_type` (which skips
 /// resolution when the value variable shadows the iterator receiver)
 /// rather than by this depth limit alone.  The depth limit is a
 /// safety net for any remaining recursive patterns.
-const MAX_VAR_RESOLUTION_DEPTH: u8 = 3;
+const MAX_VAR_RESOLUTION_DEPTH: u8 = 6;
 
 /// Build a [`VarClassStringResolver`] closure from a [`VarResolutionCtx`].
 ///
@@ -102,20 +111,20 @@ pub(in crate::completion) fn build_var_resolver_from_ctx<'a>(
 ///
 /// When `type_str` resolves to `Builder` (the Eloquent Builder, without
 /// generic parameters) and the enclosing method is a scope on a class
-/// that extends Eloquent Model, returns
-/// `Some("Builder<EnclosingModelName>")`.  Otherwise returns `None`,
-/// meaning the caller should use the original type string.
+/// that extends Eloquent Model, returns a `PhpType::Generic` wrapping
+/// the builder name and the enclosing model.  Otherwise returns `None`,
+/// meaning the caller should use the original type.
 ///
 /// A method is considered a scope when it uses the `scopeX` naming
 /// convention (name starts with `scope`, len > 5) **or** when
 /// `has_scope_attr` is `true` (the method has `#[Scope]`).
 fn enrich_builder_type_in_scope(
-    type_str: &str,
+    type_hint: &PhpType,
     method_name: &str,
     has_scope_attr: bool,
     current_class: &ClassInfo,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<String> {
+) -> Option<PhpType> {
     use crate::virtual_members::laravel::{ELOQUENT_BUILDER_FQN, extends_eloquent_model};
 
     // Only applies inside scope methods: either the scopeX naming
@@ -135,16 +144,23 @@ fn enrich_builder_type_in_scope(
     // imports).  If the type already has generic args (e.g.
     // `Builder<User>`), do not enrich — the user-supplied generics
     // should be used as-is.
-    if PhpType::parse(type_str).has_type_structure() {
+    if type_hint.has_type_structure() {
         return None;
     }
-    let is_eloquent_builder = type_str == ELOQUENT_BUILDER_FQN || type_str == "Builder";
+    let type_name = match type_hint {
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
+    let is_eloquent_builder = type_name == ELOQUENT_BUILDER_FQN || type_name == "Builder";
     if !is_eloquent_builder {
         return None;
     }
 
     // Build the enriched type with the enclosing model as the generic arg.
-    Some(format!("{type_str}<{}>", current_class.name))
+    Some(PhpType::Generic(
+        type_name.to_string(),
+        vec![PhpType::Named(current_class.name.clone())],
+    ))
 }
 
 /// Resolve the type of `$variable` by re-parsing the file and walking
@@ -191,6 +207,7 @@ pub(crate) fn resolve_variable_types(
             enclosing_return_type: None,
             branch_aware: false,
             phpstorm_meta,
+            match_arm_narrowing: HashMap::new(),
         };
 
         resolve_variable_in_statements(program.statements.iter(), &ctx)
@@ -244,6 +261,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
                 enclosing_return_type: None,
                 branch_aware: true,
                 phpstorm_meta,
+                match_arm_narrowing: HashMap::new(),
             };
 
             resolve_variable_in_statements(program.statements.iter(), &ctx)
@@ -754,7 +772,7 @@ fn resolve_variable_in_members<'b>(
                 if pname == ctx.var_name {
                     matched_param_is_variadic = param.ellipsis.is_some();
                     // Try the native AST type hint first.
-                    let native_type_str = param.hint.as_ref().map(|h| extract_hint_string(h));
+                    let native_type = param.hint.as_ref().map(|h| extract_hint_type(h));
 
                     // ── Eloquent scope Builder inference ────────
                     // When the enclosing method is a scope on an
@@ -762,7 +780,7 @@ fn resolve_variable_in_members<'b>(
                     // `Builder` (without generics), enrich it to
                     // `Builder<EnclosingModel>` so that the
                     // generic-args path injects scope methods.
-                    let enriched_type_str = native_type_str.as_deref().and_then(|ts| {
+                    let enriched_type = native_type.as_ref().and_then(|nt| {
                         let method_name = method.name.value.to_string();
                         // Check whether the method has a #[Scope]
                         // attribute so that the enrichment also
@@ -773,16 +791,16 @@ fn resolve_variable_in_members<'b>(
                                 .any(|a| a.name.last_segment() == "Scope")
                         });
                         enrich_builder_type_in_scope(
-                            ts,
+                            nt,
                             &method_name,
                             has_scope_attr,
                             ctx.current_class,
                             ctx.class_loader,
                         )
                     });
-
-                    let type_str_for_resolution =
-                        enriched_type_str.as_deref().or(native_type_str.as_deref());
+                    // Prefer the enriched type (Builder<Model>) over the bare native type.
+                    let type_for_resolution: Option<&PhpType> =
+                        enriched_type.as_ref().or(native_type.as_ref());
 
                     // Check the `@param` docblock annotation which may
                     // carry a more specific type than the native hint
@@ -796,9 +814,15 @@ fn resolve_variable_in_members<'b>(
 
                     // Pick the effective type: docblock overrides native
                     // when it is a compatible refinement.
-                    let effective_type = crate::docblock::resolve_effective_type(
-                        type_str_for_resolution,
-                        raw_docblock_type.as_deref(),
+                    let native_parsed = if let Some(ref enriched) = enriched_type {
+                        Some(enriched.clone())
+                    } else {
+                        native_type.clone()
+                    };
+                    let doc_parsed = raw_docblock_type.clone();
+                    let effective_type = crate::docblock::resolve_effective_type_typed(
+                        native_parsed.as_ref(),
+                        doc_parsed.as_ref(),
                     );
 
                     // ── Substitute method-level template params with
@@ -833,7 +857,9 @@ fn resolve_variable_in_members<'b>(
                         param_results = ResolvedType::from_classes_with_hint(
                             resolved_from_effective,
                             effective_type.unwrap_or_else(|| {
-                                PhpType::parse(type_str_for_resolution.unwrap_or(""))
+                                type_for_resolution
+                                    .cloned()
+                                    .unwrap_or_else(PhpType::untyped)
                             }),
                         );
                         break;
@@ -845,17 +871,17 @@ fn resolve_variable_in_members<'b>(
                     // a more specific non-class type such as
                     // `object{foo: int, bar: string}`.
                     if let Some(ref raw_docblock_type) = raw_docblock_type {
-                        let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                            raw_docblock_type,
-                            &ctx.current_class.name,
-                            ctx.all_classes,
-                            ctx.class_loader,
-                        );
-                        if !resolved.is_empty() {
-                            param_results = ResolvedType::from_classes_with_hint(
-                                resolved,
-                                PhpType::parse(raw_docblock_type),
+                        let parsed_docblock = raw_docblock_type.clone();
+                        let resolved =
+                            crate::completion::type_resolution::type_hint_to_classes_typed(
+                                &parsed_docblock,
+                                &ctx.current_class.name,
+                                ctx.all_classes,
+                                ctx.class_loader,
                             );
+                        if !resolved.is_empty() {
+                            param_results =
+                                ResolvedType::from_classes_with_hint(resolved, parsed_docblock);
                             break;
                         }
                     }
@@ -867,6 +893,7 @@ fn resolve_variable_in_members<'b>(
                     // cases where the class declares `map(object $entity)`
                     // but the interface has `@param TEntity $entity` with
                     // `@implements Interface<Boo>` substituting `TEntity`.
+                    let mut merged_type_hint: Option<PhpType> = None;
                     let method_name = method.name.value.to_string();
                     let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
                         ctx.current_class,
@@ -884,7 +911,6 @@ fn resolve_variable_in_members<'b>(
                             .find(|p| p.name == ctx.var_name)
                             && let Some(ref hint) = merged_param.type_hint
                         {
-                            let hint_str = hint.to_string();
                             let resolved =
                                 crate::completion::type_resolution::type_hint_to_classes_typed(
                                     hint,
@@ -893,12 +919,16 @@ fn resolve_variable_in_members<'b>(
                                     ctx.class_loader,
                                 );
                             if !resolved.is_empty() {
-                                param_results = ResolvedType::from_classes_with_hint(
-                                    resolved,
-                                    PhpType::parse(&hint_str),
-                                );
+                                param_results =
+                                    ResolvedType::from_classes_with_hint(resolved, hint.clone());
                                 break;
                             }
+                            // The merged type hint is richer than the
+                            // native hint (e.g. `list<Pen>` vs `array`)
+                            // but didn't resolve to a class. Remember
+                            // it so the type-string-only fallback below
+                            // uses it instead of the bare native hint.
+                            merged_type_hint = Some(hint.clone());
                         }
                     }
 
@@ -910,10 +940,18 @@ fn resolve_variable_in_members<'b>(
                     // Prefer the docblock type (e.g. `class-string<BackedEnum>`)
                     // over the native type (e.g. `string`) when the
                     // docblock provides a more specific annotation.
-                    let best_type_str = raw_docblock_type.as_deref().or(type_str_for_resolution);
-                    if let Some(ts) = best_type_str {
-                        let mut parsed = PhpType::parse(ts);
-
+                    // When the merged class provides a richer type from
+                    // parent/interface inheritance (e.g. `list<Pen>` from
+                    // a parent's `@param`), prefer that over the bare
+                    // native hint.
+                    let best_type = if let Some(ref rdt) = raw_docblock_type {
+                        Some(rdt.clone())
+                    } else if let Some(ref mth) = merged_type_hint {
+                        Some(mth.clone())
+                    } else {
+                        type_for_resolution.cloned()
+                    };
+                    if let Some(mut parsed) = best_type {
                         // ── Substitute method-level template params
                         // in `class-string<T>` with their bounds ────────
                         // When the parameter type is `class-string<T>` and
@@ -942,8 +980,7 @@ fn resolve_variable_in_members<'b>(
             // type via `PhpType::extract_value_type`.
             if matched_param_is_variadic && !param_results.is_empty() {
                 for rt in &mut param_results {
-                    rt.type_string =
-                        PhpType::Generic("list".to_string(), vec![rt.type_string.clone()]);
+                    rt.type_string = PhpType::list(rt.type_string.clone());
                     // The variable is now an array, not a class instance,
                     // so clear the class_info.
                     rt.class_info = None;
@@ -1006,6 +1043,17 @@ fn resolve_variable_in_members<'b>(
                             return ResolvedType::from_classes(yield_results);
                         }
                     }
+
+                    // The concrete body was walked but produced no
+                    // results.  This can happen when instanceof
+                    // narrowing targeted an unresolvable class (e.g.
+                    // from a phar) and cleared the parameter type.
+                    // Do NOT fall through to the abstract-method
+                    // param fallback below — returning the un-narrowed
+                    // parameter type would cause false-positive
+                    // "unknown member" diagnostics for members that
+                    // only exist on the narrowed (unresolvable) class.
+                    return vec![];
                 } else {
                     // Cursor is not inside this method's body —
                     // skip to the next method so we don't
@@ -1070,8 +1118,8 @@ fn substitute_template_param_bounds(
 
     let mut subs = std::collections::HashMap::new();
     for (name, bound) in bounds {
-        if let Some(bound_str) = bound {
-            subs.insert(name, PhpType::parse(&bound_str));
+        if let Some(bound_type) = bound {
+            subs.insert(name, bound_type);
         }
     }
 
@@ -1090,37 +1138,14 @@ fn type_may_contain_template_param(ty: &PhpType) -> bool {
     match ty {
         PhpType::Named(name) => {
             // Well-known scalars/pseudo-types are never template params.
-            !matches!(
-                name.as_str(),
-                "int"
-                    | "float"
-                    | "string"
-                    | "bool"
-                    | "null"
-                    | "void"
-                    | "never"
-                    | "mixed"
-                    | "object"
-                    | "array"
-                    | "iterable"
-                    | "callable"
-                    | "resource"
-                    | "true"
-                    | "false"
-                    | "self"
-                    | "static"
-                    | "$this"
-                    | "parent"
-                    | "class-string"
-            )
+            !is_keyword_type(name)
         }
         PhpType::Union(members) | PhpType::Intersection(members) => {
             members.iter().any(type_may_contain_template_param)
         }
         PhpType::Nullable(inner) => type_may_contain_template_param(inner),
         PhpType::Generic(base, args) => {
-            // Check if the base itself could be a template param, or any arg.
-            type_may_contain_template_param(&PhpType::Named(base.clone()))
+            !crate::php_type::is_keyword_type(base)
                 || args.iter().any(type_may_contain_template_param)
         }
         _ => false,
@@ -1166,9 +1191,9 @@ fn substitute_class_string_template_bounds(
     let bounds = docblock::extract_template_params_with_bounds(docblock);
     for (name, bound) in bounds {
         if name == tpl_name
-            && let Some(bound_str) = bound
+            && let Some(bound_type) = bound
         {
-            return PhpType::ClassString(Some(Box::new(PhpType::parse(&bound_str))));
+            return PhpType::ClassString(Some(Box::new(bound_type)));
         }
     }
 
@@ -1551,6 +1576,14 @@ fn walk_if_statement<'b>(
                 ctx,
                 results,
             );
+            // ── type-guard narrowing for then-body ──
+            // `is_array($var)`, `is_string($var)`, etc.
+            narrowing::try_apply_type_guard_narrowing(
+                if_stmt.condition,
+                body.statement.span(),
+                ctx,
+                results,
+            );
             check_statement_for_assignments(body.statement, ctx, results, true);
 
             for else_if in body.else_if_clauses.iter() {
@@ -1594,6 +1627,13 @@ fn walk_if_statement<'b>(
                         classes,
                     );
                 });
+                // ── type-guard narrowing for elseif-body ──
+                narrowing::try_apply_type_guard_narrowing(
+                    else_if.condition,
+                    else_if.statement.span(),
+                    ctx,
+                    results,
+                );
                 check_statement_for_assignments(else_if.statement, ctx, results, true);
             }
             if let Some(else_clause) = &body.else_clause {
@@ -1633,6 +1673,13 @@ fn walk_if_statement<'b>(
                     ctx,
                     results,
                 );
+                // ── inverse type-guard narrowing for else-body ──
+                narrowing::try_apply_type_guard_narrowing_inverse(
+                    if_stmt.condition,
+                    else_span,
+                    ctx,
+                    results,
+                );
                 // Also apply inverse narrowing for every elseif condition.
                 // In the else branch, all preceding conditions were false,
                 // so each elseif's condition is also inverted.
@@ -1662,6 +1709,12 @@ fn walk_if_statement<'b>(
                             classes,
                         );
                     });
+                    narrowing::try_apply_type_guard_narrowing_inverse(
+                        else_if.condition,
+                        else_span,
+                        ctx,
+                        results,
+                    );
                 }
                 check_statement_for_assignments(else_clause.statement, ctx, results, true);
             }
@@ -1709,6 +1762,8 @@ fn walk_if_statement<'b>(
             });
             // ── null narrowing for then-body ──
             narrowing::try_apply_if_body_null_narrowing(if_stmt.condition, then_span, ctx, results);
+            // ── type-guard narrowing for then-body ──
+            narrowing::try_apply_type_guard_narrowing(if_stmt.condition, then_span, ctx, results);
             walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
             for else_if in body.else_if_clauses.iter() {
                 // ── inline && narrowing for elseif condition ──
@@ -1765,6 +1820,8 @@ fn walk_if_statement<'b>(
                     ctx,
                     results,
                 );
+                // ── type-guard narrowing for elseif-body ──
+                narrowing::try_apply_type_guard_narrowing(else_if.condition, ei_span, ctx, results);
                 walk_statements_for_assignments(else_if.statements.iter(), ctx, results, true);
             }
             if let Some(else_clause) = &body.else_clause {
@@ -1812,6 +1869,13 @@ fn walk_if_statement<'b>(
                     ctx,
                     results,
                 );
+                // ── inverse type-guard narrowing for else-body ──
+                narrowing::try_apply_type_guard_narrowing_inverse(
+                    if_stmt.condition,
+                    else_span,
+                    ctx,
+                    results,
+                );
                 // Also apply inverse narrowing for every elseif condition.
                 for else_if in body.else_if_clauses.iter() {
                     ResolvedType::apply_narrowing(results, |classes| {
@@ -1839,6 +1903,12 @@ fn walk_if_statement<'b>(
                             classes,
                         );
                     });
+                    narrowing::try_apply_type_guard_narrowing_inverse(
+                        else_if.condition,
+                        else_span,
+                        ctx,
+                        results,
+                    );
                 }
                 walk_statements_for_assignments(else_clause.statements.iter(), ctx, results, true);
             }
@@ -1868,6 +1938,9 @@ fn walk_if_statement<'b>(
         // This operates on `ResolvedType` directly because `null` is
         // not a class and would be missed by class-level narrowing.
         narrowing::apply_guard_clause_null_narrowing(if_stmt, ctx, results);
+        // ── Type-guard guard clause narrowing ──
+        // `if (is_array($x)) { return; }` → after if, $x is NOT array.
+        narrowing::apply_guard_clause_type_guard_narrowing(if_stmt, ctx, results);
     }
 }
 
@@ -1928,6 +2001,13 @@ fn walk_if_branch_aware<'b>(
                     ctx,
                     results,
                 );
+                // ── type-guard narrowing for then-body ──
+                narrowing::try_apply_type_guard_narrowing(
+                    if_stmt.condition,
+                    then_span,
+                    ctx,
+                    results,
+                );
                 check_statement_for_assignments(body.statement, ctx, results, false);
                 return Some(());
             }
@@ -1964,6 +2044,13 @@ fn walk_if_branch_aware<'b>(
                         );
                     });
                     narrowing::try_apply_if_body_null_narrowing(
+                        else_if.condition,
+                        ei_span,
+                        ctx,
+                        results,
+                    );
+                    // ── type-guard narrowing for elseif-body ──
+                    narrowing::try_apply_type_guard_narrowing(
                         else_if.condition,
                         ei_span,
                         ctx,
@@ -2019,6 +2106,13 @@ fn walk_if_branch_aware<'b>(
                         ctx,
                         results,
                     );
+                    // ── inverse type-guard narrowing for else-body ──
+                    narrowing::try_apply_type_guard_narrowing_inverse(
+                        if_stmt.condition,
+                        el_span,
+                        ctx,
+                        results,
+                    );
                     // Also apply inverse narrowing for every elseif condition.
                     for else_if in body.else_if_clauses.iter() {
                         ResolvedType::apply_narrowing(results, |classes| {
@@ -2046,6 +2140,12 @@ fn walk_if_branch_aware<'b>(
                                 classes,
                             );
                         });
+                        narrowing::try_apply_type_guard_narrowing_inverse(
+                            else_if.condition,
+                            el_span,
+                            ctx,
+                            results,
+                        );
                     }
                     check_statement_for_assignments(else_clause.statement, ctx, results, false);
                     return Some(());
@@ -2108,6 +2208,13 @@ fn walk_if_branch_aware<'b>(
                     ctx,
                     results,
                 );
+                // ── type-guard narrowing for then-body ──
+                narrowing::try_apply_type_guard_narrowing(
+                    if_stmt.condition,
+                    then_span,
+                    ctx,
+                    results,
+                );
                 walk_statements_for_assignments(body.statements.iter(), ctx, results, false);
                 return Some(());
             }
@@ -2158,6 +2265,13 @@ fn walk_if_branch_aware<'b>(
                         );
                     });
                     narrowing::try_apply_if_body_null_narrowing(
+                        else_if.condition,
+                        ei_span,
+                        ctx,
+                        results,
+                    );
+                    // ── type-guard narrowing for elseif-body ──
+                    narrowing::try_apply_type_guard_narrowing(
                         else_if.condition,
                         ei_span,
                         ctx,
@@ -2218,6 +2332,13 @@ fn walk_if_branch_aware<'b>(
                         ctx,
                         results,
                     );
+                    // ── inverse type-guard narrowing for else-body ──
+                    narrowing::try_apply_type_guard_narrowing_inverse(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        results,
+                    );
                     // Also apply inverse narrowing for every elseif condition.
                     for else_if in body.else_if_clauses.iter() {
                         ResolvedType::apply_narrowing(results, |classes| {
@@ -2245,6 +2366,12 @@ fn walk_if_branch_aware<'b>(
                                 classes,
                             );
                         });
+                        narrowing::try_apply_type_guard_narrowing_inverse(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            results,
+                        );
                     }
                     walk_statements_for_assignments(
                         else_clause.statements.iter(),
@@ -2349,8 +2476,17 @@ fn walk_foreach_statement<'b>(
     // ── Pre-scan for loop-carried assignments ──
     // When the cursor is inside the loop body, assignments that appear
     // textually after the cursor are live on subsequent iterations.
-    // Pre-scan the body to pick them up as conditional types before the
-    // normal positional walk (which skips statements after the cursor).
+    // Pre-scan the body to pick them up as conditional types.
+    //
+    // IMPORTANT: the prescan results are collected into a separate Vec
+    // and merged AFTER the normal body walk.  If we merged before the
+    // normal walk, a self-referencing assignment like
+    //   `$type = DeviationType::from($type)`
+    // would pollute the type of `$type` on the RHS: the prescan would
+    // add `DeviationType` to the results, and the normal walk would
+    // then see `string|DeviationType` instead of just `string` when
+    // resolving `$type` inside `from($type)`.
+    let mut deferred_prescan: Vec<ResolvedType> = Vec::new();
     if cursor_inside {
         match &foreach.body {
             ForeachBody::Statement(inner) => {
@@ -2358,7 +2494,7 @@ fn walk_foreach_statement<'b>(
                     std::iter::once(*inner),
                     body_span.end.offset,
                     ctx,
-                    results,
+                    &mut deferred_prescan,
                 );
             }
             ForeachBody::ColonDelimited(body) => {
@@ -2366,7 +2502,7 @@ fn walk_foreach_statement<'b>(
                     body.statements.iter(),
                     body_span.end.offset,
                     ctx,
-                    results,
+                    &mut deferred_prescan,
                 );
             }
         }
@@ -2386,6 +2522,14 @@ fn walk_foreach_statement<'b>(
         ForeachBody::ColonDelimited(body) => {
             walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
         }
+    }
+
+    // Now merge the deferred prescan results.  At this point the normal
+    // walk has already resolved all RHS expressions using the types
+    // available at each statement's position, so loop-carried types
+    // from the prescan no longer pollute same-statement RHS resolution.
+    if !deferred_prescan.is_empty() {
+        ResolvedType::extend_unique(results, deferred_prescan);
     }
 }
 
@@ -2557,14 +2701,17 @@ fn walk_try_statement<'b>(
         if let Some(ref var) = catch.variable
             && var.name == ctx.var_name
         {
-            let hint_str = extract_hint_string(&catch.hint);
-            let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &hint_str,
+            let parsed_hint = extract_hint_type(&catch.hint);
+            let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
+                &parsed_hint,
                 &ctx.current_class.name,
                 ctx.all_classes,
                 ctx.class_loader,
             );
-            ResolvedType::extend_unique(results, ResolvedType::from_classes(resolved));
+            ResolvedType::extend_unique(
+                results,
+                ResolvedType::from_classes_with_hint(resolved, parsed_hint),
+            );
         }
         // Same logic: when the cursor is inside this catch block,
         // treat preceding assignments as unconditional.
@@ -2668,7 +2815,8 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
     // Determine the "native" return-type string from the RHS so we can
     // apply the same override check used for `@return` annotations.
     let native_type = extract_native_type_from_rhs(assignment.rhs, ctx);
-    let effective = docblock::resolve_effective_type(native_type.as_deref(), Some(&var_type));
+    let native_parsed = native_type.as_ref().cloned();
+    let effective = docblock::resolve_effective_type_typed(native_parsed.as_ref(), Some(&var_type));
 
     let eff_type = match effective {
         Some(t) => t,
@@ -2683,7 +2831,7 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
     );
 
     if resolved.is_empty() {
-        // When `type_hint_to_classes` can't resolve the type (e.g.
+        // When `type_hint_to_classes_typed` can't resolve the type (e.g.
         // `list<User>`, `array{name: string}`, `int[]`), emit a
         // type-string-only entry so that downstream consumers like
         // foreach resolution can still extract element types via
@@ -2716,8 +2864,8 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
 /// expression, without resolving it to `ClassInfo`.
 ///
 /// This is used by [`try_inline_var_override`] to feed
-/// [`docblock::resolve_effective_type`] with the same kind of type
-/// string that `@return` override checking uses.
+/// [`docblock::resolve_effective_type`] with the same kind of parsed
+/// `PhpType` that `@return` override checking uses.
 ///
 /// Returns `None` when the native type cannot be determined (the
 /// caller should treat this as "unknown", which lets the docblock type
@@ -2725,13 +2873,17 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
 fn extract_native_type_from_rhs<'b>(
     rhs: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     match rhs {
         // `new ClassName(…)` → the class name.
         Expression::Instantiation(inst) => match inst.class {
-            Expression::Identifier(ident) => Some(ident.value().to_string()),
-            Expression::Self_(_) => Some(ctx.current_class.name.clone()),
-            Expression::Static(_) => Some(ctx.current_class.name.clone()),
+            Expression::Identifier(ident) => {
+                let name = ident.value().to_string();
+                let fqn = crate::util::resolve_name_via_loader(&name, ctx.class_loader);
+                Some(PhpType::Named(fqn))
+            }
+            Expression::Self_(_) => Some(PhpType::Named(ctx.current_class.name.clone())),
+            Expression::Static(_) => Some(PhpType::Named(ctx.current_class.name.clone())),
             _ => None,
         },
         // Function / method calls → look up the return type.
@@ -2744,7 +2896,7 @@ fn extract_native_type_from_rhs<'b>(
                 func_name.and_then(|name| {
                     ctx.function_loader()
                         .and_then(|fl| fl(&name))
-                        .and_then(|fi| fi.return_type_str())
+                        .and_then(|fi| fi.return_type.clone())
                 })
             }
             Call::Method(method_call) => {
@@ -2760,7 +2912,7 @@ fn extract_native_type_from_rhs<'b>(
                             cls.methods
                                 .iter()
                                 .find(|m| m.name == method_name)
-                                .and_then(|m| m.return_type_str())
+                                .and_then(|m| m.return_type.clone())
                         })
                 } else {
                     None
@@ -2788,7 +2940,7 @@ fn extract_native_type_from_rhs<'b>(
                         o.methods
                             .iter()
                             .find(|m| m.name == method_name)
-                            .and_then(|m| m.return_type_str())
+                            .and_then(|m| m.return_type.clone())
                     })
                 } else {
                     None
@@ -2800,7 +2952,7 @@ fn extract_native_type_from_rhs<'b>(
         // functions always produce a Closure.
         Expression::PartialApplication(_)
         | Expression::Closure(_)
-        | Expression::ArrowFunction(_) => Some("\\Closure".to_string()),
+        | Expression::ArrowFunction(_) => Some(PhpType::closure()),
         _ => None,
     }
 }
@@ -2917,54 +3069,91 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
         }
 
         // ── Incremental key assignment: `$var['key'] = expr;` ──
+        // Also handles nested assignments: `$var['a']['b'] = expr;`
         // Track string-keyed assignments and merge them into the
         // base type's array shape.  This produces type strings like
         // `array{name: string, age: int}` which downstream consumers
         // use for shape-aware completion and hover.
-        if let Expression::ArrayAccess(array_access) = assignment.lhs
-            && let Expression::Variable(Variable::Direct(dv)) = array_access.array
-            && dv.name == var_name
-        {
-            // ── Skip when cursor is inside the RHS ────────
-            // Same guard as the base-assignment path below.
-            // Without this, `$var['key'] = $var['key']->method()`
-            // would infinitely recurse: resolving the RHS triggers
-            // resolution of `$var`, which re-discovers the same
-            // assignment and resolves its RHS again.
-            let rhs_start = assignment.rhs.span().start.offset;
-            let assign_end = assignment.span().end.offset;
-            if ctx.cursor_offset >= rhs_start && ctx.cursor_offset <= assign_end {
+        if let Expression::ArrayAccess(array_access) = assignment.lhs {
+            // Extract the base variable name and chain of keys from
+            // potentially nested array accesses like `$var['a']['b']['c']`.
+            if let Some((base_name, key_chain)) = extract_nested_array_access_chain(array_access)
+                && base_name == var_name
+            {
+                // ── Skip when cursor is inside the RHS ────────
+                // Same guard as the base-assignment path below.
+                // Without this, `$var['key'] = $var['key']->method()`
+                // would infinitely recurse: resolving the RHS triggers
+                // resolution of `$var`, which re-discovers the same
+                // assignment and resolves its RHS again.
+                let rhs_start = assignment.rhs.span().start.offset;
+                let assign_end = assignment.span().end.offset;
+                if ctx.cursor_offset >= rhs_start && ctx.cursor_offset <= assign_end {
+                    return;
+                }
+
+                // Check if all keys in the chain are string literals.
+                let all_string_keys: Option<Vec<String>> = key_chain
+                    .iter()
+                    .map(|idx| extract_array_key_for_shape(idx))
+                    .collect();
+
+                if let Some(keys) = all_string_keys {
+                    // ── All string-literal keys: merge into (nested) array shape ──
+                    let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
+                    let resolved =
+                        super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
+                    let value_php_type = if !resolved.is_empty() {
+                        ResolvedType::types_joined(&resolved)
+                    } else {
+                        PhpType::mixed()
+                    };
+                    // Read the current base type from results (if any)
+                    // and merge the new key(s) into its shape.
+                    let base = results
+                        .last()
+                        .map(|rt| &rt.type_string)
+                        .cloned()
+                        .unwrap_or_else(PhpType::array);
+                    let merged = merge_nested_shape_keys(&base, &keys, &value_php_type);
+                    // Replace results with the enriched shape type.
+                    let new_rt = ResolvedType::from_type_string(merged);
+                    results.clear();
+                    results.push(new_rt);
+                } else if key_chain.len() == 1 {
+                    // ── Single non-literal key (variable, numeric, expression) ──
+                    // Track the RHS type as the array's value type so that
+                    // subsequent `foreach` iteration and bracket access
+                    // resolve element members.  This handles patterns like
+                    // `$arr[$id] = $orderLine` inside a loop.
+                    let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
+                    let resolved =
+                        super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
+                    let value_php_type = if !resolved.is_empty() {
+                        ResolvedType::types_joined(&resolved)
+                    } else {
+                        PhpType::mixed()
+                    };
+                    let base_type = results
+                        .last()
+                        .map(|rt| &rt.type_string)
+                        .cloned()
+                        .unwrap_or_else(PhpType::array);
+                    // When the base already has a shape type from prior
+                    // string-keyed assignments, do not overwrite it with
+                    // a generic element type — shapes take precedence.
+                    if base_type.is_array_shape() {
+                        return;
+                    }
+                    // Infer the key type from the index expression.
+                    let key_php_type = infer_array_key_type(key_chain[0], &rhs_ctx);
+                    let merged = merge_keyed_type(&base_type, &key_php_type, &value_php_type);
+                    let new_rt = ResolvedType::from_type_string(merged);
+                    results.clear();
+                    results.push(new_rt);
+                }
                 return;
             }
-
-            let key = extract_array_key_for_shape(array_access.index);
-            // Skip numeric-only keys and unresolvable indices.
-            if let Some(key) = key {
-                let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
-                let resolved =
-                    super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
-                let value_type = if !resolved.is_empty() {
-                    ResolvedType::type_strings_joined(&resolved)
-                } else {
-                    "mixed".to_string()
-                };
-                // Read the current base type from results (if any)
-                // and merge the new key into its shape.
-                let base_string = results.last().map(|rt| rt.type_string.to_string());
-                let base = base_string.as_deref().unwrap_or("array");
-                let merged = merge_shape_key(base, &key, &value_type);
-                // Replace results with the enriched shape type.
-                // Use extend_unique so this works in conditional
-                // branches (appends) as well as unconditional
-                // (results cleared first by push_results via the
-                // base assignment that preceded this).
-                // We always push here without clearing — shape keys
-                // accumulate on top of the existing base.
-                let new_rt = ResolvedType::from_type_string(PhpType::parse(&merged));
-                results.clear();
-                results.push(new_rt);
-            }
-            return;
         }
 
         // ── Push assignment: `$var[] = expr;` ──
@@ -2984,10 +3173,10 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
 
             let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
             let resolved = super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
-            let value_type = if !resolved.is_empty() {
-                ResolvedType::type_strings_joined(&resolved)
+            let value_php_type = if !resolved.is_empty() {
+                ResolvedType::types_joined(&resolved)
             } else {
-                "mixed".to_string()
+                PhpType::mixed()
             };
             // Read the current base type from results (if any)
             // and merge the push element type into it.
@@ -2997,13 +3186,16 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
             // String-keyed entries take precedence over positional
             // pushes, matching the old AssignmentAccumulator's
             // finalize() behaviour.
-            let base_string = results.last().map(|rt| rt.type_string.to_string());
-            let base = base_string.as_deref().unwrap_or("array");
-            if base.starts_with("array{") {
+            let base_type = results
+                .last()
+                .map(|rt| &rt.type_string)
+                .cloned()
+                .unwrap_or_else(PhpType::array);
+            if base_type.is_array_shape() {
                 return;
             }
-            let merged = merge_push_type(base, &value_type);
-            let new_rt = ResolvedType::from_type_string(PhpType::parse(&merged));
+            let merged = merge_push_type(&base_type, &value_php_type);
+            let new_rt = ResolvedType::from_type_string(merged);
             results.clear();
             results.push(new_rt);
             return;
@@ -3048,6 +3240,64 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
 
 // ── Shape mutation helpers ───────────────────────────────────────────
 
+/// Walk a (possibly nested) `ArrayAccess` chain and return the base
+/// variable name and the ordered list of index expressions from
+/// outermost to innermost.
+///
+/// For `$var['a']['b']['c']` returns `Some(("$var", [expr_a, expr_b, expr_c]))`.
+/// Returns `None` when the base expression is not a simple direct variable.
+fn extract_nested_array_access_chain<'a, 'b>(
+    outermost: &'a ArrayAccess<'b>,
+) -> Option<(String, Vec<&'a Expression<'b>>)> {
+    let mut keys: Vec<&'a Expression<'b>> = Vec::new();
+    keys.push(outermost.index);
+
+    let mut current: &'a Expression<'b> = outermost.array;
+    loop {
+        match current {
+            Expression::ArrayAccess(inner) => {
+                keys.push(inner.index);
+                current = inner.array;
+            }
+            Expression::Variable(Variable::Direct(dv)) => {
+                // We collected keys innermost-first; reverse so the
+                // outermost key (closest to the variable) comes first.
+                keys.reverse();
+                return Some((dv.name.to_string(), keys));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Merge a chain of string keys into a (possibly nested) array shape.
+///
+/// For keys `["a", "b"]` and value type `string`, produces:
+///   `array{a: array{b: string}}`
+///
+/// When the base already contains entries, they are preserved and the
+/// nested key path is merged in.  For example, merging `["a", "c"]`
+/// with value `int` into `array{a: array{b: string}}` produces:
+///   `array{a: array{b: string, c: int}}`
+fn merge_nested_shape_keys(base: &PhpType, keys: &[String], value_type: &PhpType) -> PhpType {
+    debug_assert!(!keys.is_empty());
+    if keys.len() == 1 {
+        return merge_shape_key(base, &keys[0], value_type);
+    }
+
+    // For nested keys, we need to:
+    // 1. Look up the existing inner type for the first key
+    // 2. Recursively merge the remaining keys into that inner type
+    // 3. Merge the result back at the first key level
+    let first_key = &keys[0];
+    let inner_base = base
+        .shape_value_type(first_key)
+        .cloned()
+        .unwrap_or_else(PhpType::array);
+    let inner_merged = merge_nested_shape_keys(&inner_base, &keys[1..], value_type);
+    merge_shape_key(base, first_key, &inner_merged)
+}
+
 /// Extract a string key from an array access index expression.
 ///
 /// Returns `Some(key)` for string-literal keys like `'name'` or `"age"`.
@@ -3071,84 +3321,210 @@ fn extract_array_key_for_shape(index: &Expression<'_>) -> Option<String> {
     }
 }
 
-/// Merge a `(key, value_type)` pair into an existing type string to
-/// produce an array shape.
+/// Merge a `(key, value_type)` pair into an existing `PhpType` to
+/// produce an `ArrayShape`.
 ///
-/// If `base` is already an `array{…}` shape, the key is added or
-/// updated.  Otherwise a new shape is created with just the given key.
+/// If `base` is already an `ArrayShape`, the key is added or updated.
+/// Otherwise a new shape is created with just the given key.
 ///
-/// Examples:
-/// - `merge_shape_key("array", "name", "string")` → `"array{name: string}"`
-/// - `merge_shape_key("array{name: string}", "age", "int")` → `"array{name: string, age: int}"`
-/// - `merge_shape_key("array{name: string}", "name", "int")` → `"array{name: int}"`
-fn merge_shape_key(base: &str, key: &str, value_type: &str) -> String {
-    let mut entries: Vec<(String, String)> = Vec::new();
+/// Returns `PhpType::ArrayShape(entries)` with the merged entries.
+fn merge_shape_key(base: &PhpType, key: &str, value_type: &PhpType) -> PhpType {
+    let mut entries: Vec<ShapeEntry> = Vec::new();
 
-    // Parse existing shape entries from the base type.
-    let parsed = crate::php_type::PhpType::parse(base);
-    if let Some(shape_entries) = parsed.shape_entries() {
+    // Copy existing shape entries from the base type, skipping the
+    // key we are about to upsert.
+    if let Some(shape_entries) = base.shape_entries() {
         for entry in shape_entries {
-            if let Some(k) = entry.key.as_deref() {
-                entries.push((k.to_string(), entry.value_type.to_string()));
+            if entry.key.as_deref() != Some(key) {
+                entries.push(entry.clone());
             }
         }
     }
 
-    // Upsert the new key.
-    if let Some(existing) = entries.iter_mut().find(|(k, _)| k == key) {
-        existing.1 = value_type.to_string();
-    } else {
-        entries.push((key.to_string(), value_type.to_string()));
-    }
+    // Add/upsert the new key.
+    entries.push(ShapeEntry {
+        key: Some(key.to_string()),
+        value_type: value_type.clone(),
+        optional: false,
+    });
 
-    let parts: Vec<String> = entries
-        .iter()
-        .map(|(k, v)| format!("{}: {}", k, v))
-        .collect();
-    format!("array{{{}}}", parts.join(", "))
+    PhpType::ArrayShape(entries)
 }
 
-/// Merge a push element type into an existing type string to produce
-/// a `list<…>` type.
+/// Merge a push element type into an existing `PhpType` to produce
+/// a `Generic("list", …)` type.
 ///
 /// If `base` already has a generic value type (e.g. `list<User>`),
 /// the new type is unioned with it (e.g. `list<User|Admin>`).
 /// Otherwise, produces `list<value_type>`.
 ///
-/// Examples:
-/// - `merge_push_type("array", "User")` → `"list<User>"`
-/// - `merge_push_type("list<User>", "Admin")` → `"list<User|Admin>"`
-/// - `merge_push_type("list<User>", "User")` → `"list<User>"` (no duplicate)
-fn merge_push_type(base: &str, value_type: &str) -> String {
-    use crate::php_type::PhpType;
-
-    let mut elem_types: Vec<String> = Vec::new();
+/// Returns `PhpType::list(elem_type)` or
+/// `PhpType::Named("array")` when no element types are available.
+fn merge_push_type(base: &PhpType, value_type: &PhpType) -> PhpType {
+    let mut elem_types: Vec<PhpType> = Vec::new();
 
     // Extract existing element types from the base.
-    if let Some(existing_elem) = PhpType::parse(base).extract_element_type() {
+    if let Some(existing_elem) = base.extract_element_type() {
         for member in existing_elem.union_members() {
-            let s = member.to_string();
-            if !s.is_empty() {
-                elem_types.push(s);
+            if !member.is_empty() {
+                elem_types.push(member.clone());
             }
         }
     }
 
-    // Add the new value type (use union_members to correctly handle
-    // nesting — `split('|')` would break on `Collection<A|B>`).
-    let new_parsed = PhpType::parse(value_type);
-    for member in new_parsed.union_members() {
-        let s = member.to_string();
-        if !s.is_empty() && !elem_types.contains(&s) {
-            elem_types.push(s);
+    // Add new value type members (union-aware).
+    for member in value_type.union_members() {
+        if !member.is_empty() && !elem_types.iter().any(|e| e.equivalent(member)) {
+            elem_types.push(member.clone());
         }
     }
 
     if elem_types.is_empty() {
-        return "array".to_string();
+        return PhpType::array();
     }
 
-    format!("list<{}>", elem_types.join("|"))
+    let elem_type = if elem_types.len() == 1 {
+        elem_types.into_iter().next().unwrap()
+    } else {
+        PhpType::Union(elem_types)
+    };
+
+    PhpType::list(elem_type)
+}
+
+/// Merge a keyed element type into an existing `PhpType` to produce
+/// a `Generic("array", …)` type.
+///
+/// Similar to [`merge_push_type`] but preserves the key type from the
+/// index expression instead of assuming sequential integer keys.
+///
+/// When the base already has a generic value type (e.g.
+/// `array<string, User>`), the new value type is unioned with it and
+/// key types are unioned as well.
+///
+/// Returns `PhpType::generic_array(key, val)`,
+/// `PhpType::generic_array_val(val)` when no key types are
+/// available, or `PhpType::Named("array")` when no element types
+/// are available.
+fn merge_keyed_type(base: &PhpType, key_type: &PhpType, value_type: &PhpType) -> PhpType {
+    // Collect existing key types from the base.
+    let mut key_types: Vec<PhpType> = Vec::new();
+    if let Some(existing_key) = base.extract_key_type(false)
+        && !existing_key.is_empty()
+    {
+        key_types.push(existing_key.clone());
+    }
+    // Add new key type members.
+    for member in key_type.union_members() {
+        if !member.is_empty() && !key_types.iter().any(|e| e.equivalent(member)) {
+            key_types.push(member.clone());
+        }
+    }
+
+    // Collect existing value types from the base.
+    let mut elem_types: Vec<PhpType> = Vec::new();
+    if let Some(existing_elem) = base.extract_element_type() {
+        for member in existing_elem.union_members() {
+            if !member.is_empty() {
+                elem_types.push(member.clone());
+            }
+        }
+    }
+    // Add new value type members.
+    for member in value_type.union_members() {
+        if !member.is_empty() && !elem_types.iter().any(|e| e.equivalent(member)) {
+            elem_types.push(member.clone());
+        }
+    }
+
+    if elem_types.is_empty() {
+        return PhpType::array();
+    }
+
+    let val_type = if elem_types.len() == 1 {
+        elem_types.into_iter().next().unwrap()
+    } else {
+        PhpType::Union(elem_types)
+    };
+
+    if key_types.is_empty() {
+        // No key type information — use a single-param generic.
+        PhpType::generic_array_val(val_type)
+    } else {
+        let k_type = if key_types.len() == 1 {
+            key_types.into_iter().next().unwrap()
+        } else {
+            PhpType::Union(key_types)
+        };
+        PhpType::generic_array(k_type, val_type)
+    }
+}
+
+/// Infer the key type of an array-access index expression.
+///
+/// Returns `"string"` for expressions that are known to produce
+/// strings (string literals, method calls returning `string`, string
+/// variables), `"int"` for integer expressions, and `"int|string"`
+/// when the type cannot be determined.
+fn infer_array_key_type(index: &Expression<'_>, ctx: &VarResolutionCtx<'_>) -> PhpType {
+    // Fast path: literal values.
+    match index {
+        Expression::Literal(Literal::Integer(_)) => return PhpType::int(),
+        Expression::Literal(Literal::String(_)) => return PhpType::string(),
+        _ => {}
+    }
+
+    // Resolve the expression type through the standard pipeline.
+    let resolved = super::rhs_resolution::resolve_rhs_expression(index, ctx);
+    if !resolved.is_empty() {
+        let joined = ResolvedType::types_joined(&resolved);
+        // Normalise the resolved type to a valid array key type.
+        // PHP array keys are always int or string; bool and null are
+        // coerced to int, float is truncated to int.
+        if is_int_like_key_typed(&joined) {
+            return PhpType::int();
+        }
+        if is_string_like_key(&joined) {
+            return PhpType::string();
+        }
+        if joined.is_mixed() || is_array_key_type(&joined) {
+            return PhpType::Union(vec![PhpType::int(), PhpType::string()]);
+        }
+        // For anything else (e.g. a class-string<T>, or a union),
+        // return as-is if it is composed entirely of int/string
+        // subtypes; otherwise fall back.
+        return joined;
+    }
+
+    PhpType::Union(vec![PhpType::int(), PhpType::string()])
+}
+
+/// Returns `true` when the [`PhpType`] represents a PHP type that
+/// is always coerced to `int` when used as an array key.
+fn is_int_like_key_typed(ty: &PhpType) -> bool {
+    ty.is_int_coercible_key()
+}
+
+/// Returns `true` when the [`PhpType`] represents a string-like
+/// array key type.
+fn is_string_like_key(ty: &PhpType) -> bool {
+    ty.is_string_subtype()
+}
+
+/// Returns `true` when the [`PhpType`] is `array-key` or the
+/// equivalent `int|string` union.
+fn is_array_key_type(ty: &PhpType) -> bool {
+    if ty.is_array_key() {
+        return true;
+    }
+    match ty {
+        PhpType::Union(members) if members.len() == 2 => {
+            let has_int = members.iter().any(|m| m.is_int());
+            let has_string = members.iter().any(|m| m.is_string_type());
+            has_int && has_string
+        }
+        _ => false,
+    }
 }
 
 // ── Array function type preservation helpers ─────────────────────────
@@ -3178,20 +3554,20 @@ pub(in crate::completion) fn nth_arg_expr<'b>(
 /// Resolve the raw iterable type of an argument expression.
 ///
 /// Handles `$variable` (via docblock scanning) and delegates to
-/// `resolve_expression_type_string` for method calls, property access,
+/// `resolve_expression_type` for method calls, property access,
 /// etc.
 pub(in crate::completion) fn resolve_arg_raw_type<'b>(
     arg_expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
+) -> Option<PhpType> {
     // Direct variable — scan for @var / @param annotation.
     if let Expression::Variable(Variable::Direct(dv)) = arg_expr {
         let var_text = dv.name.to_string();
         let offset = arg_expr.span().start.offset as usize;
         let from_docblock =
             docblock::find_iterable_raw_type_in_source(ctx.content, offset, &var_text);
-        if from_docblock.is_some() {
-            return from_docblock;
+        if let Some(raw) = from_docblock {
+            return Some(raw);
         }
 
         // No docblock — walk the AST for the variable's assignment
@@ -3212,12 +3588,12 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
         if !resolved.is_empty() {
             let joined = crate::types::ResolvedType::types_joined(&resolved);
             if joined.extract_value_type(true).is_some() {
-                return Some(joined.to_string());
+                return Some(joined);
             }
         }
     }
     // Fall back to the unified pipeline (method calls, etc.)
-    super::foreach_resolution::resolve_expression_type_string(arg_expr, ctx)
+    super::foreach_resolution::resolve_expression_type(arg_expr, ctx)
 }
 
 /// Check whether a call expression passes the target variable to a
@@ -3229,8 +3605,8 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
 /// parameter typed as `Baz` and resolves `$bar` to `Baz`.
 ///
 /// Currently handles standalone function calls (via `function_loader`).
-/// Method and static method calls with by-ref parameters are not yet
-/// supported.
+/// Handles standalone function calls, instance method calls, static
+/// method calls, and constructor calls.
 fn try_apply_pass_by_reference_type(
     expr: &Expression<'_>,
     ctx: &VarResolutionCtx<'_>,
@@ -3255,6 +3631,28 @@ fn try_apply_pass_by_reference_type(
             // can iterate them together.
             (&func_call.argument_list, func_info.parameters)
         }
+        Expression::Call(Call::Method(method_call)) => {
+            match try_resolve_method_params(method_call.object, &method_call.method, ctx) {
+                Some((params,)) => (&method_call.argument_list, params),
+                None => return,
+            }
+        }
+        Expression::Call(Call::NullSafeMethod(method_call)) => {
+            match try_resolve_method_params(method_call.object, &method_call.method, ctx) {
+                Some((params,)) => (&method_call.argument_list, params),
+                None => return,
+            }
+        }
+        Expression::Call(Call::StaticMethod(static_call)) => {
+            match try_resolve_static_method_params(static_call, ctx) {
+                Some((params, arg_list)) => (arg_list, params),
+                None => return,
+            }
+        }
+        Expression::Instantiation(inst) => match try_resolve_constructor_params(inst, ctx) {
+            Some((params, arg_list)) => (arg_list, params),
+            None => return,
+        },
         _ => return,
     };
 
@@ -3277,7 +3675,7 @@ fn try_apply_pass_by_reference_type(
         // with a type hint.
         if let Some(param) = parameters.get(i)
             && param.is_reference
-            && let Some(ref type_hint) = param.type_hint
+            && let Some(type_hint) = &param.type_hint
         {
             let resolved = crate::completion::type_resolution::type_hint_to_classes_typed(
                 type_hint,
@@ -3289,10 +3687,83 @@ fn try_apply_pass_by_reference_type(
                 if !conditional {
                     results.clear();
                 }
-                ResolvedType::extend_unique(results, ResolvedType::from_classes(resolved));
+                ResolvedType::extend_unique(
+                    results,
+                    ResolvedType::from_classes_with_hint(resolved, type_hint.clone()),
+                );
             }
         }
     }
+}
+
+/// Resolve parameters for an instance method call.
+///
+/// Currently only handles `$this->method()` where the current class
+/// is known.  General variable receiver resolution is deferred to the
+/// forward-walking scope model (T25) to avoid re-entrant variable
+/// resolution.
+fn try_resolve_method_params(
+    object: &Expression<'_>,
+    method: &ClassLikeMemberSelector<'_>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<(Vec<ParameterInfo>,)> {
+    let method_name = match method {
+        ClassLikeMemberSelector::Identifier(ident) => ident.value,
+        _ => return None,
+    };
+
+    // Only handle `$this->method()` — we know the current class.
+    match object {
+        Expression::Variable(Variable::Direct(dv)) if dv.name == "$this" => {}
+        _ => return None,
+    }
+
+    let method_info = ctx
+        .current_class
+        .methods
+        .iter()
+        .find(|m| m.name == method_name)?;
+    Some((method_info.parameters.clone(),))
+}
+
+/// Resolve parameters for a static method call.
+fn try_resolve_static_method_params<'a>(
+    static_call: &'a StaticMethodCall<'a>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<(Vec<ParameterInfo>, &'a ArgumentList<'a>)> {
+    let method_name = match &static_call.method {
+        ClassLikeMemberSelector::Identifier(ident) => ident.value,
+        _ => return None,
+    };
+
+    let class_name = match static_call.class {
+        Expression::Self_(_) | Expression::Static(_) => ctx.current_class.name.clone(),
+        Expression::Parent(_) => ctx.current_class.parent_class.clone()?,
+        Expression::Identifier(ident) => ident.value().to_string(),
+        _ => return None,
+    };
+
+    let cls = (ctx.class_loader)(&class_name)?;
+    let method_info = cls.methods.iter().find(|m| m.name == method_name)?;
+    Some((method_info.parameters.clone(), &static_call.argument_list))
+}
+
+/// Resolve parameters for a constructor call (`new Cls(...)`).
+fn try_resolve_constructor_params<'a>(
+    inst: &'a Instantiation<'a>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<(Vec<ParameterInfo>, &'a ArgumentList<'a>)> {
+    let class_name = match inst.class {
+        Expression::Identifier(ident) => ident.value().to_string(),
+        Expression::Self_(_) | Expression::Static(_) => ctx.current_class.name.clone(),
+        Expression::Parent(_) => ctx.current_class.parent_class.clone()?,
+        _ => return None,
+    };
+
+    let args = inst.argument_list.as_ref()?;
+    let cls = (ctx.class_loader)(&class_name)?;
+    let ctor = cls.methods.iter().find(|m| m.name == "__construct")?;
+    Some((ctor.parameters.clone(), args))
 }
 
 #[cfg(test)]

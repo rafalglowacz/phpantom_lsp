@@ -1326,3 +1326,667 @@ function test() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Static property access — should NOT produce variable reads
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn static_property_not_recorded_as_variable_read() {
+    let php = r#"<?php
+class Config {
+    private static ?string $instance = null;
+
+    public static function get(): ?string {
+        if (self::$instance === null) {
+            self::$instance = 'default';
+        }
+        return self::$instance;
+    }
+}
+"#;
+    let scope_map = collect_from_method(php);
+
+    // $instance should NOT appear in accesses at all — it is a static
+    // property, not a local variable.
+    let instance_accesses: Vec<_> = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$instance")
+        .collect();
+    assert!(
+        instance_accesses.is_empty(),
+        "self::$instance should not be recorded as a variable access. Got: {:?}",
+        instance_accesses,
+    );
+}
+
+#[test]
+fn static_keyword_property_not_recorded() {
+    let php = r#"<?php
+class Base {
+    protected static int $count = 0;
+
+    public function increment(): void {
+        static::$count++;
+    }
+}
+"#;
+    let scope_map = collect_from_method(php);
+
+    let count_accesses: Vec<_> = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$count")
+        .collect();
+    assert!(
+        count_accesses.is_empty(),
+        "static::$count should not be recorded as a variable access. Got: {:?}",
+        count_accesses,
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// By-reference out-parameters — should produce Write accesses
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn preg_match_out_param_is_write() {
+    let php = r#"<?php
+function test(string $input): ?string {
+    if (preg_match('/(\d+)/', $input, $match) === 1) {
+        return $match[1];
+    }
+    return null;
+}
+"#;
+    let scope_map = collect_from_function(php);
+
+    let match_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$match" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        match_writes >= 1,
+        "preg_match's $match argument should be recorded as a Write",
+    );
+}
+
+#[test]
+fn parse_str_out_param_is_write() {
+    let php = r#"<?php
+function test(string $query): string {
+    parse_str($query, $data);
+    return $data['key'] ?? '';
+}
+"#;
+    let scope_map = collect_from_function(php);
+
+    let data_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$data" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        data_writes >= 1,
+        "parse_str's $data argument should be recorded as a Write",
+    );
+}
+
+#[test]
+fn fqn_preg_match_out_param_is_write() {
+    let php = r#"<?php
+function test(string $input): ?string {
+    if (\preg_match('/(\d+)/', $input, $match) === 1) {
+        return $match[1];
+    }
+    return null;
+}
+"#;
+    let scope_map = collect_from_function(php);
+
+    let match_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$match" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        match_writes >= 1,
+        "FQN \\preg_match's $match argument should be recorded as a Write",
+    );
+}
+
+#[test]
+fn non_out_param_args_still_reads() {
+    let php = r#"<?php
+function test(string $input): ?string {
+    if (preg_match('/(\d+)/', $input, $match) === 1) {
+        return $match[1];
+    }
+    return null;
+}
+"#;
+    let scope_map = collect_from_function(php);
+
+    // $input (arg index 1) should still be a Read, not a Write.
+    let input_reads = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$input" && matches!(a.kind, AccessKind::Read))
+        .count();
+    assert!(
+        input_reads >= 1,
+        "Non-out-param arguments should still be recorded as reads",
+    );
+}
+
+// Expanded by-ref out-parameter table — one representative test per category
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn curl_multi_exec_out_param_is_write() {
+    let php = r#"<?php
+function test($mh): int {
+    curl_multi_exec($mh, $running);
+    return $running;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$running" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "curl_multi_exec's $running should be a Write");
+}
+
+#[test]
+fn fsockopen_out_params_are_writes() {
+    let php = r#"<?php
+function test(): void {
+    $fp = fsockopen('example.com', 80, $errno, $errstr);
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let errno_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$errno" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let errstr_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$errstr" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(errno_writes >= 1, "fsockopen's $errno should be a Write");
+    assert!(errstr_writes >= 1, "fsockopen's $errstr should be a Write");
+}
+
+#[test]
+fn openssl_sign_out_param_is_write() {
+    let php = r#"<?php
+function test(string $data, $key): string {
+    openssl_sign($data, $signature, $key);
+    return $signature;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$signature" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "openssl_sign's $signature should be a Write");
+}
+
+#[test]
+fn mb_parse_str_out_param_is_write() {
+    let php = r#"<?php
+function test(string $input): array {
+    mb_parse_str($input, $result);
+    return $result;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$result" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "mb_parse_str's $result should be a Write");
+}
+
+#[test]
+fn pcntl_wait_out_param_is_write() {
+    let php = r#"<?php
+function test(): void {
+    pcntl_wait($status);
+    echo $status;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$status" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "pcntl_wait's $status should be a Write");
+}
+
+#[test]
+fn getimagesize_out_param_is_write() {
+    let php = r#"<?php
+function test(string $file): array {
+    $info = getimagesize($file, $imageinfo);
+    return $imageinfo;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$imageinfo" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "getimagesize's $imageinfo should be a Write");
+}
+
+#[test]
+fn dns_get_mx_out_params_are_writes() {
+    let php = r#"<?php
+function test(string $host): void {
+    dns_get_mx($host, $mxhosts, $weights);
+    var_dump($mxhosts, $weights);
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let mxhosts_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$mxhosts" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let weights_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$weights" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        mxhosts_writes >= 1,
+        "dns_get_mx's $mxhosts should be a Write"
+    );
+    assert!(
+        weights_writes >= 1,
+        "dns_get_mx's $weights should be a Write"
+    );
+}
+
+#[test]
+fn flock_out_param_is_write() {
+    let php = r#"<?php
+function test($fp): void {
+    flock($fp, LOCK_EX, $wouldblock);
+    echo $wouldblock;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$wouldblock" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "flock's $wouldblock should be a Write");
+}
+
+#[test]
+fn msg_receive_out_params_are_writes() {
+    let php = r#"<?php
+function test($queue): void {
+    msg_receive($queue, 1, $msgtype, 1024, $data, true, 0, $errorcode);
+    echo $msgtype . $data . $errorcode;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let msgtype_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$msgtype" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let data_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$data" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let errorcode_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$errorcode" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        msgtype_writes >= 1,
+        "msg_receive's $msgtype should be a Write"
+    );
+    assert!(data_writes >= 1, "msg_receive's $data should be a Write");
+    assert!(
+        errorcode_writes >= 1,
+        "msg_receive's $errorcode should be a Write"
+    );
+}
+
+#[test]
+fn ldap_parse_result_out_params_are_writes() {
+    let php = r#"<?php
+function test($ldap, $result): void {
+    ldap_parse_result($ldap, $result, $errcode, $matcheddn, $errmsg, $referrals, $controls);
+    echo $errcode;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let errcode_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$errcode" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        errcode_writes >= 1,
+        "ldap_parse_result's $errcode should be a Write"
+    );
+}
+
+#[test]
+fn headers_sent_out_params_are_writes() {
+    let php = r#"<?php
+function test(): void {
+    headers_sent($file, $line);
+    echo $file . ':' . $line;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let file_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$file" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let line_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$line" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(file_writes >= 1, "headers_sent's $file should be a Write");
+    assert!(line_writes >= 1, "headers_sent's $line should be a Write");
+}
+
+#[test]
+fn getopt_out_param_is_write() {
+    let php = r#"<?php
+function test(): void {
+    $opts = getopt('v', ['verbose'], $optind);
+    echo $optind;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$optind" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(writes >= 1, "getopt's $optind should be a Write");
+}
+
+#[test]
+fn exif_thumbnail_out_params_are_writes() {
+    let php = r#"<?php
+function test(string $file): void {
+    $thumb = exif_thumbnail($file, $width, $height, $type);
+    echo $width . 'x' . $height;
+}
+"#;
+    let scope_map = collect_from_function(php);
+    let width_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$width" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let height_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$height" && matches!(a.kind, AccessKind::Write))
+        .count();
+    let type_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$type" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        width_writes >= 1,
+        "exif_thumbnail's $width should be a Write"
+    );
+    assert!(
+        height_writes >= 1,
+        "exif_thumbnail's $height should be a Write"
+    );
+    assert!(type_writes >= 1, "exif_thumbnail's $type should be a Write");
+}
+
+// By-reference resolver callback — user-defined functions, static methods, constructors
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Helper: parse PHP and collect scope from the first function body,
+/// using a custom by-ref resolver callback.
+fn collect_from_function_with_resolver<F>(php: &str, resolver: F) -> ScopeMap
+where
+    F: Fn(&super::ByRefCallKind<'_>) -> Option<Vec<usize>>,
+{
+    with_parsed_program(php, "test", |program, _content| {
+        for stmt in program.statements.iter() {
+            if let Statement::Function(func) = stmt {
+                let body_start = func.body.left_brace.start.offset;
+                let body_end = func.body.right_brace.end.offset;
+                return super::collect_function_scope_with_resolver(
+                    &func.parameter_list,
+                    func.body.statements.as_slice(),
+                    body_start,
+                    body_end,
+                    Some(&resolver),
+                );
+            }
+        }
+        panic!("No function found in test PHP code");
+    })
+}
+
+#[test]
+fn user_defined_function_byref_via_resolver() {
+    let php = r#"<?php
+function test(): void {
+    myFunc($output);
+    echo $output;
+}
+"#;
+    let resolver = |kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> {
+        match kind {
+            super::ByRefCallKind::Function(name) if *name == "myFunc" => Some(vec![0]),
+            _ => None,
+        }
+    };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$output" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        writes >= 1,
+        "User-defined function's by-ref $output should be a Write"
+    );
+}
+
+#[test]
+fn resolver_does_not_override_hardcoded_table() {
+    // preg_match is in the hardcoded table — the resolver should not
+    // be consulted for it, and it should still work.
+    let php = r#"<?php
+function test(string $input): void {
+    preg_match('/(\d+)/', $input, $match);
+    echo $match[0];
+}
+"#;
+    let resolver = |_kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> {
+        // Return None for everything — hardcoded table should still apply.
+        None
+    };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$match" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        writes >= 1,
+        "Hardcoded preg_match should still mark $match as Write even when resolver returns None"
+    );
+}
+
+#[test]
+fn static_method_byref_via_resolver() {
+    let php = r#"<?php
+function test(): void {
+    Validator::validate($errors);
+    echo $errors;
+}
+"#;
+    let resolver = |kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> {
+        match kind {
+            super::ByRefCallKind::StaticMethod(class, method)
+                if *class == "Validator" && *method == "validate" =>
+            {
+                Some(vec![0])
+            }
+            _ => None,
+        }
+    };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$errors" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        writes >= 1,
+        "Static method's by-ref $errors should be a Write"
+    );
+}
+
+#[test]
+fn constructor_byref_via_resolver() {
+    let php = r#"<?php
+function test(): void {
+    $obj = new Parser($warnings);
+    echo $warnings;
+}
+"#;
+    let resolver = |kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> {
+        match kind {
+            super::ByRefCallKind::Constructor(class) if *class == "Parser" => Some(vec![0]),
+            _ => None,
+        }
+    };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$warnings" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        writes >= 1,
+        "Constructor's by-ref $warnings should be a Write"
+    );
+}
+
+#[test]
+fn resolver_no_match_treats_args_as_reads() {
+    let php = r#"<?php
+function test(): void {
+    unknownFunc($var);
+}
+"#;
+    let resolver = |_kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> { None };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+    let reads = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$var" && matches!(a.kind, AccessKind::Read))
+        .count();
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$var" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(reads >= 1, "Unresolved function args should be reads");
+    assert_eq!(writes, 0, "Unresolved function args should not be writes");
+}
+
+#[test]
+fn resolver_second_arg_byref_first_arg_read() {
+    let php = r#"<?php
+function test(string $input): void {
+    transform($input, $result);
+    echo $result;
+}
+"#;
+    let resolver = |kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> {
+        match kind {
+            super::ByRefCallKind::Function(name) if *name == "transform" => Some(vec![1]),
+            _ => None,
+        }
+    };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+
+    // $input (arg 0) should be a Read.
+    let input_reads = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$input" && matches!(a.kind, AccessKind::Read))
+        .count();
+    assert!(
+        input_reads >= 1,
+        "Non-byref first arg should still be a Read"
+    );
+
+    // $result (arg 1) should be a Write.
+    let result_writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$result" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(result_writes >= 1, "By-ref second arg should be a Write");
+}
+
+#[test]
+fn static_method_with_self_keyword_byref() {
+    let php = r#"<?php
+function test(): void {
+    self::parse($output);
+    echo $output;
+}
+"#;
+    let resolver = |kind: &super::ByRefCallKind<'_>| -> Option<Vec<usize>> {
+        match kind {
+            super::ByRefCallKind::StaticMethod(class, method)
+                if *class == "self" && *method == "parse" =>
+            {
+                Some(vec![0])
+            }
+            _ => None,
+        }
+    };
+    let scope_map = collect_from_function_with_resolver(php, resolver);
+    let writes = scope_map
+        .accesses
+        .iter()
+        .filter(|a| a.name == "$output" && matches!(a.kind, AccessKind::Write))
+        .count();
+    assert!(
+        writes >= 1,
+        "self::parse() by-ref $output should be a Write"
+    );
+}

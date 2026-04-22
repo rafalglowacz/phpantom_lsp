@@ -20,7 +20,7 @@ impl Backend {
     ///
     /// Candidates returned by `resolve_target_classes` may be
     /// fully-resolved classes with virtual/mixin members baked into
-    /// their `methods` list (this happens when `type_hint_to_classes`
+    /// their `methods` list (this happens when `type_hint_to_classes_typed`
     /// calls `resolve_class_fully` to apply generic substitutions).
     /// `find_declaring_class` needs the raw class so it can trace
     /// member declarations through the real inheritance and mixin
@@ -33,10 +33,7 @@ impl Backend {
         all_classes: &[Arc<ClassInfo>],
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     ) -> Option<ClassInfo> {
-        let fqn = match &candidate.file_namespace {
-            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, candidate.name),
-            _ => candidate.name.clone(),
-        };
+        let fqn = candidate.fqn();
         crate::util::find_class_by_name(all_classes, &fqn)
             .map(|arc| ClassInfo::clone(arc))
             .or_else(|| class_loader(&fqn).map(Arc::unwrap_or_clone))

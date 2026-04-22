@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use mago_docblock::document::TagKind;
 
 use super::parser::parse_docblock_for_tags;
+use super::tags::sanitise_and_parse_docblock_type;
 use super::types::split_type_token;
 use crate::php_type::PhpType;
 use crate::types::{MethodInfo, ParameterInfo, Visibility};
@@ -31,7 +32,7 @@ use crate::types::{MethodInfo, ParameterInfo, Visibility};
 ///
 /// Returns a list of `(property_name, cleaned_type)` pairs.  The property
 /// name does **not** include the `$` prefix.
-pub fn extract_property_tags(docblock: &str) -> Vec<(String, String)> {
+pub fn extract_property_tags(docblock: &str) -> Vec<(String, Option<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -61,7 +62,7 @@ pub fn extract_property_tags(docblock: &str) -> Vec<(String, String)> {
             if name.is_empty() {
                 continue;
             }
-            results.push((name.to_string(), String::new()));
+            results.push((name.to_string(), None));
             continue;
         }
 
@@ -80,15 +81,16 @@ pub fn extract_property_tags(docblock: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        // Use the raw type token instead of `clean_type()`.
-        // `clean_type()` strips `|null` from union types, which loses
-        // nullable information (e.g. `@property int|null $foo` would
-        // become just `int`).  Downstream consumers parse the string
-        // with `PhpType::parse()` which handles nullability correctly.
-        // Only strip trailing punctuation that could leak from
-        // descriptions (e.g. trailing `.` or `,`).
+        // Strip trailing punctuation that could leak from descriptions
+        // (e.g. trailing `.` or `,`).  The full type string including
+        // nullability is preserved.
         let type_str = type_token.trim_end_matches(['.', ',']);
-        results.push((name.to_string(), type_str.to_string()));
+        let parsed = if type_str.is_empty() {
+            None
+        } else {
+            sanitise_and_parse_docblock_type(type_str)
+        };
+        results.push((name.to_string(), parsed));
     }
 
     results
@@ -174,14 +176,13 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             continue;
         }
 
-        // Use the raw type token with only trailing punctuation
-        // stripped, instead of `clean_type()` which strips `|null`
-        // and loses nullable information.
-        let return_type = return_type_raw.map(|s| s.trim_end_matches(['.', ',']).to_string());
-        let return_type = match return_type {
-            Some(ref s) if s.is_empty() => None,
-            other => other,
-        };
+        // Strip trailing punctuation that could leak from descriptions,
+        // preserving the full type string including nullability.
+        // Parse directly to PhpType, avoiding an intermediate String.
+        let return_type: Option<PhpType> = return_type_raw
+            .map(|s| s.trim_end_matches(['.', ',']))
+            .filter(|s| !s.is_empty())
+            .map(PhpType::parse);
 
         // Parse parameters from the content between `(` and `)`.
         let params_str = if let Some(close_paren) = after_paren.rfind(')') {
@@ -200,7 +201,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             name: method_name.to_string(),
             name_offset: 0,
             parameters,
-            return_type: return_type.as_deref().map(PhpType::parse),
+            return_type,
             native_return_type: None,
             description: None,
             return_description: None,
@@ -256,7 +257,7 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
         // Scan tokens right-to-left to find the `$name` token (it may be
         // followed by `= default`).
         let dollar_pos = part.rfind('$');
-        let (type_hint, param_name) = if let Some(dp) = dollar_pos {
+        let (parsed_type, param_name) = if let Some(dp) = dollar_pos {
             let name_and_rest = &part[dp..];
             // The name ends at whitespace, `=`, `)`, or end of string.
             let name_end = name_and_rest
@@ -265,17 +266,18 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
             let name = &name_and_rest[..name_end];
 
             let before = part[..dp].trim().trim_end_matches("...");
-            let type_str = if before.is_empty() {
+            let parsed_type = if before.is_empty() {
                 None
             } else {
-                Some(before.trim_end_matches(['.', ',']).to_string())
-            };
-            let type_str = match type_str {
-                Some(ref s) if s.is_empty() => None,
-                other => other,
+                let trimmed = before.trim_end_matches(['.', ',']);
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(PhpType::parse(trimmed))
+                }
             };
 
-            (type_str, name.to_string())
+            (parsed_type, name.to_string())
         } else {
             // No `$` found — treat the whole thing as a name-less param.
             // This is unusual but we handle it gracefully.
@@ -287,8 +289,8 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
         result.push(ParameterInfo {
             name: param_name,
             is_required,
-            type_hint: type_hint.as_deref().map(PhpType::parse),
-            native_type_hint: type_hint.as_deref().map(PhpType::parse),
+            type_hint: parsed_type.clone(),
+            native_type_hint: parsed_type,
             description: None,
             default_value: None,
             is_variadic,

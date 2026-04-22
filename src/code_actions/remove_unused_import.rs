@@ -199,20 +199,37 @@ fn cursor_on_use_import_line(content: &str, line: u32) -> bool {
         return false;
     }
 
-    // Heuristic: if we're inside a class/trait/enum body (brace depth > 0
-    // at this line), this is a trait `use`, not a namespace import.
-    let mut depth: i32 = 0;
+    // Heuristic: if we're inside a class/trait/enum body, this is a
+    // trait `use`, not a namespace import.  We track brace depth and
+    // account for braced `namespace Foo { … }` blocks (where depth 1
+    // is still "top level" for import purposes).
+    let mut depth: usize = 0;
+    let mut namespace_brace_depth: Option<usize> = None;
     for l in &lines[..idx] {
-        for ch in l.chars() {
+        let code = l.split("//").next().unwrap_or(l);
+        let code = code.split('#').next().unwrap_or(code);
+        let ltrimmed = l.trim_start();
+
+        if ltrimmed.starts_with("namespace ") && code.contains('{') {
+            namespace_brace_depth = Some(depth);
+        }
+
+        for ch in code.chars() {
             match ch {
                 '{' => depth += 1,
-                '}' => depth -= 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if namespace_brace_depth == Some(depth) {
+                        namespace_brace_depth = None;
+                    }
+                }
                 _ => {}
             }
         }
     }
 
-    depth <= 0
+    let top_level_depth = namespace_brace_depth.map_or(0, |d| d + 1);
+    depth <= top_level_depth
 }
 
 /// Build a `TextEdit` that deletes the full line(s) covered by `range`,
@@ -847,14 +864,10 @@ mod tests {
     #[test]
     fn cursor_on_use_in_braced_namespace_returns_true() {
         let content = "<?php\nnamespace App {\n    use Foo\\Bar;\n}\n";
-        // Brace depth at line 2 is 1 (opened by namespace), but namespace
-        // braces are different from class braces.  In practice, the
-        // heuristic counts all braces equally.  For braced namespaces the
-        // depth is 1 which means the check `depth <= 0` fails.
-        // This is a known limitation — braced namespaces are rare in
-        // modern PHP.  The test documents the current behavior.
-        // If we later improve the heuristic, flip this assertion.
-        assert!(!cursor_on_use_import_line(content, 2));
+        // Brace depth at line 2 is 1 (opened by namespace), but
+        // namespace braces are tracked separately so depth 1 inside a
+        // braced namespace is still "top level" for import purposes.
+        assert!(cursor_on_use_import_line(content, 2));
     }
 
     #[test]

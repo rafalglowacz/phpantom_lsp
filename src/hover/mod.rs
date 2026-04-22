@@ -18,7 +18,7 @@ use crate::Backend;
 use crate::completion::resolver::ResolutionCtx;
 use crate::docblock::extract_template_params_full;
 use crate::php_type::PhpType;
-use crate::symbol_map::{SymbolKind, SymbolSpan, VarDefKind};
+use crate::symbol_map::{SelfStaticParentKind, SymbolKind, SymbolSpan, VarDefKind};
 use crate::types::*;
 use crate::util::{find_class_at_offset, short_name, strip_fqn_prefix};
 
@@ -55,10 +55,7 @@ fn raw_class_has_member(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> bool {
     // Build the FQN the same way the class loader expects.
-    let fqn = match &owner.file_namespace {
-        Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, owner.name),
-        _ => owner.name.clone(),
-    };
+    let fqn = owner.fqn();
 
     // Load the raw class.  If the loader returns None (e.g. the class
     // is only known through the current file's AST and not yet indexed),
@@ -302,7 +299,7 @@ pub(crate) fn find_declaring_class(
 // Re-export `pub(crate)` items so external callers keep using `crate::hover::`.
 pub(crate) use formatting::{
     extract_description_from_info, extract_docblock_description, extract_var_description_from_info,
-    hover_for_function, shorten_type_string,
+    hover_for_function, shorten_php_type,
 };
 
 /// Result of searching for a member on a [`ClassInfo`] for hover purposes.
@@ -502,14 +499,16 @@ impl Backend {
             SymbolKind::Variable { name } => {
                 // Suppress hover when the cursor is on a variable at its
                 // definition site where the type is already visible in
-                // the signature (parameters, properties, static/global
-                // declarations).  For assignments, foreach bindings, and
-                // catch bindings the resolved type is not obvious from the
-                // source text, so hover is useful there.
+                // the signature (properties, static/global declarations).
+                // For parameters, assignments, foreach bindings, and catch
+                // bindings, hover is useful to show the resolved type and
+                // any docblock descriptions.
                 if let Some(def_kind) = self.lookup_var_def_kind_at(uri, name, cursor_offset)
                     && !matches!(
                         def_kind,
                         VarDefKind::Assignment
+                            | VarDefKind::CompoundAssignment
+                            | VarDefKind::Parameter
                             | VarDefKind::Foreach
                             | VarDefKind::Catch
                             | VarDefKind::ArrayDestructuring
@@ -546,10 +545,12 @@ impl Backend {
                     AccessKind::Arrow
                 };
 
-                let candidates = crate::completion::resolver::resolve_target_classes(
-                    subject_text,
-                    access_kind,
-                    &rctx,
+                let candidates = ResolvedType::into_arced_classes(
+                    crate::completion::resolver::resolve_target_classes(
+                        subject_text,
+                        access_kind,
+                        &rctx,
+                    ),
                 );
 
                 // Collect hover results from all union candidates,
@@ -575,8 +576,8 @@ impl Backend {
                     let find_result =
                         Self::find_member_for_hover(&merged, member_name, *is_method_call);
 
-                    let (member_result, owner) = if find_result.is_some() {
-                        (find_result, merged)
+                    let (mut member_result, mut owner) = if find_result.is_some() {
+                        (find_result, merged.clone())
                     } else {
                         // Fall back to the candidate directly — it may
                         // contain model-specific members (e.g. Eloquent
@@ -586,6 +587,49 @@ impl Backend {
                             Self::find_member_for_hover(target_class, member_name, *is_method_call);
                         (result, target_class.clone())
                     };
+
+                    // ── Enrich with call-site generic substitution ──
+                    // The merged (cached) class has raw template param
+                    // names (e.g. TModel) because the cache is FQN-keyed
+                    // and shared across call sites.  The candidate from
+                    // resolve_target_classes carries concrete substitutions
+                    // (e.g. TModel→BlogAuthor).  When the merged member's
+                    // return type still references a template param, swap
+                    // it with the candidate's substituted return type and
+                    // use the candidate as the owner.
+                    if !merged.template_params.is_empty() {
+                        match &member_result {
+                            Some(HoverMemberHit::Method(method)) => {
+                                if let Some(ref ret) = method.return_type
+                                    && ret.references_any_template_param(&merged.template_params)
+                                    && let Some(HoverMemberHit::Method(subst_method)) =
+                                        Self::find_member_for_hover(
+                                            target_class,
+                                            member_name,
+                                            *is_method_call,
+                                        )
+                                {
+                                    member_result = Some(HoverMemberHit::Method(subst_method));
+                                    owner = target_class.clone();
+                                }
+                            }
+                            Some(HoverMemberHit::Property(prop)) => {
+                                if let Some(ref hint) = prop.type_hint
+                                    && hint.references_any_template_param(&merged.template_params)
+                                    && let Some(HoverMemberHit::Property(subst_prop)) =
+                                        Self::find_member_for_hover(
+                                            target_class,
+                                            member_name,
+                                            *is_method_call,
+                                        )
+                                {
+                                    member_result = Some(HoverMemberHit::Property(subst_prop));
+                                    owner = target_class.clone();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
 
                     let hover = match member_result {
                         Some(HoverMemberHit::Method(ref method)) => {
@@ -656,7 +700,7 @@ impl Backend {
                 }
             }
 
-            SymbolKind::ClassReference { name, is_fqn: _ } => {
+            SymbolKind::ClassReference { name, .. } => {
                 // Check whether this class reference is in a `new ClassName` context.
                 // If so, show the __construct method hover instead of the class hover.
                 let before = &content[..symbol.start as usize];
@@ -701,26 +745,18 @@ impl Backend {
                 self.hover_function_call(name, uri, content, &ctx, &function_loader)
             }
 
-            SymbolKind::SelfStaticParent { keyword } => {
-                // `$this` is represented as SelfStaticParent { keyword: "static" }
-                // in the symbol map.  Detect it by checking the source text.
-                // The cursor may land anywhere inside the `$this` token (5 bytes),
-                // so look up to 4 bytes back for the `$` and check for `$this`.
-                let is_this = keyword == "static" && {
-                    let off = cursor_offset as usize;
-                    let search_start = off.saturating_sub(4);
-                    let window = content.get(search_start..off + 5).unwrap_or("");
-                    window.contains("$this")
-                };
+            SymbolKind::SelfStaticParent(ssp_kind) => {
+                let is_this = *ssp_kind == SelfStaticParentKind::This;
 
-                let resolved = match keyword.as_str() {
-                    "self" | "static" => current_class.cloned(),
-                    "parent" => current_class
+                let resolved = match ssp_kind {
+                    SelfStaticParentKind::Self_
+                    | SelfStaticParentKind::Static
+                    | SelfStaticParentKind::This => current_class.cloned(),
+                    SelfStaticParentKind::Parent => current_class
                         .and_then(|cc| cc.parent_class.as_ref())
                         .and_then(|parent_name| {
                             class_loader(parent_name).map(Arc::unwrap_or_clone)
                         }),
-                    _ => None,
                 };
                 if let Some(cls) = resolved {
                     let mut lines = Vec::new();
@@ -741,9 +777,15 @@ impl Backend {
                             ns_line, cls.name
                         ));
                     } else {
+                        let keyword_str = match ssp_kind {
+                            SelfStaticParentKind::Self_ => "self",
+                            SelfStaticParentKind::Static => "static",
+                            SelfStaticParentKind::Parent => "parent",
+                            SelfStaticParentKind::This => unreachable!(),
+                        };
                         lines.push(format!(
                             "```php\n<?php\n{}{} = {}\n```",
-                            ns_line, keyword, cls.name
+                            ns_line, keyword_str, cls.name
                         ));
                     }
 
@@ -928,7 +970,7 @@ impl Backend {
         // Try the type-string path first.  This preserves generic
         // parameters (e.g. `Generator<int, Pencil>`) and scalar types
         // (e.g. `int`) that the ClassInfo-based path would lose.
-        if let Some(type_str) = variable_type::resolve_variable_type_string(
+        if let Some(resolved_type) = variable_type::resolve_variable_type(
             &var_name,
             content,
             cursor_offset,
@@ -941,11 +983,12 @@ impl Backend {
             // When the type is a template parameter, show its variance
             // and bound (e.g. "**template-covariant** `TNode` of `AstNode`")
             // above the code block so the user sees the constraint.
-            let template_line = self.find_template_info_for_type(&type_str, uri, cursor_offset);
+            let template_line =
+                self.find_template_info_for_type(&resolved_type, uri, cursor_offset);
 
             let hover_body = build_variable_hover_body(
                 &var_name,
-                &type_str,
+                &resolved_type,
                 &class_loader,
                 template_line.as_deref(),
             );
@@ -970,9 +1013,8 @@ impl Backend {
             return Some(make_hover(format!("```php\n<?php\n{}\n```", var_name)));
         }
 
-        let type_str = ResolvedType::type_strings_joined(&resolved);
-
-        let hover_body = build_variable_hover_body(&var_name, &type_str, &class_loader, None);
+        let joined = ResolvedType::types_joined(&resolved);
+        let hover_body = build_variable_hover_body(&var_name, &joined, &class_loader, None);
         Some(make_hover(hover_body))
     }
 
@@ -1007,22 +1049,22 @@ impl Backend {
     /// `Some("**template-covariant** \`TNode\` of \`AstNode\`")`.
     fn find_template_info_for_type(
         &self,
-        type_str: &str,
+        ty: &PhpType,
         uri: &str,
         cursor_offset: u32,
     ) -> Option<String> {
-        // Only bare names (no `\`, `<`, `|`) can be template params.
-        let name = type_str.trim();
-        if !is_bare_identifier(name) {
-            return None;
-        }
+        // Only bare named types can be template params.
+        let name = match ty {
+            PhpType::Named(n) if is_bare_identifier(n) => n.as_str(),
+            _ => return None,
+        };
 
         let maps = self.symbol_maps.read();
         let map = maps.get(uri)?;
         let def = map.find_template_def(name, cursor_offset)?;
 
         let bound_display = if let Some(ref bound) = def.bound {
-            format!(" of `{}`", PhpType::parse(bound).shorten())
+            format!(" of `{}`", bound.shorten())
         } else {
             String::new()
         };
@@ -1110,24 +1152,20 @@ impl Backend {
         // parameter on the method or owning class, show the template's
         // variance and bound so the user understands the constraint.
         // Method-level templates take priority over class-level ones.
-        let mut seen_templates: Vec<String> = Vec::new();
-        if let Some(ref ret) = method.return_type {
-            let ret_str = ret.to_string();
-            if let Some(tpl_line) = find_template_info_in_method_or_class(&ret_str, method, owner) {
-                seen_templates.push(ret_str);
-                lines.push(tpl_line);
-            }
+        let mut seen_templates: Vec<PhpType> = Vec::new();
+        if let Some(ref ret) = method.return_type
+            && let Some(tpl_line) = find_template_info_in_method_or_class(ret, method, owner)
+        {
+            seen_templates.push(ret.clone());
+            lines.push(tpl_line);
         }
         for param in &method.parameters {
-            if let Some(ref hint) = param.type_hint {
-                let hint_str = hint.to_string();
-                if !seen_templates.iter().any(|s| s == &hint_str)
-                    && let Some(tpl_line) =
-                        find_template_info_in_method_or_class(&hint_str, method, owner)
-                {
-                    seen_templates.push(hint_str);
-                    lines.push(tpl_line);
-                }
+            if let Some(ref hint) = param.type_hint
+                && !seen_templates.iter().any(|s| s == hint)
+                && let Some(tpl_line) = find_template_info_in_method_or_class(hint, method, owner)
+            {
+                seen_templates.push(hint.clone());
+                lines.push(tpl_line);
             }
         }
 
@@ -1160,10 +1198,9 @@ impl Backend {
         format_see_refs(&resolved_see, &method.links, &mut lines);
 
         // Build the readable param/return section as markdown.
-        let effective_return = method.return_type_str();
         if let Some(section) = build_param_return_section(
             &method.parameters,
-            effective_return.as_deref(),
+            method.return_type.as_ref(),
             method.native_return_type.as_ref(),
             method.return_description.as_deref(),
         ) {
@@ -1206,9 +1243,10 @@ impl Backend {
 
         // Build the docblock annotation showing the effective type
         // when it differs from the native one.
-        let eff_type_str = property.type_hint_str();
-        let var_annotation =
-            build_var_annotation(eff_type_str.as_deref(), property.native_type_hint.as_ref());
+        let var_annotation = build_var_annotation(
+            property.type_hint.as_ref(),
+            property.native_type_hint.as_ref(),
+        );
 
         let mut lines = Vec::new();
 
@@ -1216,11 +1254,10 @@ impl Backend {
         // class, show the template's variance and bound so the user
         // understands the constraint (e.g. "**template-covariant**
         // `TNode` of `AstNode`").
-        if let Some(ref type_hint) = property.type_hint {
-            let type_hint_str = type_hint.to_string();
-            if let Some(tpl_line) = find_template_info_in_class(&type_hint_str, owner) {
-                lines.push(tpl_line);
-            }
+        if let Some(ref type_hint) = property.type_hint
+            && let Some(tpl_line) = find_template_info_in_class(type_hint, owner)
+        {
+            lines.push(tpl_line);
         }
 
         // Origin indicator (override / implements / virtual).
@@ -1386,7 +1423,7 @@ impl Backend {
                 .into_iter()
                 .map(|(name, bound, variance, default)| {
                     let bound_display = bound
-                        .map(|b| format!(" of `{}`", PhpType::parse(&b).shorten()))
+                        .map(|b| format!(" of `{}`", b.shorten()))
                         .unwrap_or_default();
                     let default_display =
                         default.map(|d| format!(" = `{}`", d)).unwrap_or_default();
@@ -1447,12 +1484,11 @@ impl Backend {
 /// markdown horizontal rule so the editor renders a visible divider.
 fn build_variable_hover_body(
     var_name: &str,
-    type_str: &str,
+    ty: &PhpType,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     template_line: Option<&str>,
 ) -> String {
-    let parsed = PhpType::parse(type_str);
-    let members = parsed.union_members();
+    let members = ty.union_members();
 
     // Count how many members are non-trivial class types (not scalars,
     // not `null`, not `void`, etc.).  Only render separate blocks when
@@ -1463,8 +1499,8 @@ fn build_variable_hover_body(
     // When there is only one component, or only one class-like type
     // (the rest being scalars / null), render a single code block.
     if members.len() <= 1 || class_like_count < 2 {
-        let short_type = parsed.shorten().to_string();
-        let ns = resolve_type_namespace_structured(&parsed, class_loader);
+        let short_type = ty.shorten().to_string();
+        let ns = resolve_type_namespace_structured(ty, class_loader);
         let ns_line = namespace_line(&ns);
         let code_block = format!(
             "```php\n<?php\n{}{} = {}\n```",
@@ -1536,25 +1572,25 @@ fn resolve_type_namespace_structured(
 /// `"**template** \`T\` of \`Model\`"`, or `None` when the type is
 /// not a template param in either scope.
 fn find_template_info_in_method_or_class(
-    type_str: &str,
+    ty: &PhpType,
     method: &MethodInfo,
     owner: &ClassInfo,
 ) -> Option<String> {
-    if let Some(line) = find_template_info_in_method(type_str, method) {
+    if let Some(line) = find_template_info_in_method(ty, method) {
         return Some(line);
     }
-    find_template_info_in_class(type_str, owner)
+    find_template_info_in_class(ty, owner)
 }
 
 /// Check whether `type_str` is a `@template` parameter declared on
 /// the method's own docblock.  Returns a formatted info line like
 /// `"**template** \`T\` of \`Model\`"`, or `None` when the type is
 /// not a method-level template param.
-fn find_template_info_in_method(type_str: &str, method: &MethodInfo) -> Option<String> {
-    let name = type_str.trim();
-    if !is_bare_identifier(name) {
-        return None;
-    }
+fn find_template_info_in_method(ty: &PhpType, method: &MethodInfo) -> Option<String> {
+    let name = match ty {
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
 
     // Method-level template_params stores just the names.
     if !method.template_params.iter().any(|p| p == name) {
@@ -1575,11 +1611,11 @@ fn find_template_info_in_method(type_str: &str, method: &MethodInfo) -> Option<S
 /// `owner`'s class docblock.  Returns a formatted info line like
 /// `"**template-covariant** \`TNode\` of \`AstNode\`"`, or `None`
 /// when the type is not a template param on the class.
-fn find_template_info_in_class(type_str: &str, owner: &ClassInfo) -> Option<String> {
-    let name = type_str.trim();
-    if !is_bare_identifier(name) {
-        return None;
-    }
+fn find_template_info_in_class(ty: &PhpType, owner: &ClassInfo) -> Option<String> {
+    let name = match ty {
+        PhpType::Named(n) => n.as_str(),
+        _ => return None,
+    };
 
     let docblock = owner.class_docblock.as_deref()?;
     let tpl = extract_template_params_full(docblock)
@@ -1588,7 +1624,7 @@ fn find_template_info_in_class(type_str: &str, owner: &ClassInfo) -> Option<Stri
 
     let (tpl_name, bound, variance, default) = tpl;
     let bound_display = bound
-        .map(|b| format!(" of `{}`", PhpType::parse(&b).shorten()))
+        .map(|b| format!(" of `{}`", b.shorten()))
         .unwrap_or_default();
     let default_display = default.map(|d| format!(" = `{}`", d)).unwrap_or_default();
 
@@ -1601,11 +1637,11 @@ fn find_template_info_in_class(type_str: &str, owner: &ClassInfo) -> Option<Stri
     ))
 }
 
-/// Returns `true` when `s` is a simple, unqualified identifier that could
-/// name a template parameter — i.e. it parses as [`PhpType::Named`] and
-/// contains no namespace separator.
+/// Returns `true` when `s` is a simple, unqualified identifier (no
+/// namespace separator).  The caller guarantees that `s` came from a
+/// [`PhpType::Named`] match, so we only need to check for `\`.
 fn is_bare_identifier(s: &str) -> bool {
-    !s.is_empty() && !s.contains('\\') && matches!(PhpType::parse(s), PhpType::Named(_))
+    !s.is_empty() && !s.contains('\\')
 }
 
 /// Maximum number of enum cases or trait methods to show before

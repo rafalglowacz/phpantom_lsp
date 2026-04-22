@@ -211,17 +211,12 @@ impl VirtualMemberProvider for PHPDocProvider {
                 methods.push(m);
             }
 
-            for (name, type_str) in docblock::extract_property_tags(doc_text) {
+            for (name, type_hint) in docblock::extract_property_tags(doc_text) {
                 seen_props.insert(name.clone());
-                let type_hint: Option<String> = if type_str.is_empty() {
-                    None
-                } else {
-                    Some(type_str)
-                };
                 properties.push(PropertyInfo {
                     name,
                     name_offset: 0,
-                    type_hint: type_hint.as_deref().map(PhpType::parse),
+                    type_hint,
                     native_type_hint: None,
                     description: None,
                     is_static: false,
@@ -257,17 +252,12 @@ impl VirtualMemberProvider for PHPDocProvider {
                     }
                 }
 
-                for (name, type_str) in docblock::extract_property_tags(doc_text) {
+                for (name, type_hint) in docblock::extract_property_tags(doc_text) {
                     if seen_props.insert(name.clone()) {
-                        let type_hint: Option<String> = if type_str.is_empty() {
-                            None
-                        } else {
-                            Some(type_str)
-                        };
                         properties.push(PropertyInfo {
                             name,
                             name_offset: 0,
-                            type_hint: type_hint.as_deref().map(PhpType::parse),
+                            type_hint,
                             native_type_hint: None,
                             description: None,
                             is_static: false,
@@ -314,17 +304,12 @@ impl VirtualMemberProvider for PHPDocProvider {
                         }
                     }
 
-                    for (name, type_str) in docblock::extract_property_tags(doc_text) {
+                    for (name, type_hint) in docblock::extract_property_tags(doc_text) {
                         if seen_props.insert(name.clone()) {
-                            let type_hint: Option<String> = if type_str.is_empty() {
-                                None
-                            } else {
-                                Some(type_str)
-                            };
                             properties.push(PropertyInfo {
                                 name,
                                 name_offset: 0,
-                                type_hint: type_hint.as_deref().map(PhpType::parse),
+                                type_hint,
                                 native_type_hint: None,
                                 description: None,
                                 is_static: false,

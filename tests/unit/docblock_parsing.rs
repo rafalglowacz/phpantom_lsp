@@ -169,14 +169,20 @@ fn method_tag_name_matches_type_keyword() {
 fn property_tag_simple() {
     let doc = "/** @property Session $session */";
     let props = extract_property_tags(doc);
-    assert_eq!(props, vec![("session".to_string(), "Session".to_string())]);
+    assert_eq!(
+        props,
+        vec![("session".to_string(), Some(PhpType::parse("Session")))]
+    );
 }
 
 #[test]
 fn property_tag_nullable() {
     let doc = "/** @property ?int $count */";
     let props = extract_property_tags(doc);
-    assert_eq!(props, vec![("count".to_string(), "?int".to_string())]);
+    assert_eq!(
+        props,
+        vec![("count".to_string(), Some(PhpType::parse("?int")))]
+    );
 }
 
 #[test]
@@ -185,7 +191,7 @@ fn property_tag_union_with_null() {
     let props = extract_property_tags(doc);
     assert_eq!(
         props,
-        vec![("latest_id".to_string(), "null|int".to_string())]
+        vec![("latest_id".to_string(), Some(PhpType::parse("null|int")))]
     );
 }
 
@@ -195,7 +201,10 @@ fn property_tag_fqn() {
     let props = extract_property_tags(doc);
     assert_eq!(
         props,
-        vec![("user".to_string(), "\\App\\Models\\User".to_string())]
+        vec![(
+            "user".to_string(),
+            Some(PhpType::parse("\\App\\Models\\User"))
+        )]
     );
 }
 
@@ -209,19 +218,19 @@ fn property_tag_multiple() {
     );
     let props = extract_property_tags(doc);
     assert_eq!(props.len(), 2);
-    // `null|int` is now preserved (clean_type used to strip `|null`).
+    // `null|int` is preserved in the type hint.
     assert_eq!(
         props[0],
         (
             "latest_subscription_agreement_id".to_string(),
-            "null|int".to_string()
+            Some(PhpType::parse("null|int"))
         )
     );
     assert_eq!(
         props[1],
         (
             "mobile_verification_state".to_string(),
-            "UserMobileVerificationState".to_string()
+            Some(PhpType::parse("UserMobileVerificationState"))
         )
     );
 }
@@ -236,15 +245,18 @@ fn property_tag_read_write_variants() {
     );
     let props = extract_property_tags(doc);
     assert_eq!(props.len(), 2);
-    assert_eq!(props[0], ("name".to_string(), "string".to_string()));
-    assert_eq!(props[1], ("age".to_string(), "int".to_string()));
+    assert_eq!(
+        props[0],
+        ("name".to_string(), Some(PhpType::parse("string")))
+    );
+    assert_eq!(props[1], ("age".to_string(), Some(PhpType::parse("int"))));
 }
 
 #[test]
 fn property_tag_no_type() {
     let doc = "/** @property $thing */";
     let props = extract_property_tags(doc);
-    assert_eq!(props, vec![("thing".to_string(), "".to_string())]);
+    assert_eq!(props, vec![("thing".to_string(), None)]);
 }
 
 #[test]
@@ -253,7 +265,10 @@ fn property_tag_generic_preserved() {
     let props = extract_property_tags(doc);
     assert_eq!(
         props,
-        vec![("items".to_string(), "Collection<int, Model>".to_string())]
+        vec![(
+            "items".to_string(),
+            Some(PhpType::parse("Collection<int, Model>"))
+        )]
     );
 }
 
@@ -281,7 +296,10 @@ fn return_type_conditional_is_skipped() {
 #[test]
 fn return_type_simple() {
     let doc = "/** @return Application */";
-    assert_eq!(extract_return_type(doc), Some("Application".into()));
+    assert_eq!(
+        extract_return_type(doc),
+        Some(PhpType::parse("Application"))
+    );
 }
 
 #[test]
@@ -289,20 +307,26 @@ fn return_type_fqn() {
     let doc = "/** @return \\Illuminate\\Session\\Store */";
     assert_eq!(
         extract_return_type(doc),
-        Some("\\Illuminate\\Session\\Store".into())
+        Some(PhpType::parse("\\Illuminate\\Session\\Store"))
     );
 }
 
 #[test]
 fn return_type_nullable() {
     let doc = "/** @return ?Application */";
-    assert_eq!(extract_return_type(doc), Some("?Application".into()));
+    assert_eq!(
+        extract_return_type(doc),
+        Some(PhpType::parse("?Application"))
+    );
 }
 
 #[test]
 fn return_type_with_description() {
     let doc = "/** @return Application The main app instance */";
-    assert_eq!(extract_return_type(doc), Some("Application".into()));
+    assert_eq!(
+        extract_return_type(doc),
+        Some(PhpType::parse("Application"))
+    );
 }
 
 #[test]
@@ -317,7 +341,7 @@ fn return_type_multiline() {
     );
     assert_eq!(
         extract_return_type(doc),
-        Some("\\Illuminate\\Session\\Store".into())
+        Some(PhpType::parse("\\Illuminate\\Session\\Store"))
     );
 }
 
@@ -330,7 +354,10 @@ fn return_type_none_when_missing() {
 #[test]
 fn return_type_nullable_union() {
     let doc = "/** @return Application|null */";
-    assert_eq!(extract_return_type(doc), Some("Application|null".into()));
+    assert_eq!(
+        extract_return_type(doc),
+        Some(PhpType::parse("Application|null"))
+    );
 }
 
 #[test]
@@ -338,7 +365,7 @@ fn return_type_generic_preserved() {
     let doc = "/** @return Collection<int, Model> */";
     assert_eq!(
         extract_return_type(doc),
-        Some("Collection<int, Model>".into())
+        Some(PhpType::parse("Collection<int, Model>"))
     );
 }
 
@@ -354,7 +381,10 @@ fn return_type_multiline_generic_simple() {
         " * >\n",
         " */",
     );
-    assert_eq!(extract_return_type(doc), Some("array<string, int>".into()));
+    assert_eq!(
+        extract_return_type(doc),
+        Some(PhpType::parse("array<string, int>"))
+    );
 }
 
 #[test]
@@ -372,7 +402,9 @@ fn return_type_multiline_static_with_conditionals() {
     );
     assert_eq!(
         extract_return_type(doc),
-        Some("static<($groupBy is (array|string) ? array-key : TGroupKey), static<($preserveKeys is true ? TKey : int), TValue>>".into())
+        Some(PhpType::parse(
+            "static<($groupBy is (array|string) ? array-key : TGroupKey), static<($preserveKeys is true ? TKey : int), TValue>>"
+        ))
     );
 }
 
@@ -388,7 +420,7 @@ fn return_type_multiline_nested_generics() {
     );
     assert_eq!(
         extract_return_type(doc),
-        Some("Collection<int, Collection<string, User>>".into())
+        Some(PhpType::parse("Collection<int, Collection<string, User>>"))
     );
 }
 
@@ -404,7 +436,7 @@ fn return_type_multiline_brace_shape() {
     );
     assert_eq!(
         extract_return_type(doc),
-        Some("array{name: string, age: int}".into())
+        Some(PhpType::parse("array{name: string, age: int}"))
     );
 }
 
@@ -412,23 +444,19 @@ fn return_type_multiline_brace_shape() {
 
 #[test]
 fn return_type_unclosed_angle_recovers_base() {
-    // A docblock where the closing `>` is simply missing —
-    // `extract_return_type` returns the raw (broken) token;
-    // `resolve_effective_type` performs the actual recovery.
+    // `extract_return_type` now returns PhpType directly. For broken
+    // docblocks with unclosed `<`, the internal sanitisation recovers
+    // the base type.
     let doc = concat!("/**\n", " * @return SomeType<\n", " */",);
     let raw = extract_return_type(doc);
-    assert_eq!(raw, Some("SomeType<".into()));
-    let recovered = resolve_effective_type(None, raw.as_deref()).map(|t| t.to_string());
-    assert_eq!(recovered, Some("SomeType".into()));
+    assert_eq!(raw, Some(PhpType::parse("SomeType")));
 }
 
 #[test]
 fn return_type_unclosed_angle_static_recovers() {
     let doc = concat!("/**\n", " * @return static<\n", " */",);
     let raw = extract_return_type(doc);
-    assert_eq!(raw, Some("static<".into()));
-    let recovered = resolve_effective_type(None, raw.as_deref()).map(|t| t.to_string());
-    assert_eq!(recovered, Some("static".into()));
+    assert_eq!(raw, Some(PhpType::parse("static")));
 }
 
 // ── resolve_effective_type fallback ─────────────────────────────────
@@ -437,8 +465,10 @@ fn return_type_unclosed_angle_static_recovers() {
 fn effective_type_broken_docblock_falls_back_to_native() {
     // If the docblock type is completely unrecoverable, the native type
     // should win.
+    let native = PhpType::parse("Result");
+    let sanitised = sanitise_and_parse_docblock_type("<broken");
     assert_eq!(
-        resolve_effective_type(Some("Result"), Some("<broken")).map(|t| t.to_string()),
+        resolve_effective_type_typed(Some(&native), sanitised.as_ref()).map(|t| t.to_string()),
         Some("Result".into()),
     );
 }
@@ -447,8 +477,9 @@ fn effective_type_broken_docblock_falls_back_to_native() {
 fn effective_type_broken_docblock_recovers_base() {
     // When there IS a recoverable base in the broken docblock and no
     // native hint, partial recovery should kick in.
+    let sanitised = sanitise_and_parse_docblock_type("Collection<int");
     assert_eq!(
-        resolve_effective_type(None, Some("Collection<int")).map(|t| t.to_string()),
+        resolve_effective_type_typed(None, sanitised.as_ref()).map(|t| t.to_string()),
         Some("Collection".into()),
     );
 }
@@ -457,7 +488,11 @@ fn effective_type_broken_docblock_recovers_base() {
 fn effective_type_balanced_docblock_unchanged() {
     // A well-formed docblock type should pass through normally.
     assert_eq!(
-        resolve_effective_type(Some("array"), Some("Collection<int, User>")).map(|t| t.to_string()),
+        resolve_effective_type_typed(
+            Some(&PhpType::parse("array")),
+            Some(&PhpType::parse("Collection<int, User>"))
+        )
+        .map(|t| t.to_string()),
         Some("Collection<int, User>".into()),
     );
 }
@@ -467,13 +502,16 @@ fn effective_type_balanced_docblock_unchanged() {
 #[test]
 fn var_type_simple() {
     let doc = "/** @var Session */";
-    assert_eq!(extract_var_type(doc), Some("Session".into()));
+    assert_eq!(extract_var_type(doc), Some(PhpType::parse("Session")));
 }
 
 #[test]
 fn var_type_fqn() {
     let doc = "/** @var \\App\\Models\\User */";
-    assert_eq!(extract_var_type(doc), Some("\\App\\Models\\User".into()));
+    assert_eq!(
+        extract_var_type(doc),
+        Some(PhpType::parse("\\App\\Models\\User"))
+    );
 }
 
 #[test]
@@ -489,7 +527,7 @@ fn var_type_with_name_simple() {
     let doc = "/** @var Session */";
     assert_eq!(
         extract_var_type_with_name(doc),
-        Some(("Session".into(), None))
+        Some((PhpType::parse("Session"), None))
     );
 }
 
@@ -498,7 +536,7 @@ fn var_type_with_name_has_var() {
     let doc = "/** @var Session $sess */";
     assert_eq!(
         extract_var_type_with_name(doc),
-        Some(("Session".into(), Some("$sess".into())))
+        Some((PhpType::parse("Session"), Some("$sess".into())))
     );
 }
 
@@ -507,7 +545,7 @@ fn var_type_with_name_fqn() {
     let doc = "/** @var \\App\\Models\\User $user */";
     assert_eq!(
         extract_var_type_with_name(doc),
-        Some(("\\App\\Models\\User".into(), Some("$user".into())))
+        Some((PhpType::parse("\\App\\Models\\User"), Some("$user".into())))
     );
 }
 
@@ -523,7 +561,7 @@ fn var_type_with_name_description_not_var() {
     let doc = "/** @var Session some description */";
     assert_eq!(
         extract_var_type_with_name(doc),
-        Some(("Session".into(), None))
+        Some((PhpType::parse("Session"), None))
     );
 }
 
@@ -532,7 +570,10 @@ fn var_type_with_name_generic_preserved() {
     let doc = "/** @var Collection<int, User> $items */";
     assert_eq!(
         extract_var_type_with_name(doc),
-        Some(("Collection<int, User>".into(), Some("$items".into())))
+        Some((
+            PhpType::parse("Collection<int, User>"),
+            Some("$items".into())
+        ))
     );
 }
 
@@ -544,7 +585,7 @@ fn inline_var_docblock_simple() {
     let stmt_start = content.find("$var").unwrap();
     assert_eq!(
         find_inline_var_docblock(content, stmt_start),
-        Some(("Session".into(), None))
+        Some((PhpType::parse("Session"), None))
     );
 }
 
@@ -554,7 +595,7 @@ fn inline_var_docblock_with_var_name() {
     let stmt_start = content.find("$var =").unwrap();
     assert_eq!(
         find_inline_var_docblock(content, stmt_start),
-        Some(("Session".into(), Some("$var".into())))
+        Some((PhpType::parse("Session"), Some("$var".into())))
     );
 }
 
@@ -564,7 +605,7 @@ fn inline_var_docblock_fqn() {
     let stmt_start = content.find("$u").unwrap();
     assert_eq!(
         find_inline_var_docblock(content, stmt_start),
-        Some(("\\App\\Models\\User".into(), None))
+        Some((PhpType::parse("\\App\\Models\\User"), None))
     );
 }
 
@@ -589,7 +630,7 @@ fn inline_var_docblock_with_indentation() {
     let stmt_start = content.find("$var").unwrap();
     assert_eq!(
         find_inline_var_docblock(content, stmt_start),
-        Some(("Session".into(), None))
+        Some((PhpType::parse("Session"), None))
     );
 }
 
@@ -597,32 +638,50 @@ fn inline_var_docblock_with_indentation() {
 
 #[test]
 fn override_object_with_class() {
-    assert!(should_override_type("Session", "object"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("object")
+    ));
 }
 
 #[test]
 fn override_mixed_with_class() {
-    assert!(should_override_type("Session", "mixed"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("mixed")
+    ));
 }
 
 #[test]
 fn override_class_with_subclass() {
-    assert!(should_override_type("ConcreteSession", "SessionInterface"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("ConcreteSession"),
+        &PhpType::parse("SessionInterface")
+    ));
 }
 
 #[test]
 fn no_override_int_with_class() {
-    assert!(!should_override_type("Session", "int"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn no_override_string_with_class() {
-    assert!(!should_override_type("Session", "string"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn no_override_bool_with_class() {
-    assert!(!should_override_type("Session", "bool"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("bool")
+    ));
 }
 
 #[test]
@@ -630,36 +689,57 @@ fn override_array_with_class() {
     // `array` is a broad container type that docblocks commonly refine
     // (e.g. `@param list<User> $users` with native `array`).
     // Non-scalar docblock types should be allowed to override it.
-    assert!(should_override_type("Session", "array"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("array")
+    ));
 }
 
 #[test]
 fn override_array_with_generic_list() {
     // `list<User>` is the most common refinement of native `array`.
-    assert!(should_override_type("list<User>", "array"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("list<User>"),
+        &PhpType::parse("array")
+    ));
 }
 
 #[test]
 fn override_array_with_generic_collection() {
-    assert!(should_override_type("Collection<int, Order>", "array"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("Collection<int, Order>"),
+        &PhpType::parse("array")
+    ));
 }
 
 #[test]
 fn override_iterable_with_class() {
     // `iterable` is another broad container type that docblocks refine.
-    assert!(should_override_type("Collection<int, User>", "iterable"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("Collection<int, User>"),
+        &PhpType::parse("iterable")
+    ));
 }
 
 #[test]
 fn override_nullable_array_with_class() {
-    assert!(should_override_type("list<User>", "?array"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("list<User>"),
+        &PhpType::parse("?array")
+    ));
 }
 
 #[test]
 fn no_override_array_with_scalar_docblock() {
     // A plain scalar docblock (no generics) should not override.
-    assert!(!should_override_type("array", "array"));
-    assert!(!should_override_type("string", "string"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("array"),
+        &PhpType::parse("array")
+    ));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("string"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
@@ -667,157 +747,247 @@ fn override_array_with_generic_scalar_docblock() {
     // A scalar-based docblock WITH generic parameters (e.g. `array<string, mixed>`)
     // should override, because the generic arguments carry type information
     // useful for destructuring and foreach element type extraction.
-    assert!(should_override_type("array<string, mixed>", "array"));
-    assert!(should_override_type("array<int, User>", "array"));
-    assert!(should_override_type("iterable<string, Order>", "iterable"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("array<string, mixed>"),
+        &PhpType::parse("array")
+    ));
+    assert!(should_override_type_typed(
+        &PhpType::parse("array<int, User>"),
+        &PhpType::parse("array")
+    ));
+    assert!(should_override_type_typed(
+        &PhpType::parse("iterable<string, Order>"),
+        &PhpType::parse("iterable")
+    ));
 }
 
 #[test]
 fn no_override_void_with_class() {
-    assert!(!should_override_type("Session", "void"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("void")
+    ));
 }
 
 #[test]
 fn no_override_nullable_int_with_class() {
-    assert!(!should_override_type("Session", "?int"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("?int")
+    ));
 }
 
 #[test]
 fn override_nullable_object_with_class() {
-    assert!(should_override_type("Session", "?object"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("?object")
+    ));
 }
 
 #[test]
 fn no_override_scalar_union_with_class() {
-    assert!(!should_override_type("Session", "string|int"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("string|int")
+    ));
 }
 
 #[test]
 fn override_union_with_object_part() {
     // `SomeClass|null` has a non-scalar part → overridable
-    assert!(should_override_type("ConcreteClass", "SomeClass|null"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("ConcreteClass"),
+        &PhpType::parse("SomeClass|null")
+    ));
 }
 
 #[test]
 fn no_override_when_docblock_is_scalar() {
     // Even if native is object, if docblock says `int`, no point overriding
-    assert!(!should_override_type("int", "object"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("int"),
+        &PhpType::parse("object")
+    ));
 }
 
 #[test]
 fn override_self_with_class() {
-    assert!(should_override_type("ConcreteClass", "self"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("ConcreteClass"),
+        &PhpType::parse("self")
+    ));
 }
 
 #[test]
 fn override_static_with_class() {
-    assert!(should_override_type("ConcreteClass", "static"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("ConcreteClass"),
+        &PhpType::parse("static")
+    ));
 }
 
 #[test]
 fn override_string_with_class_string() {
-    assert!(should_override_type("class-string", "string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("class-string"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn override_string_with_non_empty_string() {
-    assert!(should_override_type("non-empty-string", "string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("non-empty-string"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn override_string_with_numeric_string() {
-    assert!(should_override_type("numeric-string", "string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("numeric-string"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn override_string_with_literal_string() {
-    assert!(should_override_type("literal-string", "string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("literal-string"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn override_int_with_positive_int() {
-    assert!(should_override_type("positive-int", "int"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("positive-int"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn override_int_with_negative_int() {
-    assert!(should_override_type("negative-int", "int"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("negative-int"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn override_int_with_non_negative_int() {
-    assert!(should_override_type("non-negative-int", "int"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("non-negative-int"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn override_nullable_string_with_non_empty_string() {
-    assert!(should_override_type("non-empty-string", "?string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("non-empty-string"),
+        &PhpType::parse("?string")
+    ));
 }
 
 #[test]
 fn override_string_with_class_string_generic() {
     // `class-string<Foo>` is a valid refinement of `string`.
-    assert!(should_override_type("class-string<Foo>", "string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("class-string<Foo>"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn no_override_string_with_array_generic() {
     // `array<int>` is not compatible with native `string` — completely
     // different type family.  The native declaration wins.
-    assert!(!should_override_type("array<int>", "string"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("array<int>"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn no_override_string_with_collection_generic() {
     // `Collection<User>` is not a string refinement.
-    assert!(!should_override_type("Collection<User>", "string"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Collection<User>"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn no_override_int_with_array_generic() {
     // `array<int>` is not compatible with native `int`.
-    assert!(!should_override_type("array<int>", "int"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("array<int>"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn no_override_int_with_class_name() {
     // A class name is not a refinement of `int`.
-    assert!(!should_override_type("Session", "int"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("Session"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn no_override_bool_with_array_shape() {
     // `array{name: string}` is not compatible with native `bool`.
-    assert!(!should_override_type("array{name: string}", "bool"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("array{name: string}"),
+        &PhpType::parse("bool")
+    ));
 }
 
 #[test]
 fn no_override_float_with_array_generic() {
-    assert!(!should_override_type("array<string>", "float"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("array<string>"),
+        &PhpType::parse("float")
+    ));
 }
 
 #[test]
 fn override_int_with_int_range() {
     // `int<0, max>` is a valid refinement of `int`.
-    assert!(should_override_type("int<0, max>", "int"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("int<0, max>"),
+        &PhpType::parse("int")
+    ));
 }
 
 #[test]
 fn override_string_with_non_empty_string_generic() {
     // `non-empty-string` pseudo-type with generic params (unusual but valid).
-    assert!(should_override_type("non-empty-string", "string"));
+    assert!(should_override_type_typed(
+        &PhpType::parse("non-empty-string"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn no_override_string_with_list_generic() {
     // `list<User>` is not a string refinement.
-    assert!(!should_override_type("list<User>", "string"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("list<User>"),
+        &PhpType::parse("string")
+    ));
 }
 
 #[test]
 fn no_override_nullable_int_with_array_generic() {
     // `array<int>` is not compatible with `?int`.
-    assert!(!should_override_type("array<int>", "?int"));
+    assert!(!should_override_type_typed(
+        &PhpType::parse("array<int>"),
+        &PhpType::parse("?int")
+    ));
 }
 
 // ── resolve_effective_type ──────────────────────────────────────────
@@ -825,7 +995,7 @@ fn no_override_nullable_int_with_array_generic() {
 #[test]
 fn effective_type_docblock_only() {
     assert_eq!(
-        resolve_effective_type(None, Some("Session")).map(|t| t.to_string()),
+        resolve_effective_type_typed(None, Some(&PhpType::parse("Session"))).map(|t| t.to_string()),
         Some("Session".into())
     );
 }
@@ -833,7 +1003,7 @@ fn effective_type_docblock_only() {
 #[test]
 fn effective_type_native_only() {
     assert_eq!(
-        resolve_effective_type(Some("int"), None).map(|t| t.to_string()),
+        resolve_effective_type_typed(Some(&PhpType::parse("int")), None).map(|t| t.to_string()),
         Some("int".into())
     );
 }
@@ -841,7 +1011,11 @@ fn effective_type_native_only() {
 #[test]
 fn effective_type_both_compatible() {
     assert_eq!(
-        resolve_effective_type(Some("object"), Some("Session")).map(|t| t.to_string()),
+        resolve_effective_type_typed(
+            Some(&PhpType::parse("object")),
+            Some(&PhpType::parse("Session"))
+        )
+        .map(|t| t.to_string()),
         Some("Session".into())
     );
 }
@@ -849,7 +1023,11 @@ fn effective_type_both_compatible() {
 #[test]
 fn effective_type_both_incompatible() {
     assert_eq!(
-        resolve_effective_type(Some("int"), Some("Session")).map(|t| t.to_string()),
+        resolve_effective_type_typed(
+            Some(&PhpType::parse("int")),
+            Some(&PhpType::parse("Session"))
+        )
+        .map(|t| t.to_string()),
         Some("int".into())
     );
 }
@@ -857,76 +1035,9 @@ fn effective_type_both_incompatible() {
 #[test]
 fn effective_type_neither() {
     assert_eq!(
-        resolve_effective_type(None, None).map(|t| t.to_string()),
+        resolve_effective_type_typed(None, None).map(|t| t.to_string()),
         None::<String>
     );
-}
-
-// ── clean_type ──────────────────────────────────────────────────────
-
-#[test]
-fn clean_leading_backslash() {
-    // Leading `\` is preserved — it marks a fully-qualified name so that
-    // `resolve_type_string` does not incorrectly prepend the file namespace.
-    assert_eq!(clean_type("\\Foo\\Bar"), "\\Foo\\Bar");
-}
-
-#[test]
-fn clean_generic_preserved() {
-    // clean_type now preserves generic parameters for downstream resolution.
-    assert_eq!(
-        clean_type("Collection<int, Model>"),
-        "Collection<int, Model>"
-    );
-}
-
-#[test]
-fn clean_type_nested_generic() {
-    assert_eq!(
-        clean_type("array<int, Collection<string, User>>"),
-        "array<int, Collection<string, User>>"
-    );
-}
-
-#[test]
-fn clean_type_generic_with_nullable_union() {
-    // `Collection<int, User>|null` → preserve null, keep generics
-    assert_eq!(
-        clean_type("Collection<int, User>|null"),
-        "Collection<int, User>|null"
-    );
-}
-
-#[test]
-fn clean_type_generic_union_inside_angle_brackets() {
-    // `|` inside `<…>` must not be treated as a union separator
-    assert_eq!(
-        clean_type("Collection<int|string, User>|null"),
-        "Collection<int|string, User>|null"
-    );
-}
-
-#[test]
-fn clean_nullable_union() {
-    assert_eq!(clean_type("Foo|null"), "Foo|null");
-}
-
-#[test]
-fn clean_nullable_shorthand_preserved() {
-    // clean_type preserves `?` — it is meaningful for display and tag
-    // extraction.  Use PhpType::parse(s).base_name() when you need a
-    // bare class name.
-    assert_eq!(clean_type("?Foo"), "?Foo");
-}
-
-#[test]
-fn clean_nullable_shorthand_fqn_preserved() {
-    assert_eq!(clean_type("?\\App\\Models\\User"), "?\\App\\Models\\User");
-}
-
-#[test]
-fn clean_trailing_punctuation() {
-    assert_eq!(clean_type("Foo."), "Foo");
 }
 
 // ── extract_conditional_return_type ─────────────────────────────────
@@ -953,7 +1064,7 @@ fn conditional_simple_class_string() {
             assert!(!negated);
             assert!(matches!(condition.as_ref(), PhpType::ClassString(_)));
             assert_eq!(**then_type, PhpType::Named("TClass".into()));
-            assert_eq!(**else_type, PhpType::Named("mixed".into()));
+            assert_eq!(**else_type, PhpType::mixed());
         }
         _ => panic!("Expected Conditional, got {:?}", cond),
     }
@@ -977,7 +1088,7 @@ fn conditional_null_check() {
         } => {
             assert_eq!(param, "$guard");
             assert!(!negated);
-            assert_eq!(*condition, PhpType::Named("null".into()));
+            assert_eq!(*condition, PhpType::null());
             assert_eq!(
                 *then_type,
                 PhpType::Named("\\Illuminate\\Contracts\\Auth\\Factory".into())
@@ -1022,12 +1133,12 @@ fn conditional_nested() {
                 } => {
                     assert_eq!(inner_param, "$abstract");
                     assert!(!inner_negated);
-                    assert_eq!(**inner_cond, PhpType::Named("null".into()));
+                    assert_eq!(**inner_cond, PhpType::null());
                     assert_eq!(
                         **inner_then,
                         PhpType::Named("\\Illuminate\\Foundation\\Application".into())
                     );
-                    assert_eq!(**inner_else, PhpType::Named("mixed".into()));
+                    assert_eq!(**inner_else, PhpType::mixed());
                 }
                 _ => panic!("Expected nested Conditional"),
             }
@@ -1170,7 +1281,7 @@ fn mixin_tag_generic_preserved() {
         mixins,
         vec![(
             "Collection".to_string(),
-            vec!["int".to_string(), "Model".to_string()],
+            vec![PhpType::parse("int"), PhpType::parse("Model")],
         )]
     );
 }
@@ -1436,7 +1547,7 @@ fn enclosing_return_type_method() {
     let cursor = content.find("$x->").unwrap() + 2;
     assert_eq!(
         find_enclosing_return_type(content, cursor),
-        Some("\\Generator<int, User>".to_string())
+        Some(PhpType::parse("\\Generator<int, User>"))
     );
 }
 
@@ -1453,7 +1564,7 @@ fn enclosing_return_type_top_level_function() {
     let cursor = content.find("$o->").unwrap() + 2;
     assert_eq!(
         find_enclosing_return_type(content, cursor),
-        Some("\\Generator<int, Order>".to_string())
+        Some(PhpType::parse("\\Generator<int, Order>"))
     );
 }
 
@@ -1485,7 +1596,7 @@ fn enclosing_return_type_static_method() {
     let cursor = content.find("$u->").unwrap() + 2;
     assert_eq!(
         find_enclosing_return_type(content, cursor),
-        Some("\\Generator<int, User>".to_string())
+        Some(PhpType::parse("\\Generator<int, User>"))
     );
 }
 
@@ -1504,7 +1615,7 @@ fn enclosing_return_type_abstract_protected() {
     let cursor = content.find("$i->").unwrap() + 2;
     assert_eq!(
         find_enclosing_return_type(content, cursor),
-        Some("\\Generator<string, Item>".to_string())
+        Some(PhpType::parse("\\Generator<string, Item>"))
     );
 }
 
@@ -1526,7 +1637,7 @@ fn enclosing_return_type_skips_nested_braces() {
     let cursor = content.find("$u->").unwrap() + 2;
     assert_eq!(
         find_enclosing_return_type(content, cursor),
-        Some("\\Generator<int, User>".to_string())
+        Some(PhpType::parse("\\Generator<int, User>"))
     );
 }
 
@@ -1564,7 +1675,7 @@ fn enclosing_return_type_deeply_nested_control_flow() {
         content.find("schedule(): \\Generator {").unwrap() + "schedule(): \\Generator {".len();
     assert_eq!(
         find_enclosing_return_type(content, func_brace),
-        Some("\\Generator<int, string, Task, void>".to_string()),
+        Some(PhpType::parse("\\Generator<int, string, Task, void>")),
         "Should find return type when scanning from just past the method's opening brace"
     );
 }
@@ -1578,8 +1689,8 @@ fn template_default_simple_bool() {
     assert_eq!(result.len(), 1);
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "TAsync");
-    assert_eq!(bound.as_deref(), Some("bool"));
-    assert_eq!(default.as_deref(), Some("false"));
+    assert_eq!(*bound, Some(PhpType::parse("bool")));
+    assert_eq!(*default, Some(PhpType::parse("false")));
 }
 
 #[test]
@@ -1589,8 +1700,8 @@ fn template_default_true() {
     assert_eq!(result.len(), 1);
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "TSync");
-    assert_eq!(bound.as_deref(), Some("bool"));
-    assert_eq!(default.as_deref(), Some("true"));
+    assert_eq!(*bound, Some(PhpType::parse("bool")));
+    assert_eq!(*default, Some(PhpType::parse("true")));
 }
 
 #[test]
@@ -1600,8 +1711,8 @@ fn template_default_null() {
     assert_eq!(result.len(), 1);
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "TValue");
-    assert_eq!(bound.as_deref(), Some("mixed"));
-    assert_eq!(default.as_deref(), Some("null"));
+    assert_eq!(*bound, Some(PhpType::parse("mixed")));
+    assert_eq!(*default, Some(PhpType::parse("null")));
 }
 
 #[test]
@@ -1611,7 +1722,7 @@ fn template_no_default() {
     assert_eq!(result.len(), 1);
     let (name, bound, _, default) = &result[0];
     assert_eq!(name, "T");
-    assert_eq!(bound.as_deref(), Some("string"));
+    assert_eq!(*bound, Some(PhpType::parse("string")));
     assert!(default.is_none());
 }
 
@@ -1640,18 +1751,18 @@ fn template_multiple_with_defaults() {
 
     let (name0, bound0, _, default0) = &result[0];
     assert_eq!(name0, "TKey");
-    assert_eq!(bound0.as_deref(), Some("int"));
+    assert_eq!(*bound0, Some(PhpType::parse("int")));
     assert!(default0.is_none());
 
     let (name1, bound1, _, default1) = &result[1];
     assert_eq!(name1, "TAsync");
-    assert_eq!(bound1.as_deref(), Some("bool"));
-    assert_eq!(default1.as_deref(), Some("false"));
+    assert_eq!(*bound1, Some(PhpType::parse("bool")));
+    assert_eq!(*default1, Some(PhpType::parse("false")));
 
     let (name2, bound2, _, default2) = &result[2];
     assert_eq!(name2, "TValue");
-    assert_eq!(bound2.as_deref(), Some("string"));
-    assert_eq!(default2.as_deref(), Some("null"));
+    assert_eq!(*bound2, Some(PhpType::parse("string")));
+    assert_eq!(*default2, Some(PhpType::parse("null")));
 }
 
 #[test]
@@ -1662,7 +1773,7 @@ fn template_default_stripped_from_bound() {
     assert_eq!(params_with_bounds.len(), 1);
     let (name, bound) = &params_with_bounds[0];
     assert_eq!(name, "TAsync");
-    assert_eq!(bound.as_deref(), Some("bool"));
+    assert_eq!(*bound, Some(PhpType::parse("bool")));
 }
 
 #[test]
@@ -1685,16 +1796,16 @@ fn conditional_resolves_with_template_default_false() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: false,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("Response".to_string())),
         else_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
     };
 
     let mut defaults = HashMap::new();
-    defaults.insert("TAsync".to_string(), "false".to_string());
+    defaults.insert("TAsync".to_string(), PhpType::false_());
 
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
-    assert_eq!(result, Some("Response".to_string()));
+    assert_eq!(result, Some(PhpType::Named("Response".to_string())));
 }
 
 #[test]
@@ -1707,16 +1818,16 @@ fn conditional_resolves_with_template_default_true() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: false,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("Response".to_string())),
         else_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
     };
 
     let mut defaults = HashMap::new();
-    defaults.insert("TAsync".to_string(), "true".to_string());
+    defaults.insert("TAsync".to_string(), PhpType::true_());
 
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
-    assert_eq!(result, Some("PromiseInterface".to_string()));
+    assert_eq!(result, Some(PhpType::Named("PromiseInterface".to_string())));
 }
 
 #[test]
@@ -1729,7 +1840,7 @@ fn conditional_no_template_default_falls_through() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: false,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("Response".to_string())),
         else_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
     };
@@ -1739,7 +1850,7 @@ fn conditional_no_template_default_falls_through() {
     // Empty defaults map — should not resolve via template default
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
     // Falls through to else branch since TAsync is not a $param either
-    assert_eq!(result, Some("PromiseInterface".to_string()));
+    assert_eq!(result, Some(PhpType::Named("PromiseInterface".to_string())));
 }
 
 #[test]
@@ -1752,15 +1863,15 @@ fn conditional_negated_with_template_default() {
     let cond = PhpType::Conditional {
         param: "TAsync".to_string(),
         negated: true,
-        condition: Box::new(PhpType::Named("false".to_string())),
+        condition: Box::new(PhpType::false_()),
         then_type: Box::new(PhpType::Named("PromiseInterface".to_string())),
         else_type: Box::new(PhpType::Named("Response".to_string())),
     };
 
     let mut defaults = HashMap::new();
-    defaults.insert("TAsync".to_string(), "false".to_string());
+    defaults.insert("TAsync".to_string(), PhpType::false_());
 
     // negated: TAsync is not false → false (since default IS false) → else branch → Response
     let result = resolve_conditional_without_args_and_defaults(&cond, &[], Some(&defaults));
-    assert_eq!(result, Some("Response".to_string()));
+    assert_eq!(result, Some(PhpType::Named("Response".to_string())));
 }

@@ -308,7 +308,8 @@ fn build_signature_label() {
             closure_this_type: None,
         },
     ];
-    let sig = build_signature(&params, Some("void"));
+    let ret = PhpType::parse("void");
+    let sig = build_signature(&params, Some(&ret));
     assert_eq!(sig.label, "(string $name, int $age): void");
 }
 
@@ -348,7 +349,8 @@ fn build_signature_parameter_offsets() {
 
 #[test]
 fn build_signature_no_params() {
-    let sig = build_signature(&[], Some("void"));
+    let ret = PhpType::parse("void");
+    let sig = build_signature(&[], Some(&ret));
     assert_eq!(sig.label, "(): void");
     assert!(sig.parameters.unwrap().is_empty());
 }
@@ -385,7 +387,8 @@ fn build_signature_with_default_values() {
             closure_this_type: None,
         },
     ];
-    let sig = build_signature(&params, Some("void"));
+    let ret = PhpType::parse("void");
+    let sig = build_signature(&params, Some(&ret));
     assert_eq!(sig.label, "(string $name = 'World', int $count = 1): void");
     // Verify offsets still track the labels correctly.
     let pi = sig.parameters.unwrap();
@@ -422,7 +425,8 @@ fn build_signature_param_documentation_same_types() {
             closure_this_type: None,
         },
     ];
-    let sig = build_signature(&params, Some("array"));
+    let ret = PhpType::parse("array");
+    let sig = build_signature(&params, Some(&ret));
     let pi = sig.parameters.unwrap();
 
     // First param: effective == native, so just the description.
@@ -451,7 +455,8 @@ fn build_signature_param_documentation_effective_differs() {
         is_reference: false,
         closure_this_type: None,
     }];
-    let sig = build_signature(&params, Some("void"));
+    let ret = PhpType::parse("void");
+    let sig = build_signature(&params, Some(&ret));
     let pi = sig.parameters.unwrap();
 
     match &pi[0].documentation {
@@ -506,7 +511,8 @@ fn build_signature_param_effective_differs_no_description() {
         is_reference: false,
         closure_this_type: None,
     }];
-    let sig = build_signature(&params, Some("object"));
+    let ret = PhpType::parse("object");
+    let sig = build_signature(&params, Some(&ret));
     let pi = sig.parameters.unwrap();
 
     match &pi[0].documentation {
@@ -541,7 +547,8 @@ fn build_signature_param_effective_fqn_shortened_in_doc() {
         is_reference: false,
         closure_this_type: None,
     }];
-    let sig = build_signature(&params, Some("void"));
+    let ret = PhpType::parse("void");
+    let sig = build_signature(&params, Some(&ret));
     let pi = sig.parameters.unwrap();
 
     match &pi[0].documentation {
@@ -579,76 +586,82 @@ fn build_signature_param_effective_fqn_no_desc() {
 
 #[test]
 fn build_signature_return_type_shortened() {
-    let sig = build_signature(&[], Some("\\App\\Models\\User"));
+    let ret = PhpType::parse("\\App\\Models\\User");
+    let sig = build_signature(&[], Some(&ret));
     assert_eq!(sig.label, "(): User");
 }
 
 #[test]
 fn build_signature_return_type_union_shortened() {
-    let sig = build_signature(&[], Some("\\App\\User|\\App\\Admin"));
+    let ret = PhpType::parse("\\App\\User|\\App\\Admin");
+    let sig = build_signature(&[], Some(&ret));
     assert_eq!(sig.label, "(): User|Admin");
 }
 
 #[test]
 fn build_signature_return_type_scalar_unchanged() {
-    let sig = build_signature(&[], Some("string"));
+    let ret = PhpType::parse("string");
+    let sig = build_signature(&[], Some(&ret));
     assert_eq!(sig.label, "(): string");
 }
 
-// ── shorten_type ────────────────────────────────────────────────
+// ── shorten_type (delegates to crate::hover::shorten_php_type) ──────
 
 #[test]
 fn shorten_plain_scalar() {
-    assert_eq!(shorten_type("int"), "int");
+    let ty = PhpType::parse("int");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "int");
 }
 
 #[test]
 fn shorten_fqn() {
-    assert_eq!(shorten_type("\\App\\Models\\User"), "User");
+    let ty = PhpType::parse("\\App\\Models\\User");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "User");
 }
 
 #[test]
 fn shorten_union() {
-    assert_eq!(shorten_type("\\App\\User|\\App\\Admin"), "User|Admin");
+    let ty = PhpType::parse("\\App\\User|\\App\\Admin");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "User|Admin");
 }
 
 #[test]
 fn shorten_mixed_union() {
-    assert_eq!(shorten_type("string|\\App\\User|null"), "string|User|null");
+    let ty = PhpType::parse("string|\\App\\User|null");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "string|User|null");
 }
 
 #[test]
 fn shorten_generic_param() {
-    assert_eq!(shorten_type("list<\\App\\User>"), "list<User>");
+    let ty = PhpType::parse("list<\\App\\User>");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "list<User>");
 }
 
 #[test]
 fn shorten_generic_multiple_params() {
-    assert_eq!(
-        shorten_type("array<string, \\App\\Models\\User>"),
-        "array<string, User>"
-    );
+    let ty = PhpType::parse("array<string, \\App\\Models\\User>");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "array<string, User>");
 }
 
 #[test]
 fn shorten_nested_generic_union() {
+    let ty = PhpType::parse("Collection<\\App\\User|\\App\\Admin>");
     assert_eq!(
-        shorten_type("Collection<\\App\\User|\\App\\Admin>"),
+        crate::hover::shorten_php_type(&ty),
         "Collection<User|Admin>"
     );
 }
 
 #[test]
 fn shorten_class_string_generic() {
-    assert_eq!(
-        shorten_type("class-string<\\App\\User>"),
-        "class-string<User>"
-    );
+    let ty = PhpType::parse("class-string<\\App\\User>");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "class-string<User>");
 }
 
 #[test]
 fn shorten_no_namespace_unchanged() {
-    assert_eq!(shorten_type("list<User>"), "list<User>");
+    let ty = PhpType::parse("list<User>");
+    assert_eq!(crate::hover::shorten_php_type(&ty), "list<User>");
 }
 
 // ── clamp_active_param ──────────────────────────────────────────

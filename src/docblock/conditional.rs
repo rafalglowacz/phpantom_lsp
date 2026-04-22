@@ -61,6 +61,7 @@ pub fn extract_conditional_return_type_from_info(info: &DocblockInfo) -> Option<
 fn extract_raw_return_content_from_info(info: &DocblockInfo) -> Option<String> {
     let tag = info
         .first_tag_by_kind(TagKind::PhpstanReturn)
+        .or_else(|| info.first_tag_by_kind(TagKind::PsalmReturn))
         .or_else(|| info.first_tag_by_kind(TagKind::Return))?;
 
     let desc = tag.description.trim();
