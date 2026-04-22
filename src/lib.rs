@@ -120,6 +120,7 @@ pub(crate) mod names;
 mod parser;
 pub(crate) mod phar;
 pub mod php_type;
+mod mago;
 mod phpcs;
 mod phpstan;
 mod references;
@@ -492,6 +493,18 @@ pub struct Backend {
     /// The PHPCS worker updates this cache after each successful run
     /// and triggers a re-publish of the affected file.
     pub(crate) phpcs_last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
+    /// Notification handle used to wake the Mago lint worker task.
+    pub(crate) mago_lint_notify: Arc<tokio::sync::Notify>,
+    /// The single file URI that the Mago lint worker should analyse next.
+    pub(crate) mago_lint_pending_uri: Arc<Mutex<Option<String>>>,
+    /// Last-published Mago lint diagnostics per file URI.
+    pub(crate) mago_lint_last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
+    /// Notification handle used to wake the Mago analyze worker task.
+    pub(crate) mago_analyze_notify: Arc<tokio::sync::Notify>,
+    /// The single file URI that the Mago analyze worker should analyse next.
+    pub(crate) mago_analyze_pending_uri: Arc<Mutex<Option<String>>>,
+    /// Last-published Mago analyze diagnostics per file URI.
+    pub(crate) mago_analyze_last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
     /// Per-file `resultId` for pull diagnostics (`textDocument/diagnostic`).
     ///
     /// Maps file URI → monotonically increasing counter.  Bumped whenever
@@ -612,6 +625,12 @@ impl Backend {
             phpcs_notify: Arc::new(tokio::sync::Notify::new()),
             phpcs_pending_uri: Arc::new(Mutex::new(None)),
             phpcs_last_diags: Arc::new(Mutex::new(HashMap::new())),
+            mago_lint_notify: Arc::new(tokio::sync::Notify::new()),
+            mago_lint_pending_uri: Arc::new(Mutex::new(None)),
+            mago_lint_last_diags: Arc::new(Mutex::new(HashMap::new())),
+            mago_analyze_notify: Arc::new(tokio::sync::Notify::new()),
+            mago_analyze_pending_uri: Arc::new(Mutex::new(None)),
+            mago_analyze_last_diags: Arc::new(Mutex::new(HashMap::new())),
             diag_result_ids: Arc::new(Mutex::new(HashMap::new())),
             diag_last_full: Arc::new(Mutex::new(HashMap::new())),
             diag_suppressed: Arc::new(Mutex::new(Vec::new())),
@@ -672,6 +691,12 @@ impl Backend {
             phpcs_notify: Arc::new(tokio::sync::Notify::new()),
             phpcs_pending_uri: Arc::new(Mutex::new(None)),
             phpcs_last_diags: Arc::new(Mutex::new(HashMap::new())),
+            mago_lint_notify: Arc::new(tokio::sync::Notify::new()),
+            mago_lint_pending_uri: Arc::new(Mutex::new(None)),
+            mago_lint_last_diags: Arc::new(Mutex::new(HashMap::new())),
+            mago_analyze_notify: Arc::new(tokio::sync::Notify::new()),
+            mago_analyze_pending_uri: Arc::new(Mutex::new(None)),
+            mago_analyze_last_diags: Arc::new(Mutex::new(HashMap::new())),
             diag_result_ids: Arc::new(Mutex::new(HashMap::new())),
             diag_last_full: Arc::new(Mutex::new(HashMap::new())),
             diag_suppressed: Arc::new(Mutex::new(Vec::new())),
@@ -957,6 +982,12 @@ impl Backend {
             phpcs_notify: Arc::clone(&self.phpcs_notify),
             phpcs_pending_uri: Arc::clone(&self.phpcs_pending_uri),
             phpcs_last_diags: Arc::clone(&self.phpcs_last_diags),
+            mago_lint_notify: Arc::clone(&self.mago_lint_notify),
+            mago_lint_pending_uri: Arc::clone(&self.mago_lint_pending_uri),
+            mago_lint_last_diags: Arc::clone(&self.mago_lint_last_diags),
+            mago_analyze_notify: Arc::clone(&self.mago_analyze_notify),
+            mago_analyze_pending_uri: Arc::clone(&self.mago_analyze_pending_uri),
+            mago_analyze_last_diags: Arc::clone(&self.mago_analyze_last_diags),
             diag_result_ids: Arc::clone(&self.diag_result_ids),
             diag_last_full: Arc::clone(&self.diag_last_full),
             diag_suppressed: Arc::clone(&self.diag_suppressed),

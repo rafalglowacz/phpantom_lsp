@@ -323,6 +323,22 @@ impl LanguageServer for Backend {
             phpcs_backend.phpcs_worker().await;
         });
 
+        // Spawn the Mago lint worker.  Same pattern as PHPCS: dedicated
+        // task, own debounce timer, single pending-URI slot.  Mago lint
+        // is fast (AST-level rules) so it uses the same debounce as PHPCS.
+        let mago_lint_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            mago_lint_backend.mago_lint_worker().await;
+        });
+
+        // Spawn the Mago analyze worker.  Mago analyze is slower
+        // (type-aware) so it follows the PHPStan pattern with a longer
+        // debounce.
+        let mago_analyze_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            mago_analyze_backend.mago_analyze_worker().await;
+        });
+
         // ── Dynamic capability registration ─────────────────────────
         // lsp-types 0.94 does not expose a `type_hierarchy_provider`
         // field on `ServerCapabilities`, so we register the capability
@@ -349,6 +365,8 @@ impl LanguageServer for Backend {
         self.diag_notify.notify_one();
         self.phpstan_notify.notify_one();
         self.phpcs_notify.notify_one();
+        self.mago_lint_notify.notify_one();
+        self.mago_analyze_notify.notify_one();
         Ok(())
     }
 
