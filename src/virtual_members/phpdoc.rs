@@ -730,14 +730,45 @@ fn build_mixin_substitution_map(
         None => return active_subs.clone(),
     };
 
+    // Check whether the parent has any @mixin whose name is itself a
+    // template parameter (e.g. `@mixin TNode` on a class with
+    // `@template TNode`).  When this is the case and a substitution
+    // still resolves to a raw template parameter name on the child
+    // class, we fall back to the template bound.  This handles the
+    // PHPMD pattern where `AbstractNode<TNode>` has `@mixin TNode`
+    // and `ASTNode extends AbstractNode<TNode>` — without the
+    // fallback, `TNode` stays as an unresolvable class name.
+    //
+    // We do NOT apply this fallback when the mixin is a concrete
+    // class with template arguments (e.g. `@mixin Builder<TModel>`),
+    // because the template param may be resolved later by a concrete
+    // caller through the generic substitution chain.
+    let parent_has_template_param_mixin = parent.mixins.iter().any(|m| {
+        parent
+            .template_params
+            .iter()
+            .any(|t| t.as_str() == m.as_str())
+    });
+
     let mut map = HashMap::new();
     for (i, param_name) in parent.template_params.iter().enumerate() {
         if let Some(arg) = type_args.get(i) {
-            let resolved = if active_subs.is_empty() {
+            let mut resolved = if active_subs.is_empty() {
                 arg.clone()
             } else {
                 arg.substitute(active_subs)
             };
+
+            // Fall back to the template bound only when the parent
+            // uses the template param directly as a mixin name.
+            if parent_has_template_param_mixin
+                && let Some(name) = resolved.base_name()
+                && let Some(tp) = current.template_params.iter().find(|t| t.as_str() == name)
+                && let Some(bound) = current.template_param_bounds.get(tp)
+            {
+                resolved = bound.clone();
+            }
+
             map.insert(param_name.to_string(), resolved);
         }
     }

@@ -743,6 +743,33 @@ class ForeachArrayAccessDemo
     }
 }
 
+// ── Foreach By-Reference ────────────────────────────────────────────────────
+
+class ForeachByReferenceDemo
+{
+    public function demo(): void
+    {
+        /** @var list<Pen> $pens */
+        $pens = getUnknownValue();
+
+        // By-reference foreach: $pen resolves to element type (Pen)
+        // and is not flagged as undefined or unused.
+        foreach ($pens as &$pen) {
+            $pen->write();                        // Pen from list<Pen>
+            $pen = new Pen();                     // reassignment through reference
+        }
+        unset($pen);
+
+        // Key-value with by-reference value
+        /** @var array<string, Pen> $named */
+        $named = getUnknownValue();
+        foreach ($named as $key => &$tool) {
+            $tool->color();                       // Pen from array<string, Pen>
+        }
+        unset($tool);
+    }
+}
+
 
 // ── Property Array Access (generic annotations) ────────────────────────────
 
@@ -3629,6 +3656,43 @@ function globalKeywordDemo(): void {
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 // ┃  SCAFFOLDING — Supporting definitions below this line.              ┃
 
+// ── Template-param @mixin scaffolding ───────────────────────────────────────
+interface ScaffoldingAstNodeInterface {
+    public function getStartColumn(): int;
+    public function getEndColumn(): int;
+}
+
+/**
+ * @template-covariant TNode of ScaffoldingAstNodeInterface
+ * @mixin TNode
+ */
+abstract class ScaffoldingAbstractAstNode {
+    /** @return string */
+    public function getMetric(): string { return ''; }
+    /** @return mixed */
+    public function __call(string $name, array $arguments): mixed {
+        return match ($name) {
+            'getStartColumn', 'getEndColumn' => 0,
+            default => null,
+        };
+    }
+}
+
+/**
+ * @extends ScaffoldingAbstractAstNode<ScaffoldingAstNodeInterface>
+ */
+class ScaffoldingConcreteAstNode extends ScaffoldingAbstractAstNode {}
+
+// ── class-string<T> instantiation scaffolding ───────────────────────────────
+class ScaffoldingClassStringFactory {
+    /**
+     * @template T of object
+     * @param class-string<T> $class
+     * @return T
+     */
+    public static function create(string $class): object { return new $class(); }
+}
+
 // ── Attribute Completion scaffolding ────────────────────────────────────────
 #[\Attribute(\Attribute::TARGET_CLASS)]
 class ClassOnlyAttr {}
@@ -6272,6 +6336,15 @@ function runDemoAssertions(): void
     $orderLine = new ScaffoldingOrderLine();
     $productRel = $orderLine->product();
     assert($productRel instanceof ScaffoldingMixinBelongsTo, 'OrderLine::product() must return ScaffoldingMixinBelongsTo');
+
+    // ── @mixin with template parameter ──────────────────────────────────
+    $tplMixinNode = new ScaffoldingConcreteAstNode();
+    $col = $tplMixinNode->getStartColumn();
+    assert(is_int($col), 'ConcreteAstNode (via @mixin TNode bound) getStartColumn() must return int');
+
+    // ── new $var() with class-string<T> ─────────────────────────────────
+    $penFromClassString = ScaffoldingClassStringFactory::create(Pen::class);
+    assert($penFromClassString instanceof Pen, 'ClassStringFactory::create(Pen::class) must return Pen');
 
     // ── Inherited docblock type propagation ─────────────────────────────
     $iHolder = new ScaffoldingConcreteHolder();

@@ -539,3 +539,5 @@ it should:
 - Phpactor: `GlobbedConstantUnionType`.
 
 
+
+

@@ -5110,20 +5110,8 @@ fn process_foreach<'b>(foreach: &'b Foreach<'b>, scope: &mut ScopeState, ctx: &F
     //   /** @var Mandate $mandate */
     //   foreach ($mandates as $mandate) { ... }
     let value_var_name = match &foreach.target {
-        ForeachTarget::Value(val) => {
-            if let Expression::Variable(Variable::Direct(dv)) = val.value {
-                Some(dv.name.to_string())
-            } else {
-                None
-            }
-        }
-        ForeachTarget::KeyValue(kv) => {
-            if let Expression::Variable(Variable::Direct(dv)) = kv.value {
-                Some(dv.name.to_string())
-            } else {
-                None
-            }
-        }
+        ForeachTarget::Value(val) => extract_foreach_var_name(val.value),
+        ForeachTarget::KeyValue(kv) => extract_foreach_var_name(kv.value),
     };
     if let Some(ref vn) = value_var_name
         && scope.get(vn).is_empty()
@@ -5387,6 +5375,14 @@ fn bind_foreach_value<'b>(
     scope: &mut ScopeState,
     ctx: &ForwardWalkCtx<'_>,
 ) {
+    // Unwrap `&$value` (by-reference foreach) to get the inner variable.
+    let value_expr = if let Expression::UnaryPrefix(up) = value_expr
+        && matches!(up.operator, UnaryPrefixOperator::Reference(_))
+    {
+        up.operand
+    } else {
+        value_expr
+    };
     if let Expression::Variable(Variable::Direct(dv)) = value_expr {
         let var_name = dv.name.to_string();
         if let Some(it) = iter_type {
@@ -5504,6 +5500,23 @@ fn bind_foreach_value<'b>(
     } else if let Expression::Array(_) | Expression::List(_) = value_expr {
         // Array/list destructuring in foreach: `foreach ($items as [$a, $b])`
         // For now, skip — this is a complex pattern.
+    }
+}
+
+/// Extract the variable name from a foreach value expression, unwrapping
+/// a leading `&` (by-reference) if present.
+fn extract_foreach_var_name(expr: &Expression<'_>) -> Option<String> {
+    let inner = if let Expression::UnaryPrefix(up) = expr
+        && matches!(up.operator, UnaryPrefixOperator::Reference(_))
+    {
+        up.operand
+    } else {
+        expr
+    };
+    if let Expression::Variable(Variable::Direct(dv)) = inner {
+        Some(dv.name.to_string())
+    } else {
+        None
     }
 }
 
@@ -6974,6 +6987,53 @@ fn strip_null_from_scope(var_name: &str, scope: &mut ScopeState) {
     }
 }
 
+/// Strip both `null` and `false` from a variable's type in the scope.
+///
+/// Used after falsy guard clauses (`if (!$var) { throw; }`) where the
+/// variable is known to be truthy (non-null and non-false) after the guard.
+fn strip_falsy_from_scope(var_name: &str, scope: &mut ScopeState) {
+    let types = scope.get(var_name).to_vec();
+    if types.is_empty() {
+        return;
+    }
+
+    let is_false = |t: &PhpType| matches!(t, PhpType::Named(n) if n == "false");
+
+    let stripped: Vec<ResolvedType> = types
+        .into_iter()
+        .filter_map(|mut rt| {
+            // Strip null
+            let ty = match rt.type_string.non_null_type() {
+                Some(non_null) => non_null,
+                None if rt.type_string == PhpType::null() => return None,
+                None => rt.type_string.clone(),
+            };
+            // Strip false
+            if is_false(&ty) {
+                return None;
+            }
+            let ty = match &ty {
+                PhpType::Union(members) => {
+                    let non_false: Vec<PhpType> =
+                        members.iter().filter(|m| !is_false(m)).cloned().collect();
+                    match non_false.len() {
+                        0 => return None,
+                        1 => non_false.into_iter().next().unwrap(),
+                        _ => PhpType::Union(non_false),
+                    }
+                }
+                _ => ty,
+            };
+            rt.type_string = ty;
+            Some(rt)
+        })
+        .collect();
+
+    if !stripped.is_empty() {
+        scope.set(var_name.to_string(), stripped);
+    }
+}
+
 /// Apply guard-clause null narrowing.
 fn apply_guard_clause_null_narrowing<'b>(
     if_stmt: &'b If<'b>,
@@ -6986,7 +7046,7 @@ fn apply_guard_clause_null_narrowing<'b>(
         strip_null_from_scope(&var_name, scope);
     }
     if let Some(var_name) = extract_falsy_check_var(if_stmt.condition) {
-        strip_null_from_scope(&var_name, scope);
+        strip_falsy_from_scope(&var_name, scope);
     }
     // `if ($x !== null)` with return doesn't narrow after — the
     // remaining code is the null path.  This is handled by the

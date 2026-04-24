@@ -1857,6 +1857,36 @@ function test(array $items): void {
     }
 
     #[test]
+    fn no_diagnostic_for_foreach_by_reference_binding() {
+        let diags = collect(
+            r#"<?php
+function test(): void {
+    $values = [1, 2, 3];
+    foreach ($values as &$value) {
+        $value = 4;
+    }
+}
+"#,
+        );
+        assert!(diags.is_empty(), "Got: {:?}", diags);
+    }
+
+    #[test]
+    fn no_diagnostic_for_foreach_by_reference_key_value_binding() {
+        let diags = collect(
+            r#"<?php
+function test(array $items): void {
+    foreach ($items as $key => &$value) {
+        echo $key;
+        $value = 'modified';
+    }
+}
+"#,
+        );
+        assert!(diags.is_empty(), "Got: {:?}", diags);
+    }
+
+    #[test]
     fn no_diagnostic_for_function_param_used_in_catch() {
         let diags = collect(
             r#"<?php

@@ -709,7 +709,17 @@ fn walk_statement(stmt: &Statement<'_>, collector: &mut Collector<'_>) {
             if let Some(key_expr) = foreach.target.key() {
                 walk_expression_as_write(key_expr, collector);
             }
-            walk_expression_as_write(foreach.target.value(), collector);
+            let value_expr = foreach.target.value();
+            if value_expr.is_reference() {
+                // By-reference foreach (`&$value`): the binding is
+                // semantically "used" because writes through the
+                // reference mutate the original array.  Record as
+                // ReadWrite so the unused-variable diagnostic does
+                // not fire on the foreach variable.
+                walk_expression_as_readwrite(value_expr, collector);
+            } else {
+                walk_expression_as_write(value_expr, collector);
+            }
 
             match &foreach.body {
                 ForeachBody::Statement(inner) => {
@@ -1152,6 +1162,8 @@ fn walk_expression(expr: &Expression<'_>, collector: &mut Collector<'_>) {
 
 /// Walk an expression that appears in a write position (LHS of
 /// assignment, foreach binding, unset argument, etc.).
+///
+/// See also [`walk_expression_as_readwrite`] for by-reference foreach bindings.
 fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector<'_>) {
     match expr {
         Expression::Variable(Variable::Direct(dv)) => {
@@ -1232,9 +1244,31 @@ fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector<'_>
                 Variable::Nested(nv) => walk_variable_read(nv.variable, collector),
             }
         }
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            // `&$value` in foreach — the inner variable is being written.
+            walk_expression_as_write(up.operand, collector);
+        }
         _ => {
             // For anything else, walk as read.
             walk_expression(expr, collector);
+        }
+    }
+}
+
+/// Walk an expression that is being both read and written (e.g. a
+/// by-reference foreach binding like `&$value`).
+fn walk_expression_as_readwrite(expr: &Expression<'_>, collector: &mut Collector<'_>) {
+    match expr {
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            walk_expression_as_readwrite(up.operand, collector);
+        }
+        Expression::Variable(Variable::Direct(dv)) => {
+            let name = dv.name.to_string();
+            collector.push_access(name, dv.span().start.offset, AccessKind::ReadWrite);
+        }
+        _ => {
+            // Fallback: treat as a plain write.
+            walk_expression_as_write(expr, collector);
         }
     }
 }

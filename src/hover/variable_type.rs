@@ -605,20 +605,8 @@ fn find_type_in_foreach(
 
     // Determine if this foreach's value or key variable matches var_name
     let is_value_var = match &foreach.target {
-        ForeachTarget::Value(val) => {
-            if let Expression::Variable(Variable::Direct(dv)) = val.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
-        ForeachTarget::KeyValue(kv) => {
-            if let Expression::Variable(Variable::Direct(dv)) = kv.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
+        ForeachTarget::Value(val) => unwrap_foreach_ref_var(val.value, var_name),
+        ForeachTarget::KeyValue(kv) => unwrap_foreach_ref_var(kv.value, var_name),
     };
 
     let is_key_var = match &foreach.target {
@@ -694,6 +682,22 @@ fn extract_foreach_expression_type(
     }
 
     docblock::find_iterable_raw_type_in_source(content, foreach_offset, expr_text)
+}
+
+/// Check whether a foreach value expression (possibly wrapped in `&`)
+/// is a direct variable matching `var_name`.
+fn unwrap_foreach_ref_var(expr: &Expression<'_>, var_name: &str) -> bool {
+    let inner = match expr {
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            up.operand
+        }
+        other => other,
+    };
+    if let Expression::Variable(Variable::Direct(dv)) = inner {
+        dv.name == var_name
+    } else {
+        false
+    }
 }
 
 // ─── Class-resolution-based foreach type extraction ─────────────────────────
@@ -894,20 +898,8 @@ fn resolve_foreach_binding_via_class(
 
     // Check if the cursor variable matches the foreach value or key.
     let is_value_var = match &foreach.target {
-        ForeachTarget::Value(val) => {
-            if let Expression::Variable(Variable::Direct(dv)) = val.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
-        ForeachTarget::KeyValue(kv) => {
-            if let Expression::Variable(Variable::Direct(dv)) = kv.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
+        ForeachTarget::Value(val) => unwrap_foreach_ref_var(val.value, var_name),
+        ForeachTarget::KeyValue(kv) => unwrap_foreach_ref_var(kv.value, var_name),
     };
 
     let is_key_var = match &foreach.target {

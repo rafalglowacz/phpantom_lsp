@@ -8209,3 +8209,84 @@ async fn test_array_iterator_current_via_variable_assignment() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+#[tokio::test]
+async fn test_completion_new_variable_with_class_string_param() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///new_class_string.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Animal {\n",
+        "    public function speak(): string { return ''; }\n",
+        "    public function getName(): string { return ''; }\n",
+        "}\n",
+        "class Dog extends Animal {\n",
+        "    public function fetch(): void {}\n",
+        "}\n",
+        "class Factory {\n",
+        "    /**\n",
+        "     * @template T of Animal\n",
+        "     * @param class-string<T> $class\n",
+        "     * @return T\n",
+        "     */\n",
+        "    public function create(string $class): object {\n",
+        "        $instance = new $class();\n",
+        "        $instance->\n",
+        "        return $instance;\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 16,
+                    character: 21,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(result.is_some(), "Completion should return results");
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+
+            // $class is class-string<T> where T of Animal, so new $class()
+            // should resolve to Animal (the bound), giving access to its methods.
+            assert!(
+                method_names.contains(&"speak"),
+                "Should include 'speak' from Animal (class-string bound), got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getName"),
+                "Should include 'getName' from Animal (class-string bound), got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

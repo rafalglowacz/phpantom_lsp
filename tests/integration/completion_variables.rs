@@ -21291,3 +21291,80 @@ async fn test_completion_cross_parameter_reference_in_chain() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+#[tokio::test]
+async fn test_completion_falsy_narrowing_after_throw_guard() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///falsy_guard.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class XmlNode {\n",
+        "    public function children(): array { return []; }\n",
+        "    public function getName(): string { return ''; }\n",
+        "}\n",
+        "class Factory {\n",
+        "    /** @return XmlNode|false */\n",
+        "    public static function load(string $s) { return new XmlNode(); }\n",
+        "    function test(): void {\n",
+        "        $xml = self::load('<root/>');\n",
+        "        if (!$xml) {\n",
+        "            throw new \\RuntimeException('fail');\n",
+        "        }\n",
+        "        $xml->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 13,
+                    character: 14,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(result.is_some(), "Completion should return results");
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+
+            // After `if (!$xml) { throw; }`, $xml should be narrowed
+            // to XmlNode (false removed), so its methods are available.
+            assert!(
+                method_names.contains(&"children"),
+                "Should include 'children' from XmlNode after falsy guard, got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getName"),
+                "Should include 'getName' from XmlNode after falsy guard, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

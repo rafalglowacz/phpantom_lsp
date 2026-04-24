@@ -768,9 +768,43 @@ fn resolve_rhs_instantiation(
         if !resolved.is_empty() {
             return ResolvedType::from_classes(resolved.into_iter().map(Arc::new).collect());
         }
+
+        // Fallback: resolve the variable's type and extract the inner
+        // type from `class-string<T>`.  This handles parameters typed
+        // as `@param class-string<Foo> $var` where there is no
+        // `$var = Foo::class` assignment.
+        let var_types = resolve_var_types(&var_name, ctx, ctx.cursor_offset);
+        let class_name = extract_class_string_inner(&var_types);
+        if let Some(name) = class_name
+            && let Some(cls) = (ctx.class_loader)(&name)
+        {
+            return ResolvedType::from_classes(vec![cls]);
+        }
     }
 
     vec![]
+}
+
+/// Extract the inner class name from a `class-string<T>` type in a list
+/// of resolved types.  Handles `class-string<T>`, `?class-string<T>`,
+/// and unions containing `class-string<T>`.
+fn extract_class_string_inner(resolved: &[ResolvedType]) -> Option<String> {
+    resolved.iter().find_map(|rt| match &rt.type_string {
+        PhpType::ClassString(Some(inner)) => inner.base_name().map(|s| s.to_string()),
+        PhpType::Nullable(inner) => match inner.as_ref() {
+            PhpType::ClassString(Some(cs_inner)) => cs_inner.base_name().map(|s| s.to_string()),
+            _ => None,
+        },
+        PhpType::Union(members) => members.iter().find_map(|m| match m {
+            PhpType::ClassString(Some(inner)) => inner.base_name().map(|s| s.to_string()),
+            PhpType::Nullable(inner) => match inner.as_ref() {
+                PhpType::ClassString(Some(cs_inner)) => cs_inner.base_name().map(|s| s.to_string()),
+                _ => None,
+            },
+            _ => None,
+        }),
+        _ => None,
+    })
 }
 
 /// Build a template substitution map from constructor arguments.

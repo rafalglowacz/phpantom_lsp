@@ -711,6 +711,26 @@ function foo($items) {
     }
 
     #[test]
+    fn no_diagnostic_for_foreach_by_reference_binding() {
+        let diags = collect(
+            r#"<?php
+function test() {
+    $values = [1, 2, 3];
+    foreach ($values as &$value) {
+        $value = 4;
+    }
+    var_dump($values);
+}
+"#,
+        );
+        assert!(
+            !diags.iter().any(|d| d.message.contains("$value")),
+            "Got unexpected diagnostic for $value: {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn no_diagnostic_for_underscore_foreach_key() {
         let diags = collect(
             r#"<?php

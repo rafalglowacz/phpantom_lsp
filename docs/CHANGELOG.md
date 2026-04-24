@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Generics.** `@mixin` tags that reference a template parameter (e.g. `@template T of Node` combined with `@mixin T`) now resolve through the template bound, enabling completion and diagnostics for mixin-forwarded methods on generic wrapper classes.
+- **Generics.** `new $var()` where `$var` is typed as `class-string<T>` now resolves to `T`, enabling completion on dynamically instantiated objects.
 - **Return type inference from method bodies.** Methods without a declared return type or `@return` docblock now have their return type inferred by scanning the method body for `return` statements, improving completion, hover, and diagnostics for untyped code.
 - **`array_reduce`, `array_sum`, and `array_product` return type inference.** `array_reduce()` resolves to the type of its initial value argument (3rd parameter), enabling completion on the result. `array_sum()` and `array_product()` resolve to `int|float`.
 - **Namespace renaming.** Renaming a namespace segment (in a `namespace` declaration or `use` statement) updates all namespace declarations, use statements, group use declarations, and fully-qualified name references across the workspace. When a PSR-4 autoload mapping exists in `composer.json`, the corresponding directory is moved via `RenameFile` resource operations so the filesystem stays consistent with the new namespace.
@@ -33,7 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Type narrowing.** Falsy guard clauses (`if (!$var) { throw; }`) now strip both `false` and `null` from the variable's type, not just `null`.
+- **Name resolution.** Template parameter bounds (`@template T of SomeClass`) are now resolved through use statements to FQNs during parsing, fixing cross-file mixin and generic resolution that previously failed on aliased type names.
 - **Array shape key completion through conditional branches.** When an array gains a key inside an `if` block (e.g. `$options['config'] = new Config()`), completion on that key now works after the branch. Previously the union of shapes produced by branch merging was not searched for matching keys.
+- **Foreach by-reference binding.** `foreach ($array as &$value)` no longer triggers false-positive undefined variable, unused variable, or untyped variable diagnostics. The by-reference value variable is now correctly recognized as a write, treated as semantically used, and resolves to the iterable's element type for completion and hover.
 
 - **Analyzer and LSP no longer hang on files with deeply nested loops.** Files with multiple levels of foreach/while/for inside if-branches caused exponential blowup in the forward walker's two-pass loop strategy. A unified loop-depth guard now bounds re-walks regardless of code path (diagnostics, completion, hover), preventing hangs on all previously stuck files across three test projects. The `WALK_DEPTH`, `PROCESS_DEPTH`, and `IN_ARRAY_KEY_ASSIGN` thread-local guards have been removed entirely now that the root causes are fixed structurally.
 - **Same-name class in a different namespace no longer shadows inherited members.** When a file defined `Test\Exception` alongside `Test\MyException extends \Exception`, the parent resolution incorrectly picked up `Test\Exception` instead of the global `\Exception`, causing false "method not found" diagnostics on inherited methods like `getMessage()`.

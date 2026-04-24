@@ -786,6 +786,21 @@ impl Backend {
                 &tpl_params,
             );
 
+            // Resolve template parameter bounds (`@template T of Bound`)
+            // so that short names like `PDependNode` become FQNs like
+            // `PDepend\Source\AST\ASTNode`.  Without this, mixin
+            // resolution that falls back to bounds gets unresolvable
+            // short names.
+            {
+                let bound_resolver = Self::build_type_resolver(use_map, namespace, &tpl_params);
+                for bound in class.template_param_bounds.values_mut() {
+                    let resolved = bound.resolve_names(&bound_resolver);
+                    if resolved != *bound {
+                        *bound = resolved;
+                    }
+                }
+            }
+
             // Resolve class-like names in method return types and property
             // type hints so that cross-file resolution works correctly.
             // For example, if a method returns `Country` and the file has
