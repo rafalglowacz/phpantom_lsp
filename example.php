@@ -456,6 +456,24 @@ class ImplementsGenericDemo
 }
 
 
+// ── Built-in Generic Collections (ArrayIterator, SplFixedArray, etc.) ───────
+
+class BuiltinGenericCollectionDemo
+{
+    /** @return \ArrayIterator<int, Pen> */
+    public function getPens(): \ArrayIterator { return new \ArrayIterator([new Pen()]); }
+
+    public function demo(): void
+    {
+        $pen = $this->getPens()->current();
+        $pen->write();                            // ArrayIterator<int, Pen> → current() returns Pen
+
+        // Direct chain also works:
+        $this->getPens()->current()->write();     // same resolution through the chain
+    }
+}
+
+
 // ── Inherited Docblock Types ────────────────────────────────────────────────
 
 class InheritedDocblockDemo
@@ -6421,6 +6439,11 @@ function runDemoAssertions(): void
     global $globalPen;
     assert($globalPen instanceof Pen, '$globalPen must be Pen at top level');
     globalKeywordDemo();
+
+    // ── Built-in generic collections ────────────────────────────────────
+    $demo = new BuiltinGenericCollectionDemo();
+    $pen = $demo->getPens()->current();
+    assert($pen instanceof Pen, 'ArrayIterator<int, Pen>::current() must return Pen');
 
     echo "All assertions passed.\n";
 }

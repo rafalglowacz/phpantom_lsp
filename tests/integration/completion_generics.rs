@@ -1,4 +1,6 @@
-use crate::common::{create_psr4_workspace, create_test_backend};
+use crate::common::{
+    create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs,
+};
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -8043,6 +8045,164 @@ async fn test_reduce_two_template_params_union_callable() {
             assert!(
                 method_names.contains(&"getValue"),
                 "TReduceReturnType should resolve to Decimal via closure return type, showing 'getValue', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When a method returns `ArrayIterator<int, Rule>`, calling `->current()`
+/// on it should resolve to `Rule` via the class stub patch that adds
+/// `@template TKey, TValue` and `@implements SeekableIterator<TKey, TValue>`
+/// to `ArrayIterator`.
+///
+/// The resolution chain is:
+/// 1. `getRules()` return type `ArrayIterator<int, Rule>` loads the stub
+/// 2. Stub patch adds `@template TKey of array-key`, `@template TValue`
+/// 3. `apply_generic_args` substitutes `TKey=int`, `TValue=Rule`
+/// 4. Interface merge via `@implements SeekableIterator<TKey, TValue>` →
+///    `SeekableIterator<int, Rule>` → `Iterator<int, Rule>`
+/// 5. `Iterator::current()` returns `TValue` → substituted to `Rule`
+///
+/// This test uses a direct method chain (`$ruleSet->getRules()->current()->`)
+/// to avoid variable-resolution complexity.
+#[tokio::test]
+async fn test_array_iterator_current_resolves_generic_value_type() {
+    let backend = create_test_backend_with_full_stubs();
+
+    let uri = Url::parse("file:///array_iterator_generics.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Rule {\n",
+        "    public function getPriority(): int { return 0; }\n",
+        "    public function getName(): string { return ''; }\n",
+        "}\n",
+        "\n",
+        "class RuleSet {\n",
+        "    /** @return \\ArrayIterator<int, Rule> */\n",
+        "    public function getRules(): \\ArrayIterator { return new \\ArrayIterator(); }\n",
+        "}\n",
+        "\n",
+        "function test(RuleSet $ruleSet) {\n",
+        "    $ruleSet->getRules()->current()->\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor is after `->` on the chain line (line 12, end of `->`)
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 42,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getPriority"),
+                "ArrayIterator<int, Rule>::current() should resolve to Rule, showing 'getPriority', got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getName"),
+                "ArrayIterator<int, Rule>::current() should resolve to Rule, showing 'getName', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Same as above but verifies variable assignment: `$rule = ...->current(); $rule->`
+#[tokio::test]
+async fn test_array_iterator_current_via_variable_assignment() {
+    let backend = create_test_backend_with_full_stubs();
+
+    let uri = Url::parse("file:///array_iterator_var.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Priority {\n",
+        "    public function getLevel(): int { return 0; }\n",
+        "}\n",
+        "\n",
+        "class Container {\n",
+        "    /** @return \\ArrayIterator<int, Priority> */\n",
+        "    public function items(): \\ArrayIterator { return new \\ArrayIterator(); }\n",
+        "}\n",
+        "\n",
+        "function test(Container $c) {\n",
+        "    $item = $c->items()->current();\n",
+        "    $item->\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor is after `$item->` (line 12, character 11)
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 11,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $item->"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getLevel"),
+                "ArrayIterator<int, Priority>::current() should resolve to Priority via variable, showing 'getLevel', got: {:?}",
                 method_names
             );
         }

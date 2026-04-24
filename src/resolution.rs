@@ -383,6 +383,16 @@ impl Backend {
             }
         }
 
+        // Apply class stub patches for phpstorm-stubs deficiencies
+        // (e.g. ArrayIterator missing @template parameters).
+        // Only patch classes loaded from stub URIs to avoid touching
+        // user code.
+        if uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://") {
+            for class in &mut classes {
+                crate::stub_patches::apply_class_stub_patches(class);
+            }
+        }
+
         // Wrap each ClassInfo in Arc before inserting into the maps.
         let arc_classes: Vec<Arc<ClassInfo>> = classes.into_iter().map(Arc::new).collect();
 

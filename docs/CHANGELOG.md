@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`global` keyword variable resolution.** Variables imported with `global $var` inside function bodies now resolve to their top-level type, enabling completion, hover, and go-to-definition on globally imported variables.
 - **Binary expression type inference.** Hover and variable resolution now show result types for all binary operators: arithmetic (`int|float`), concatenation (`string`), comparison and logical (`bool`), bitwise (`int`), modulo (`int`), and the `+` operator distinguishes array union (`array`) from numeric addition (`int|float`) based on operand types.
+- **Generics.** `ArrayIterator`, `ArrayObject`, `SplDoublyLinkedList`, `SplQueue`, `SplStack`, `SplPriorityQueue`, `SplFixedArray`, `SplObjectStorage`, and `WeakMap` now carry `@template` parameters and `@implements` generics via a class stub patch system. Calling `->current()` or `->key()` on these generic collections resolves to the concrete type argument (e.g. `ArrayIterator<int, Rule>::current()` returns `Rule`).
 
 ### Fixed
 

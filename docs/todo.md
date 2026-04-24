@@ -23,10 +23,14 @@ within the same impact tier.
 
 ## Sprint 5 — Polish for office adoption
 
-| #   | Item                                                                             | Impact | Effort |
-| --- | -------------------------------------------------------------------------------- | ------ | ------ |
-| D10 | [PHPMD diagnostic proxy](todo/diagnostics.md#d10-phpmd-diagnostic-proxy)         | Low    | Medium |
-|     | **Release 0.8.0**                                                                |        |        |
+| #   | Item                                                                                                                    | Impact      | Effort |
+| --- | ----------------------------------------------------------------------------------------------------------------------- | ----------- | ------ |
+| T27 | [`@mixin` with template parameter not resolved](todo/type-inference.md#t27-mixin-with-template-parameter-not-resolved)  | Medium      | Medium |
+| T29 | [`new $className()` with `class-string<T>`](todo/type-inference.md#t29-new-classname-with-class-stringt-inference)      | Medium      | Medium |
+| T30 | [Falsy narrowing after throw guard](todo/type-inference.md#t30-falsy-narrowing-after-throw-guard)                       | Medium      | Low    |
+| T31 | [Foreach over nested generic array property](todo/type-inference.md#t31-foreach-over-nested-generic-array-property)     | Low-Medium  | Low    |
+| D10 | [PHPMD diagnostic proxy](todo/diagnostics.md#d10-phpmd-diagnostic-proxy)                                                | Low         | Medium |
+|     | **Release 0.8.0**                                                                                                       |             |        |
 
 > **Note:** F1 (Workspace symbol search), F2 (Document symbols), A8
 > (Implement interface methods), A9 (Auto import), D1 (Unknown class
