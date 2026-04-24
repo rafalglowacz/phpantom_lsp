@@ -3422,6 +3422,32 @@ class ConditionalLoopShapeDemo
 }
 
 
+// ── Conditional Shape Key Completion ────────────────────────────────────────
+// When an array shape gains a key inside an if-block, completion resolves
+// through the union of shapes produced by branch merging.
+
+class ConditionalShapeKeyDemo
+{
+    public function demo(?Pen $pen): void
+    {
+        // Base shape with a known key
+        $options = [
+            'name' => 'default',
+        ];
+
+        // Conditionally add a key with an object value
+        if ($pen !== null) {
+            $options['tool'] = $pen;
+        }
+
+        // After the if-block, $options is a union of shapes:
+        //   array{name: string} | array{name: string, tool: Pen}
+        // Completion on the conditionally-added key resolves to Pen.
+        $options['tool']->write();        // Pen method via conditional shape union
+    }
+}
+
+
 // ── Invalid Class-Like Kind Diagnostics ─────────────────────────────────────
 // PHPantom flags class-like names used in positions where their kind is
 // guaranteed to fail at runtime.  Open demo() and look for Error/Warning
@@ -6338,6 +6364,12 @@ function runDemoAssertions(): void
     }
     $labFound = $labIndexed['blue'] ?? null;
     assert($labFound instanceof Pen, 'Null-coalesce on variable-key array must resolve to Pen');
+
+    // ── Conditional shape key addition ──────────────────────────────────
+    $cskOptions = ['name' => 'default'];
+    $cskPen = new Pen('blue');
+    $cskOptions['tool'] = $cskPen;
+    assert($cskOptions['tool'] instanceof Pen, 'Conditional shape key must resolve to Pen');
 
     // ── Conditional loop shape (keyed assignment in if/else) ────────────
     $shapePens = [new Pen('red'), new Pen('blue'), new Pen('red')];

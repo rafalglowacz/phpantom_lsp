@@ -1,6 +1,5 @@
 // test: unknown key assignment tracks value type
 // feature: completion
-// ignore: Unknown key array assignment type tracking is not yet implemented
 // Adapted from phpactor assignment/unknown_key.test
 // expect: getName(
 ---

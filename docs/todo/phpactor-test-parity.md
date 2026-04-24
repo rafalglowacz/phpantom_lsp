@@ -27,26 +27,6 @@ completeness so we don't duplicate work.
 
 ---
 
-## 8. Array mutation tracking (remaining scenarios)
-
-Basic `$arr[] = expr` push tracking works (see
-`assignment/array_push_object.fixture`,
-`assignment/array_push_string.fixture`,
-`assignment/array_push_in_foreach.fixture`). These more advanced
-scenarios from phpactor are not yet covered:
-
-| Scenario | phpactor ref |
-|----------|-------------|
-| Conditional array key addition → union of shapes | `assignment/array_2.test` |
-| Unknown key assignment → `array<<missing>, T>` | `assignment/unknown_key.test` |
-
-**Effort: Medium** — these require shape-level array tracking
-beyond simple push operations. Ignored fixtures created at
-`assignment/array_conditional_shape.fixture` and
-`assignment/array_unknown_key.fixture`.
-
----
-
 ## 10. Variable-variable (`${$bar}`) resolution
 
 phpactor tests `${$bar}` resolving to the type of the inner
@@ -107,12 +87,6 @@ Fixtures ported at type level:
 | # | Item | phpactor ref |
 |---|------|-------------|
 | 10 | Variable-variable `${$bar}` | `variable/braced_expression.test` |
-
-### Medium effort (new features needed)
-
-| # | Item | phpactor ref |
-|---|------|-------------|
-| 8 | Array mutation tracking (conditional/unknown key) | `assignment/array_2.test`, `assignment/unknown_key.test` |
 
 ### Low priority
 

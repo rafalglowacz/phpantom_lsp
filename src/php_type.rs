@@ -1331,6 +1331,7 @@ impl PhpType {
                 None
             }
             PhpType::Nullable(inner) => inner.shape_value_type(key),
+            PhpType::Union(members) => members.iter().find_map(|m| m.shape_value_type(key)),
             _ => None,
         }
     }
@@ -4592,6 +4593,20 @@ mod tests {
     fn shape_value_type_nullable() {
         let ty = PhpType::parse("?array{name: string}");
         assert_eq!(ty.shape_value_type("name"), Some(&PhpType::string()));
+    }
+
+    #[test]
+    fn shape_value_type_union_of_shapes() {
+        // Union where only one member has the key (conditional shape addition).
+        let ty = PhpType::parse("array{name: string}|array{name: string, config: Config}");
+        assert_eq!(
+            ty.shape_value_type("config"),
+            Some(&PhpType::Named("Config".to_owned()))
+        );
+        // Key present in both members returns the first match.
+        assert_eq!(ty.shape_value_type("name"), Some(&PhpType::string()));
+        // Key absent from all members.
+        assert_eq!(ty.shape_value_type("missing"), None);
     }
 
     #[test]

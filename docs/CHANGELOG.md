@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Array shape key completion through conditional branches.** When an array gains a key inside an `if` block (e.g. `$options['config'] = new Config()`), completion on that key now works after the branch. Previously the union of shapes produced by branch merging was not searched for matching keys.
+
 - **Analyzer and LSP no longer hang on files with deeply nested loops.** Files with multiple levels of foreach/while/for inside if-branches caused exponential blowup in the forward walker's two-pass loop strategy. A unified loop-depth guard now bounds re-walks regardless of code path (diagnostics, completion, hover), preventing hangs on all previously stuck files across three test projects. The `WALK_DEPTH`, `PROCESS_DEPTH`, and `IN_ARRAY_KEY_ASSIGN` thread-local guards have been removed entirely now that the root causes are fixed structurally.
 - **Same-name class in a different namespace no longer shadows inherited members.** When a file defined `Test\Exception` alongside `Test\MyException extends \Exception`, the parent resolution incorrectly picked up `Test\Exception` instead of the global `\Exception`, causing false "method not found" diagnostics on inherited methods like `getMessage()`.
 

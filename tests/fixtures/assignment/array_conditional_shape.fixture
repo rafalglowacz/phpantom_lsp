@@ -1,6 +1,5 @@
 // test: conditional array key addition produces union of shapes
 // feature: completion
-// ignore: Conditional shape union tracking is not yet implemented
 // Adapted from phpactor assignment/array_2.test
 // expect: getName(
 ---
