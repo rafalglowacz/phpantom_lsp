@@ -1245,15 +1245,21 @@ fn resolve_rhs_array_access<'b>(
         }
     }
 
-    ResolvedType::from_classes_with_hint(
-        crate::completion::type_resolution::type_hint_to_classes_typed(
-            &current,
-            &ctx.current_class.name,
-            ctx.all_classes,
-            ctx.class_loader,
-        ),
-        current,
-    )
+    let classes = crate::completion::type_resolution::type_hint_to_classes_typed(
+        &current,
+        &ctx.current_class.name,
+        ctx.all_classes,
+        ctx.class_loader,
+    );
+    if classes.is_empty() {
+        // No class matched (e.g. `list<Rule>`, `int`, `string`).
+        // Return a type-string-only entry so the type information
+        // is preserved for downstream consumers like foreach
+        // element extraction.
+        vec![ResolvedType::from_type_string(current)]
+    } else {
+        ResolvedType::from_classes_with_hint(classes, current)
+    }
 }
 
 /// Classification of an array access index expression.

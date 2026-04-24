@@ -1003,6 +1003,23 @@ impl PhpType {
         }
     }
 
+    /// Returns `true` when the type is scalar and carries no non-scalar
+    /// generic arguments.  Unlike [`is_scalar`], `list<User>` returns
+    /// `false` here because iterating it yields the non-scalar `User`.
+    /// This is used by [`extract_value_type`] to decide whether to skip
+    /// an element type: `array<int, list<Rule>>` should still yield
+    /// `list<Rule>` even with `skip_scalar=true`.
+    pub fn is_scalar_leaf(&self) -> bool {
+        match self {
+            PhpType::Generic(name, args) => {
+                is_scalar_name(name) && args.iter().all(|a| a.is_scalar_leaf())
+            }
+            PhpType::Array(inner) => inner.is_scalar_leaf(),
+            PhpType::Nullable(inner) => inner.is_scalar_leaf(),
+            _ => self.is_scalar(),
+        }
+    }
+
     /// Extract the base class name from a type, if it refers to a single
     /// named class (possibly with generic parameters).
     ///
@@ -1243,7 +1260,7 @@ impl PhpType {
                     args.last()
                 };
                 match value {
-                    Some(v) if skip_scalar && v.is_scalar() => None,
+                    Some(v) if skip_scalar && v.is_scalar_leaf() => None,
                     Some(v) => Some(v),
                     None => None,
                 }
