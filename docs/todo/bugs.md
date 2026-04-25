@@ -430,6 +430,8 @@ statement. Possible causes:
 Once the root cause is understood, the re-entry guard can be removed
 in favour of a proper fix.
 
+
+
 ## B27 — CallSite matching in `emit_closure_hints` fails to find the parent call for template substitution
 
 **Symptom:** When a function has `@template T` with a callable

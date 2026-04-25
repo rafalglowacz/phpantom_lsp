@@ -762,6 +762,26 @@ fn resolve_class_fully_inner(
     let fqn = class.fqn();
     let cache_key: ResolvedClassCacheKey = (fqn, generic_args.to_vec());
 
+    // ── Reload raw class from class_loader ──────────────────────────
+    // Callers sometimes pass a ClassInfo that has already been through
+    // `apply_generic_args` (e.g. `MockBuilder<Rule>` where template
+    // parameters are substituted with concrete types).  If we resolve
+    // from that substituted class and cache the result under the bare
+    // FQN key `(MockBuilder, [])`, every subsequent lookup gets the
+    // contaminated version — causing non-deterministic diagnostics
+    // depending on which thread/file was processed first (B28).
+    //
+    // To prevent this, always try to reload the raw (un-substituted)
+    // class from the class_loader.  The class_loader returns the
+    // parsed ClassInfo from ast_map/stubs, which has unsubstituted
+    // template parameters.  Fall back to the passed-in `class` only
+    // when the loader cannot find it (e.g. anonymous classes).
+    let raw_class_arc = class_loader(fqn.as_str());
+    let effective_class: &ClassInfo = match &raw_class_arc {
+        Some(raw) => raw,
+        None => class,
+    };
+
     // ── Cache lookup ────────────────────────────────────────────────
     if let Some(cache) = cache {
         let map = cache.lock();
@@ -779,17 +799,20 @@ fn resolve_class_fully_inner(
     let depth = RESOLVE_DEPTH.with(|d| d.get());
     if depth >= MAX_RESOLVE_DEPTH || !mark_resolving(&fqn) {
         // Already resolving or too deep — return base-only resolution.
-        return Arc::new(resolve_class_with_inheritance(class, class_loader));
+        return Arc::new(resolve_class_with_inheritance(
+            effective_class,
+            class_loader,
+        ));
     }
     RESOLVE_DEPTH.with(|d| d.set(depth + 1));
 
     // ── Uncached resolution ─────────────────────────────────────────
-    let mut merged = resolve_class_with_inheritance(class, class_loader);
+    let mut merged = resolve_class_with_inheritance(effective_class, class_loader);
 
     // ── Pre-provider patches ────────────────────────────────────────
     // Inject missing `@mixin` annotations before virtual member
     // providers run, so that `collect_mixin_members` picks them up.
-    if fqn == "Illuminate\\Redis\\Connections\\Connection" {
+    if fqn.as_str() == "Illuminate\\Redis\\Connections\\Connection" {
         let mixin = atom("Redis");
         if !merged.mixins.contains(&mixin) {
             merged.mixins.push(mixin);
@@ -816,7 +839,11 @@ fn resolve_class_fully_inner(
     //    from `@implements` on parent classes are also collected, with
     //    the `@extends` chain substitutions applied so that template
     //    parameters from intermediate classes resolve correctly.
-    let mut all_iface_names: Vec<String> = class.interfaces.iter().map(|a| a.to_string()).collect();
+    let mut all_iface_names: Vec<String> = effective_class
+        .interfaces
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
 
     // Collect all `@implements` generics from the class and its parent
     // chain.  As we walk up the `extends` chain we apply the active
@@ -830,13 +857,13 @@ fn resolve_class_fully_inner(
     // Walking from Test2: active_subs starts empty, then after loading
     // Test1 we get {TKey => int}.  Test1's `@implements MyIterator<TKey, string>`
     // becomes `@implements MyIterator<int, string>` after substitution.
-    let mut all_implements_generics: Vec<(String, Vec<PhpType>)> = class
+    let mut all_implements_generics: Vec<(String, Vec<PhpType>)> = effective_class
         .implements_generics
         .iter()
         .map(|(a, v)| (a.to_string(), v.clone()))
         .collect();
     {
-        let mut current: ClassRef<'_> = ClassRef::Borrowed(class);
+        let mut current: ClassRef<'_> = ClassRef::Borrowed(effective_class);
         let mut depth = 0u32;
         let mut active_subs: HashMap<String, PhpType> = HashMap::new();
 
@@ -1040,7 +1067,9 @@ fn resolve_class_fully_inner(
     merged.rebuild_method_index();
     let result = Arc::new(merged);
     if let Some(cache) = cache {
-        cache.lock().insert(cache_key, Arc::clone(&result));
+        let mut map = cache.lock();
+
+        map.insert(cache_key, Arc::clone(&result));
     }
 
     result

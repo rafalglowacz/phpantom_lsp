@@ -121,6 +121,17 @@ pub(crate) fn toposort_classes<'a>(
         dep_map.insert(fqn, deps);
     }
 
+    // Sort the starting FQNs so that the DFS visitation order is
+    // deterministic regardless of HashMap iteration order in the
+    // caller (e.g. `toposort_from_ast_map` iterates a HashMap whose
+    // order varies between runs due to random hashing seeds).
+    // Without this, classes at the same topological level can be
+    // processed in different orders across runs, which causes the
+    // recursion guard in `resolve_class_fully_inner` to break
+    // implicit cycles differently — leading to non-deterministic
+    // cache contents and flaky diagnostics (see B28).
+    all_fqns.sort();
+
     let mut visited: HashSet<String> = HashSet::with_capacity(all_fqns.len());
     let mut visiting: HashSet<String> = HashSet::new();
     let mut sorted: Vec<String> = Vec::with_capacity(all_fqns.len());
