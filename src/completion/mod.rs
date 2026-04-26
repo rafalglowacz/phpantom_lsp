@@ -84,7 +84,7 @@ pub(crate) mod use_edit;
 pub(crate) mod context;
 pub mod phpdoc;
 pub(crate) mod source;
-pub(crate) mod types;
+pub mod types;
 pub(crate) mod variable;
 
 // ─── Backward-compatible re-exports ─────────────────────────────────────────

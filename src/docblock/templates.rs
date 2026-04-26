@@ -80,7 +80,7 @@ pub fn extract_template_params_with_bounds_from_info(
 ///   - `@template-contravariant TInput of Foo` → `("TInput", Some("Foo"), Contravariant)`
 pub fn extract_template_params_full(
     docblock: &str,
-) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<String>)> {
+) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<PhpType>)> {
     let Some(info) = parse_docblock_for_tags(docblock) else {
         return Vec::new();
     };
@@ -116,7 +116,7 @@ pub(crate) const TEMPLATE_KINDS: &[TagKind] = &[
 /// Like [`extract_template_params_full`], but operates on a pre-parsed [`DocblockInfo`].
 pub fn extract_template_params_full_from_info(
     info: &DocblockInfo,
-) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<String>)> {
+) -> Vec<(String, Option<PhpType>, TemplateVariance, Option<PhpType>)> {
     let mut results = Vec::new();
 
     for tag in info.tags_by_kinds(TEMPLATE_KINDS) {
@@ -136,21 +136,49 @@ pub fn extract_template_params_full_from_info(
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             {
+                // Everything after the parameter name, used for
+                // `split_type_token`-based parsing that respects `<>` nesting.
+                let rest = desc[name.len()..].trim_start();
+
                 // Check for an `of` bound: `@template T of SomeClass`
-                let mut next_token = tokens.next();
-                let bound = if next_token.as_ref().is_some_and(|kw| *kw == "of") {
-                    let b = tokens.next().map(PhpType::parse);
-                    next_token = tokens.next();
-                    b
+                let (bound, rest_after_bound) = if let Some(after_of) =
+                    rest.strip_prefix("of").and_then(|s| {
+                        // "of" must be followed by whitespace (not "offer", etc.)
+                        s.strip_prefix(|c: char| c.is_whitespace())
+                    }) {
+                    let after_of = after_of.trim_start();
+                    if after_of.is_empty() {
+                        (None, "")
+                    } else {
+                        let (type_tok, remainder) = split_type_token(after_of);
+                        if type_tok.is_empty() {
+                            (None, remainder)
+                        } else {
+                            (Some(PhpType::parse(type_tok)), remainder)
+                        }
+                    }
                 } else {
-                    None
+                    (None, rest)
                 };
+
                 // Check for a `= default` value: `@template T of bool = false`
-                let default = if next_token.is_some_and(|kw| kw == "=") {
-                    tokens.next().map(|d| d.to_string())
+                let rest_trimmed = rest_after_bound.trim_start();
+                let default = if let Some(after_eq) = rest_trimmed.strip_prefix('=') {
+                    let after_eq = after_eq.trim_start();
+                    if after_eq.is_empty() {
+                        None
+                    } else {
+                        let (default_tok, _) = split_type_token(after_eq);
+                        if default_tok.is_empty() {
+                            None
+                        } else {
+                            Some(PhpType::parse(default_tok))
+                        }
+                    }
                 } else {
                     None
                 };
+
                 results.push((name.to_string(), bound, variance, default));
             }
         }

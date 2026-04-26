@@ -47,7 +47,7 @@ impl Backend {
         let class_loader = self.class_loader(&ctx);
         let function_loader = self.function_loader(&ctx);
 
-        let type_names: Vec<String> = match &symbol.kind {
+        let resolved_types: Vec<PhpType> = match &symbol.kind {
             SymbolKind::Variable { name } => resolve_variable_type_names(
                 name,
                 content,
@@ -56,7 +56,9 @@ impl Backend {
                 &ctx,
                 &class_loader,
                 &function_loader,
-            ),
+            )
+            .into_iter()
+            .collect(),
 
             SymbolKind::MemberAccess {
                 subject_text,
@@ -81,6 +83,7 @@ impl Backend {
                     function_loader: Some(
                         &function_loader as &dyn Fn(&str) -> Option<FunctionInfo>,
                     ),
+                    scope_var_resolver: None,
                 };
 
                 let candidates = ResolvedType::into_arced_classes(
@@ -92,48 +95,47 @@ impl Backend {
                 );
 
                 // Resolve the member's return type / property type.
-                self.resolve_member_type_names(
-                    &candidates,
-                    member_name,
-                    *is_method_call,
-                    &class_loader,
-                )
+                self.resolve_member_type(&candidates, member_name, *is_method_call, &class_loader)
+                    .into_iter()
+                    .collect()
             }
 
             SymbolKind::SelfStaticParent(ssp_kind) => match ssp_kind {
                 SelfStaticParentKind::Self_
                 | SelfStaticParentKind::Static
                 | SelfStaticParentKind::This => current_class
-                    .map(|cc| vec![cc.name.clone()])
+                    .map(|cc| vec![PhpType::Named(cc.name.to_string())])
                     .unwrap_or_default(),
                 SelfStaticParentKind::Parent => current_class
                     .and_then(|cc| cc.parent_class.as_ref())
-                    .map(|p| vec![p.clone()])
+                    .map(|p| vec![PhpType::Named(p.to_string())])
                     .unwrap_or_default(),
             },
 
             SymbolKind::ClassReference { name, .. } => {
                 // The type *is* the class itself.
-                vec![name.clone()]
+                vec![PhpType::Named(name.clone())]
             }
 
-            SymbolKind::FunctionCall { name, .. } => {
-                self.resolve_function_return_type_names(name, &ctx, &function_loader, symbol.start)
-            }
+            SymbolKind::FunctionCall { name, .. } => self
+                .resolve_function_return_type(name, &ctx, &function_loader, symbol.start)
+                .into_iter()
+                .collect(),
 
             SymbolKind::ClassDeclaration { .. }
             | SymbolKind::MemberDeclaration { .. }
-            | SymbolKind::ConstantReference { .. } => {
+            | SymbolKind::ConstantReference { .. }
+            | SymbolKind::NamespaceDeclaration { .. } => {
                 // No meaningful type definition target for these.
                 Vec::new()
             }
         };
 
-        if type_names.is_empty() {
+        if resolved_types.is_empty() {
             return None;
         }
 
-        let locations = self.resolve_type_names_to_locations(uri, content, &type_names, offset);
+        let locations = self.resolve_types_to_locations(uri, content, &resolved_types, offset);
 
         if locations.is_empty() {
             None
@@ -143,14 +145,14 @@ impl Backend {
     }
 
     /// Resolve the type of a member (method return type or property type)
-    /// to a list of class names.
-    fn resolve_member_type_names(
+    /// to a `PhpType`.
+    fn resolve_member_type(
         &self,
         candidates: &[Arc<ClassInfo>],
         member_name: &str,
         is_method_call: bool,
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    ) -> Vec<String> {
+    ) -> Option<PhpType> {
         for target_class in candidates {
             let merged = crate::virtual_members::resolve_class_fully_cached(
                 target_class,
@@ -159,103 +161,97 @@ impl Backend {
             );
 
             if is_method_call {
-                if let Some(method) = merged
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(member_name))
-                {
-                    let default_type = PhpType::Named(String::new());
+                if let Some(method) = merged.get_method_ci(member_name) {
+                    let default_type = PhpType::untyped();
                     let ret_type = method.return_type.as_ref().unwrap_or(&default_type);
 
-                    // Replace self/static/$this with the owning class name.
-                    let resolved = ret_type.replace_self(&merged.name);
+                    // Replace self/static/$this with the owning class FQN.
+                    let resolved = ret_type.replace_self(&merged.fqn());
 
-                    let names = resolved.top_level_class_names();
-                    if !names.is_empty() {
-                        return names;
+                    if !resolved.top_level_class_names().is_empty() {
+                        return Some(resolved);
                     }
                 }
             } else {
                 // Property access — resolve the property type.
                 if let Some(prop) = merged.properties.iter().find(|p| p.name == member_name) {
-                    let default_type = PhpType::Named(String::new());
+                    let default_type = PhpType::untyped();
                     let prop_type = prop.type_hint.as_ref().unwrap_or(&default_type);
 
-                    let resolved = prop_type.replace_self(&merged.name);
+                    let resolved = prop_type.replace_self(&merged.fqn());
 
-                    let names = resolved.top_level_class_names();
-                    if !names.is_empty() {
-                        return names;
+                    if !resolved.top_level_class_names().is_empty() {
+                        return Some(resolved);
                     }
                 }
 
                 // Constants.
                 if let Some(constant) = merged.constants.iter().find(|c| c.name == member_name) {
-                    let default_type = PhpType::Named(String::new());
+                    let default_type = PhpType::untyped();
                     let const_type = constant.type_hint.as_ref().unwrap_or(&default_type);
 
-                    let names = const_type.top_level_class_names();
-                    if !names.is_empty() {
-                        return names;
+                    if !const_type.top_level_class_names().is_empty() {
+                        return Some(const_type.clone());
                     }
                 }
             }
         }
 
-        Vec::new()
+        None
     }
 
-    /// Resolve a function call's return type to a list of class names.
-    fn resolve_function_return_type_names(
+    /// Resolve a function call's return type to a `PhpType`.
+    fn resolve_function_return_type(
         &self,
         name: &str,
         ctx: &FileContext,
         function_loader: &dyn Fn(&str) -> Option<FunctionInfo>,
         offset: u32,
-    ) -> Vec<String> {
+    ) -> Option<PhpType> {
         let fqn = ctx.resolve_name_at(name, offset);
         let candidates = [fqn, name.to_string()];
 
         for candidate in &candidates {
             if let Some(func) = function_loader(candidate) {
-                let default_type = PhpType::Named(String::new());
+                let default_type = PhpType::untyped();
                 let ret_type = func.return_type.as_ref().unwrap_or(&default_type);
 
-                let names = ret_type.top_level_class_names();
-                if !names.is_empty() {
-                    return names;
+                if !ret_type.top_level_class_names().is_empty() {
+                    return Some(ret_type.clone());
                 }
             }
         }
 
-        Vec::new()
+        None
     }
 
-    /// Look up each type name via the class resolution infrastructure
+    /// Look up each `PhpType` via the class resolution infrastructure
     /// and return definition locations.
-    fn resolve_type_names_to_locations(
+    fn resolve_types_to_locations(
         &self,
         uri: &str,
         content: &str,
-        type_names: &[String],
+        types: &[PhpType],
         cursor_offset: u32,
     ) -> Vec<Location> {
         let mut locations = Vec::new();
 
-        for name in type_names {
-            if crate::php_type::is_scalar_name_pub(name) {
-                continue;
-            }
+        for php_type in types {
+            for name in php_type.top_level_class_names() {
+                if crate::php_type::is_scalar_name_pub(&name) {
+                    continue;
+                }
 
-            if let Some(loc) =
-                self.resolve_class_reference(uri, content, name, false, cursor_offset)
-            {
-                // Avoid duplicate locations.
-                if !locations
-                    .iter()
-                    .any(|l: &Location| l.uri == loc.uri && l.range.start == loc.range.start)
+                if let Some(loc) =
+                    self.resolve_class_reference(uri, content, &name, false, cursor_offset)
                 {
-                    locations.push(loc);
+                    // Avoid duplicate locations.
+                    if !locations
+                        .iter()
+                        .any(|l: &Location| l.uri == loc.uri && l.range.start == loc.range.start)
+                    {
+                        locations.push(loc);
+                    }
                 }
             }
         }
@@ -264,7 +260,7 @@ impl Backend {
     }
 }
 
-/// Resolve a variable's type to a list of class/interface/type names.
+/// Resolve a variable's type to a `PhpType`.
 ///
 /// This is a free function to avoid clippy's too-many-arguments lint
 /// on `&self` methods.
@@ -276,15 +272,12 @@ fn resolve_variable_type_names(
     ctx: &FileContext,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: &dyn Fn(&str) -> Option<FunctionInfo>,
-) -> Vec<String> {
+) -> Option<PhpType> {
     let var_name = format!("${}", name);
 
     // $this resolves to the enclosing class.
     if name == "this" {
-        if let Some(cc) = current_class {
-            return vec![cc.name.clone()];
-        }
-        return Vec::new();
+        return current_class.map(|cc| PhpType::Named(cc.name.to_string()));
     }
 
     // Try the type-string path first (preserves generics, union types).
@@ -296,8 +289,9 @@ fn resolve_variable_type_names(
         &ctx.classes,
         class_loader,
         crate::completion::resolver::Loaders::with_function(Some(function_loader)),
-    ) {
-        return resolved_type.top_level_class_names();
+    ) && !resolved_type.top_level_class_names().is_empty()
+    {
+        return Some(resolved_type);
     }
 
     // Fall back to ClassInfo-based resolution.
@@ -322,11 +316,23 @@ fn resolve_variable_type_names(
         ),
     );
 
-    types
+    let class_names: Vec<String> = types
         .into_iter()
-        .map(|c| c.name.clone())
+        .map(|c| c.name.to_string())
         .filter(|n| !crate::php_type::is_scalar_name_pub(n))
-        .collect()
+        .collect();
+
+    if class_names.is_empty() {
+        return None;
+    }
+
+    if class_names.len() == 1 {
+        Some(PhpType::Named(class_names.into_iter().next().unwrap()))
+    } else {
+        Some(PhpType::Union(
+            class_names.into_iter().map(PhpType::Named).collect(),
+        ))
+    }
 }
 
 #[cfg(test)]

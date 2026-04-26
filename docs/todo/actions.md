@@ -426,39 +426,6 @@ which can silently break filtering, mapping, or event-handling logic.
 
 ---
 
-### A36. Import all missing classes
-
-**Impact: Medium · Effort: Low**
-
-Bulk code action that imports all unresolvable class names in a file at
-once, instead of requiring the user to trigger "Import class" on each
-name individually.
-
-### Behaviour
-
-- **Trigger:** File contains one or more unresolved class names (the
-  same condition that triggers the existing single-class import action).
-  The bulk action appears in the source action menu.
-- **Code action kind:** `source.organizeImports` or
-  `source.importAll`.
-- **Result:** For each unresolved class name, resolve candidates using
-  the same logic as the existing import action. When exactly one
-  candidate exists, import it. When multiple candidates exist, pick the
-  one with the highest namespace affinity (same ranking the single
-  import action uses). Insert all new `use` statements in alphabetical
-  order.
-
-### Edge cases
-
-- If any class name has zero candidates (truly unknown), skip it
-  silently.
-- If two unresolved names would import different classes with the same
-  short name, import the first and skip the second (a conflict that
-  requires manual resolution).
-- Already-imported names are excluded.
-
----
-
 ### A37. Simplify with `?->` (nullsafe operator)
 
 **Impact: Low-Medium · Effort: Medium**
@@ -634,53 +601,87 @@ $msg = "Total: {$order->getTotal()}";
 
 ---
 
-### A40. Convert to instance variable
+### A40. Generate method from call
+
+**Impact: High · Effort: Medium**
+
+When invoking an undefined method (e.g. `$foo->newMethod($a, $b)`),
+offer a code action to generate a method stub on the target class
+with the correct signature inferred from the call-site arguments.
+High-impact rapid-prototyping workflow. Phpactor has this.
+
+- Resolve the type of the subject to find the target class and file.
+- Infer parameter types from the argument expressions at the call
+  site (literal types, variable types, class hints).
+- Infer return type as `void` by default; if the call is used in an
+  assignment or return context, use `mixed`.
+- Insert the generated method at the end of the class body (before
+  the closing `}`).
+- Visibility defaults to `public`; offer a choice if the call is
+  within the same class (`private`/`protected`).
+
+**Code action kind:** `quickfix`.
+**Trigger:** Unknown-member diagnostic on a method call.
+
+---
+
+### A41. Create class from non-existing name
+
+**Impact: High · Effort: Medium**
+
+When a class name cannot be resolved, offer a code action to
+generate a new class file with the correct namespace based on PSR-4
+mapping. Pairs naturally with the unknown-class diagnostic.
+Phpactor has this.
+
+- Use the PSR-4 autoload map from `composer.json` to determine the
+  file path and namespace for the new class.
+- Create the file with a minimal class skeleton (`<?php` declaration,
+  `namespace`, empty class body).
+- If the unresolved name is used in an `extends` or `implements`
+  clause, generate the appropriate `class` or `interface` keyword.
+- Add a `use` import at the call site if necessary.
+
+**Code action kind:** `quickfix`.
+**Trigger:** Unknown-class diagnostic.
+
+---
+
+### A42. Replace qualifier with import
+
+**Impact: Medium · Effort: Low**
+
+Convert an inline fully-qualified name like `\Foo\Bar\Baz` to a
+`use` import plus the short name. A standalone code action
+(auto-import on completion already exists but this covers existing
+code). Phpactor has this.
+
+- Detect any fully-qualified class reference under the cursor.
+- Add a `use Foo\Bar\Baz;` statement to the file's import block.
+- Replace the inline FQN with the short name `Baz`.
+- Handle alias conflicts: if `Baz` is already imported with a
+  different FQN, prompt for an alias or skip.
+
+**Code action kind:** `refactor.rewrite`.
+
+---
+
+### A43. Update docblock generics
 
 **Impact: Medium · Effort: Medium**
 
-Convert a local variable inside a method body into an instance property
-on the enclosing class, updating all references within the method.
+Auto-update or add `@extends`/`@implements` tags to match the actual
+class hierarchy when a class extends a generic parent. Phpactor has
+this as a transformer.
 
-#### Trigger
+- Inspect the `extends` and `implements` clauses of the class under
+  the cursor.
+- For each parent/interface that declares `@template` parameters,
+  check whether the current class has a matching `@extends` or
+  `@implements` tag.
+- If the tag is missing, generate one with placeholder type
+  parameters (e.g. `@extends Collection<mixed>`).
+- If the tag exists but the template parameter count has changed,
+  update it to match.
 
-Cursor is on a local variable assignment (e.g. `$result = ...`) inside
-a method body.
-
-#### Behaviour
-
-1. Create a new `private` property declaration on the enclosing class
-   (placed after the last existing property, or before the first
-   method if no properties exist).
-2. Replace `$result = expr` with `$this->result = expr`.
-3. Replace all other occurrences of `$result` within the same method
-   scope with `$this->result`.
-4. If the variable's type can be inferred (from type hints, docblocks,
-   or assignment context), add a type declaration to the property.
-
-#### Edge cases
-
-- If a property with the same name already exists, do not offer the
-  action.
-- Variables used across multiple methods (via separate assignments)
-  should only convert the occurrences in the current method scope.
-- Closure-captured variables (`use ($result)`) inside the method need
-  their capture updated to `use ($this)` or the reference replaced
-  with `$this->result` depending on context (closures can access
-  `$this` implicitly in non-static contexts).
-- Static methods: offer a `private static` property and use
-  `self::$result` instead of `$this->result`.
-- Constructor promoted parameters should not be offered this action
-  (they are already instance variables).
-
-#### Implementation
-
-- Detect that the cursor is on a variable assignment inside a method.
-- Check the enclosing class for an existing property with the same
-  name.
-- Generate the property declaration with the inferred type.
-- Produce a `WorkspaceEdit` with edits for the property declaration,
-  the assignment rewrite, and all reference replacements within the
-  method.
-
-**Code action kind:** `refactor.extract`.
-
+**Code action kind:** `quickfix`.

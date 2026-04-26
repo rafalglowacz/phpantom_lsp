@@ -361,13 +361,13 @@ pub fn extract_type_assertions_from_info(info: &DocblockInfo) -> Vec<TypeAsserti
             (false, desc)
         };
 
-        // Next token is the type, then the parameter name.
-        let mut tokens = rest.split_whitespace();
-        let type_str = match tokens.next() {
-            Some(t) => t,
-            None => continue,
-        };
-        let param_str = match tokens.next() {
+        // Next token is the type (which may contain spaces in generics).
+        let (type_str, remainder) = split_type_token(rest);
+        if type_str.is_empty() {
+            continue;
+        }
+        // The parameter name follows the type token.
+        let param_str = match remainder.split_whitespace().next() {
             Some(p) if p.starts_with('$') => p,
             _ => continue,
         };
@@ -967,6 +967,7 @@ pub fn find_iterable_raw_type_in_source(
     // scope and must be skipped.
     let mut brace_depth = 0i32;
     let mut min_depth = 0i32;
+    let mut max_depth = 0i32;
     let mut seen_sibling_scope = false;
 
     // Track the previous non-empty line we saw while scanning backward.
@@ -991,6 +992,7 @@ pub fn find_iterable_raw_type_in_source(
         }
 
         min_depth = min_depth.min(brace_depth);
+        max_depth = max_depth.max(brace_depth);
 
         // Once we have exited our containing scope (min_depth < 0) and
         // re-entered a block close to that level, we are inside a
@@ -1008,6 +1010,41 @@ pub fn find_iterable_raw_type_in_source(
         if min_depth < 0 && brace_depth > min_depth {
             seen_sibling_scope = true;
         }
+
+        // Detect sibling function/method boundaries at the same class
+        // nesting level.  When scanning backward we may fully traverse
+        // a sibling method body (entering at `}`, exiting at `{`) and
+        // return to `brace_depth == 0` — the same level as our own
+        // method signature.  The `min_depth < 0` check above only
+        // fires when we cross the *enclosing* scope boundary (class
+        // `{`), so it misses sibling methods entirely.
+        //
+        // Fix: once we have entered and fully exited a block at our
+        // level (i.e. we saw `brace_depth > 0` and it returned to 0),
+        // any `function` keyword at depth 0 is a sibling method
+        // signature.  Its docblock belongs to that method, not ours.
+        //
+        // The `max_depth > 0` guard ensures we only trigger after
+        // traversing at least one complete block.  Without it, a
+        // scan starting from the parameter list `(` would flag the
+        // function's own signature as a sibling boundary, hiding
+        // the docblock directly above it.
+        if !seen_sibling_scope && !is_comment_line && brace_depth == 0 && max_depth > 0 {
+            // Check for a function/method keyword.  This covers:
+            //   `public function foo(...)`, `private static function bar(...)`,
+            //   `function baz(...)`, `public static function qux(): array`
+            // We look for the `function` keyword as a word boundary.
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.contains("function ")
+                || lower.contains("function(")
+                || lower.ends_with("function")
+            {
+                // We've hit a sibling function signature.  Any
+                // docblock above this point belongs to that function.
+                seen_sibling_scope = true;
+            }
+        }
+
         if seen_sibling_scope {
             if !trimmed.is_empty() {
                 prev_non_empty_line = Some(trimmed);
@@ -1206,8 +1243,8 @@ pub fn should_override_type_typed(docblock_type: &PhpType, native_type: &PhpType
 
     // Unwrap nullable wrappers for further analysis.  `?Foo` → `Foo`,
     // `Foo|null` → `Foo`.  For non-nullable types, use as-is.
-    let doc_inner = unwrap_nullable(docblock_type);
-    let native_inner = unwrap_nullable(native_type);
+    let doc_inner = docblock_type.unwrap_nullable();
+    let native_inner = native_type.unwrap_nullable();
 
     // If the docblock type is a bare, unparameterised primitive scalar
     // (`int`, `string`, `bool`, etc.), there's no value in overriding.
@@ -1217,7 +1254,7 @@ pub fn should_override_type_typed(docblock_type: &PhpType, native_type: &PhpType
     //  - Parameterised types (`array<int>`, `int<0, max>`) — these
     //    carry type information the native hint doesn't have.
     //  - Shapes, callables, slices — these also carry extra info.
-    if is_bare_primitive_scalar(doc_inner) {
+    if doc_inner.is_bare_primitive_scalar() {
         return false;
     }
 
@@ -1267,39 +1304,12 @@ pub fn should_override_type_typed(docblock_type: &PhpType, native_type: &PhpType
     true
 }
 
-/// Unwrap nullable wrappers from a `PhpType`.
-///
-/// `Nullable(X)` → `X`.  For non-nullable types, returns the type
-/// unchanged.  Note: `Union([X, Named("null")])` is NOT unwrapped
-/// here — the caller should use `non_null_type()` if needed.
-fn unwrap_nullable(ty: &PhpType) -> &PhpType {
-    match ty {
-        PhpType::Nullable(inner) => inner.as_ref(),
-        _ => ty,
-    }
-}
-
 /// Check whether a `PhpType` has generic parameters or shape braces.
 fn has_parameterisation(ty: &PhpType) -> bool {
     matches!(
         ty,
         PhpType::Generic(_, _) | PhpType::ArrayShape(_) | PhpType::ObjectShape(_)
     )
-}
-
-/// Check whether a `PhpType` is a bare, unparameterised primitive scalar.
-///
-/// Returns `true` for simple type names like `int`, `string`, `bool`,
-/// `void`, `null`, `array`, `callable`, `iterable`, `resource` (and
-/// aliases like `integer`, `double`, `boolean`).
-///
-/// Returns `false` for:
-/// - PHPDoc pseudo-types (`non-empty-string`, `class-string`, `positive-int`)
-/// - Parameterised types (`array<int>`, `int<0, max>`, `list<User>`)
-/// - Shapes, callables with signatures, slices (`Foo[]`)
-/// - Class names, unions, intersections, etc.
-fn is_bare_primitive_scalar(ty: &PhpType) -> bool {
-    ty.is_bare_primitive_scalar()
 }
 
 /// Check whether a docblock type is a compatible refinement of a native
@@ -1327,19 +1337,19 @@ fn is_bare_primitive_scalar(ty: &PhpType) -> bool {
 /// which are needed for the refinement checks.
 pub(crate) fn is_compatible_refinement_typed(doc_type: &PhpType, native_type: &PhpType) -> bool {
     if native_type.is_string_type() {
-        return is_string_refinement(doc_type);
+        return doc_type.is_string_subtype();
     }
     if native_type.is_int() {
-        return is_int_refinement(doc_type);
+        return doc_type.is_int_subtype();
     }
     if native_type.is_float() {
-        return is_float_refinement(doc_type);
+        return doc_type.is_float_subtype();
     }
     if native_type.is_bool() {
         return doc_type.is_bool() || doc_type.is_true() || doc_type.is_false();
     }
     if native_type.is_bare_array() {
-        return is_array_refinement(doc_type);
+        return doc_type.is_array_like() || doc_type.is_iterable();
     }
     if native_type.is_mixed() {
         return true;
@@ -1374,110 +1384,21 @@ pub(crate) fn is_compatible_refinement_typed(doc_type: &PhpType, native_type: &P
     false
 }
 
-/// Whether `ty` is a PHPDoc type that refines the native `string` type.
-///
-/// Returns `true` for `string`, `non-empty-string`, `class-string`,
-/// `numeric-string`, `literal-string`, `truthy-string`, `callable-string`,
-/// `lowercase-string`, `non-falsy-string`, parameterised `class-string<T>`,
-/// `interface-string<T>`, and string literals (`'foo'`, `"bar"`).
-fn is_string_refinement(ty: &PhpType) -> bool {
-    match ty {
-        PhpType::Named(s) => matches!(
-            s.to_ascii_lowercase().as_str(),
-            "string"
-                | "non-empty-string"
-                | "numeric-string"
-                | "literal-string"
-                | "truthy-string"
-                | "callable-string"
-                | "class-string"
-                | "interface-string"
-                | "lowercase-string"
-                | "non-falsy-string"
-        ),
-        PhpType::ClassString(_) | PhpType::InterfaceString(_) => true,
-        PhpType::Literal(s) => s.starts_with('\'') || s.starts_with('"'),
-        PhpType::Nullable(inner) => is_string_refinement(inner),
-        PhpType::Generic(name, _) => matches!(
-            name.to_ascii_lowercase().as_str(),
-            "class-string" | "interface-string"
-        ),
-        _ => false,
-    }
-}
-
-/// Whether `ty` is a PHPDoc type that refines the native `int` type.
-///
-/// Returns `true` for `int`, `integer`, `positive-int`, `negative-int`,
-/// `non-negative-int`, `non-positive-int`, `non-zero-int`, `int<min, max>`
-/// ranges, and integer literals (`42`, `-1`).
-fn is_int_refinement(ty: &PhpType) -> bool {
-    match ty {
-        PhpType::Named(s) => matches!(
-            s.to_ascii_lowercase().as_str(),
-            "int"
-                | "integer"
-                | "positive-int"
-                | "negative-int"
-                | "non-negative-int"
-                | "non-positive-int"
-                | "non-zero-int"
-        ),
-        PhpType::IntRange(_, _) => true,
-        PhpType::Literal(s) => {
-            // Integer literals: optional leading minus, then digits only.
-            let trimmed = s.strip_prefix('-').unwrap_or(s);
-            !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit())
-        }
-        PhpType::Nullable(inner) => is_int_refinement(inner),
-        _ => false,
-    }
-}
-
-/// Whether `ty` is a PHPDoc type that refines the native `float` type.
-///
-/// Returns `true` for `float` and `double`.
-fn is_float_refinement(ty: &PhpType) -> bool {
-    match ty {
-        PhpType::Named(s) => matches!(s.to_ascii_lowercase().as_str(), "float" | "double"),
-        PhpType::Nullable(inner) => is_float_refinement(inner),
-        _ => false,
-    }
-}
-
-/// Whether `ty` is a PHPDoc type that refines the native `array` type.
-///
-/// Returns `true` for any array-like type (`array`, `list`,
-/// `non-empty-array`, `non-empty-list`, `array<K, V>`, `T[]`,
-/// `array{...}`) as well as `iterable`.
-fn is_array_refinement(ty: &PhpType) -> bool {
-    if ty.is_array_like() || ty.is_iterable() {
-        return true;
-    }
-    match ty {
-        PhpType::Nullable(inner) => is_array_refinement(inner),
-        _ => false,
-    }
-}
-
 /// Extract the outermost type name from a `PhpType` as a lowercased string.
 ///
 /// Strips generic parameters, shape braces, callable signatures, and
 /// nullable wrappers.  Returns the base identifier lowercased (e.g.
 /// `Generic("Collection", _)` → `"collection"`, `Named("int")` → `"int"`).
 ///
-/// For types that don't have a simple base name (e.g. unions, literals),
-/// falls back to the full `Display` output lowercased.
+/// For complex types without a simple base name (e.g. unions, callables,
+/// shapes), returns an empty string.
 ///
 /// Used by `should_override_type_typed` for its hyphen-based pseudo-type
 /// heuristic.
 fn extract_base_name_lower(ty: &PhpType) -> String {
-    match ty {
-        PhpType::Named(name) => name.to_ascii_lowercase(),
-        PhpType::Generic(name, _) => name.to_ascii_lowercase(),
-        PhpType::Nullable(inner) => extract_base_name_lower(inner),
-        _ => ty.to_string().to_ascii_lowercase(),
-    }
+    ty.base_name()
+        .map(|n| n.to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 // ─── Docblock Text Extraction ───────────────────────────────────────────────
@@ -2159,6 +2080,27 @@ mod tests {
             result.as_ref().map(|t| t.to_string()),
             Some("list<Pen>".to_string())
         );
+    }
+
+    // ── extract_type_assertions (generic types) ─────────────────────
+
+    #[test]
+    fn assert_generic_type_with_spaces() {
+        let doc = "/** @phpstan-assert Collection<int, User> $param */";
+        let result = extract_type_assertions(doc);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].asserted_type.to_string(), "Collection<int, User>");
+        assert_eq!(result[0].param_name, "$param");
+        assert!(!result[0].negated);
+    }
+
+    #[test]
+    fn assert_negated_generic_type() {
+        let doc = "/** @phpstan-assert !Collection<int, User> $param */";
+        let result = extract_type_assertions(doc);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].negated);
+        assert_eq!(result[0].asserted_type.to_string(), "Collection<int, User>");
     }
 
     #[test]

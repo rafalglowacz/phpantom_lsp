@@ -387,28 +387,28 @@ fn test_type_hint_is_class_only() {
 fn test_type_hint_matches_class_info() {
     let cls = ClassInfo {
         kind: ClassLikeKind::Class,
-        name: "Foo".to_string(),
+        name: crate::atom::atom("Foo"),
         ..Default::default()
     };
     assert!(ClassNameContext::TypeHint.matches(&cls));
 
     let iface = ClassInfo {
         kind: ClassLikeKind::Interface,
-        name: "Bar".to_string(),
+        name: crate::atom::atom("Bar"),
         ..Default::default()
     };
     assert!(ClassNameContext::TypeHint.matches(&iface));
 
     let enm = ClassInfo {
         kind: ClassLikeKind::Enum,
-        name: "Baz".to_string(),
+        name: crate::atom::atom("Baz"),
         ..Default::default()
     };
     assert!(ClassNameContext::TypeHint.matches(&enm));
 
     let trait_info = ClassInfo {
         kind: ClassLikeKind::Trait,
-        name: "Qux".to_string(),
+        name: crate::atom::atom("Qux"),
         ..Default::default()
     };
     assert!(!ClassNameContext::TypeHint.matches(&trait_info));
@@ -1118,4 +1118,42 @@ fn test_is_class_declaration_with_namespace() {
         character: 7,
     };
     assert!(is_class_declaration_name(content, pos));
+}
+
+// ── extract_partial_class_name: open tag suppression ────────────
+
+#[test]
+fn test_extract_partial_rejects_open_tag() {
+    // Cursor at the end of `<?php` — should NOT offer "php" as a partial.
+    let content = "<?php";
+    let pos = Position {
+        line: 0,
+        character: 5,
+    };
+    assert_eq!(Backend::extract_partial_class_name(content, pos), None);
+}
+
+#[test]
+fn test_extract_partial_rejects_open_tag_with_trailing_newline() {
+    // Cursor at end of the open tag line (before the newline).
+    let content = "<?php\n";
+    let pos = Position {
+        line: 0,
+        character: 5,
+    };
+    assert_eq!(Backend::extract_partial_class_name(content, pos), None);
+}
+
+#[test]
+fn test_extract_partial_allows_php_prefixed_identifier() {
+    // `php_ini_loaded_file` on a normal code line is a valid partial.
+    let content = "<?php\nphp_ini";
+    let pos = Position {
+        line: 1,
+        character: 7,
+    };
+    assert_eq!(
+        Backend::extract_partial_class_name(content, pos),
+        Some("php_ini".to_string())
+    );
 }

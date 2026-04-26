@@ -6,7 +6,6 @@
 //! virtual instance and static methods with the `scope` prefix stripped
 //! and the first `$query` parameter removed.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::php_type::PhpType;
@@ -53,7 +52,7 @@ pub(super) fn is_attribute_scope(method: &MethodInfo) -> bool {
 /// unchanged (it is already the public-facing name).
 pub(super) fn scope_name_for(method: &MethodInfo) -> String {
     if is_attribute_scope(method) {
-        method.name.clone()
+        method.name.to_string()
     } else {
         scope_name(&method.name)
     }
@@ -164,11 +163,8 @@ pub fn build_scope_methods_for_builder(
     // The default scope return type is `\...\Builder<static>` where
     // `static` means the model, so substituting `static` → `User`
     // produces `\...\Builder<User>`, keeping the chain on the builder.
-    let model_type = PhpType::Named(model_name.to_string());
-    let mut subs = HashMap::new();
-    subs.insert("static".to_string(), model_type.clone());
-    subs.insert("$this".to_string(), model_type.clone());
-    subs.insert("self".to_string(), model_type);
+    let model_type = PhpType::Named(model_name.to_owned());
+    let subs = super::self_ref_subs(model_type);
 
     let mut methods = Vec::new();
 

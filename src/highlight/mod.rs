@@ -50,7 +50,7 @@ impl Backend {
                     self.highlight_variable(symbol_map, content, name, span.start)
                 }
             }
-            SymbolKind::ClassReference { name, is_fqn } => {
+            SymbolKind::ClassReference { name, is_fqn, .. } => {
                 let ctx = self.file_context(uri);
                 let fqn = if *is_fqn {
                     name.clone()
@@ -61,7 +61,7 @@ impl Backend {
             }
             SymbolKind::ClassDeclaration { name } => {
                 let ctx = self.file_context(uri);
-                let fqn = build_fqn(name, &ctx.namespace);
+                let fqn = build_fqn(name, ctx.namespace.as_deref());
                 self.highlight_class(symbol_map, content, &fqn, &ctx.use_map, &ctx.namespace)
             }
             SymbolKind::MemberAccess { member_name, .. } => {
@@ -83,6 +83,7 @@ impl Backend {
                     self.highlight_keyword(symbol_map, content, *ssp_kind, span.start, uri)
                 }
             }
+            SymbolKind::NamespaceDeclaration { .. } => Vec::new(),
         };
 
         if highlights.is_empty() {
@@ -200,14 +201,14 @@ impl Backend {
 
         for span in &symbol_map.spans {
             let fqn = match &span.kind {
-                SymbolKind::ClassReference { name, is_fqn } => {
+                SymbolKind::ClassReference { name, is_fqn, .. } => {
                     if *is_fqn {
                         name.clone()
                     } else {
                         Self::resolve_to_fqn(name, use_map, namespace)
                     }
                 }
-                SymbolKind::ClassDeclaration { name } => build_fqn(name, namespace),
+                SymbolKind::ClassDeclaration { name } => build_fqn(name, namespace.as_deref()),
                 _ => continue,
             };
 
@@ -259,20 +260,20 @@ impl Backend {
                     });
                 }
                 // Also match property declarations that appear as Variable spans.
-                SymbolKind::Variable { name } if name == target_name => {
-                    if symbol_map
-                        .var_def_kind_at(name, span.start)
-                        .is_some_and(|k| *k == VarDefKind::Property)
-                    {
-                        highlights.push(DocumentHighlight {
-                            range: byte_range_to_lsp_range(
-                                content,
-                                span.start as usize,
-                                span.end as usize,
-                            ),
-                            kind: Some(DocumentHighlightKind::WRITE),
-                        });
-                    }
+                SymbolKind::Variable { name }
+                    if name == target_name
+                        && symbol_map
+                            .var_def_kind_at(name, span.start)
+                            .is_some_and(|k| *k == VarDefKind::Property) =>
+                {
+                    highlights.push(DocumentHighlight {
+                        range: byte_range_to_lsp_range(
+                            content,
+                            span.start as usize,
+                            span.end as usize,
+                        ),
+                        kind: Some(DocumentHighlightKind::WRITE),
+                    });
                 }
                 _ => {}
             }

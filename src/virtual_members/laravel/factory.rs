@@ -6,6 +6,7 @@
 //! derived from the naming convention (e.g.
 //! `Database\Factories\UserFactory` → `App\Models\User`).
 
+use crate::php_type::PhpType;
 use crate::types::{ClassInfo, MethodInfo};
 use std::sync::Arc;
 
@@ -125,11 +126,11 @@ fn build_factory_model_methods(
         return Vec::new();
     }
 
-    let model_type = model_fqn.to_string();
+    let model_type = PhpType::Named(model_fqn.to_string());
 
     vec![
-        MethodInfo::virtual_method("create", Some(&model_type)),
-        MethodInfo::virtual_method("make", Some(&model_type)),
+        MethodInfo::virtual_method_typed("create", Some(&model_type)),
+        MethodInfo::virtual_method_typed("make", Some(&model_type)),
     ]
 }
 

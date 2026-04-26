@@ -83,7 +83,7 @@ fn format_params_inner(params: &[ParameterInfo], use_native: bool) -> String {
             } else if p.is_reference {
                 parts.push(format!("&{}", p.name));
             } else {
-                parts.push(p.name.clone());
+                parts.push(p.name.to_string());
             }
             let param_str = parts.join(" ");
             if !p.is_required && !p.is_variadic {
@@ -102,7 +102,7 @@ fn format_params_inner(params: &[ParameterInfo], use_native: bool) -> String {
 
 /// Build a `namespace Foo;\n` line for use inside PHP code blocks.
 /// Returns an empty string when the namespace is global (None).
-pub(super) fn namespace_line(namespace: &Option<String>) -> String {
+pub(super) fn namespace_line(namespace: Option<&str>) -> String {
     if let Some(ns) = namespace
         && !ns.is_empty()
         && !ns.starts_with("___")
@@ -244,7 +244,7 @@ pub(super) fn build_param_return_section(
 ///   - `}`
 pub(super) fn build_class_member_block(
     owner_name: &str,
-    owner_namespace: &Option<String>,
+    owner_namespace: Option<&str>,
     kind_keyword: &str,
     name_suffix: &str,
     member_line: &str,
@@ -293,7 +293,7 @@ pub(super) fn owner_name_suffix(owner: &ClassInfo) -> String {
 /// the native PHP type hint.
 pub(super) fn build_class_member_block_with_var(
     owner_name: &str,
-    owner_namespace: &Option<String>,
+    owner_namespace: Option<&str>,
     kind_keyword: &str,
     name_suffix: &str,
     var_annotation: &Option<String>,
@@ -334,7 +334,7 @@ pub(crate) fn hover_for_function(
         .unwrap_or_default();
 
     let signature = format!("function {}({}){}", func.name, native_params, native_ret);
-    let ns_line = namespace_line(&func.namespace);
+    let ns_line = namespace_line(func.namespace.as_deref());
 
     let mut lines = Vec::new();
 
@@ -477,21 +477,8 @@ pub(crate) fn extract_var_description_from_info(info: &DocblockInfo) -> Option<S
 ///
 /// Returns the remainder of the string after the type token.
 fn skip_type_token(s: &str) -> &str {
-    let mut depth = 0i32;
-    let mut end = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' | '(' | '{' => depth += 1,
-            '>' | ')' | '}' => depth -= 1,
-            _ if c.is_whitespace() && depth == 0 => {
-                end = i;
-                break;
-            }
-            _ => {}
-        }
-        end = i + c.len_utf8();
-    }
-    &s[end..]
+    let (_token, rest) = crate::docblock::type_strings::split_type_token(s);
+    rest
 }
 
 /// Convert basic HTML markup in docblock text to Markdown equivalents.
@@ -558,6 +545,13 @@ pub(crate) fn shorten_type_string(ty: &str) -> String {
 /// cycle that `shorten_type_string` incurs when the caller already has a
 /// `PhpType` value.
 pub(crate) fn shorten_php_type(ty: &PhpType) -> String {
+    // Defensive fallback: in practice `Raw` values never reach this function
+    // because all callers pass `PhpType` values from struct fields
+    // (`type_hint`, `return_type`, `native_return_type`) that are populated
+    // via `PhpType::parse()`, which only produces `Raw` for completely
+    // unparseable strings.  The guard remains so that future callers that
+    // might pass `Raw` values still get reasonable short names instead of
+    // fully-qualified namespace paths.
     if matches!(ty, PhpType::Raw(_)) {
         return shorten_type_string_fallback(&ty.to_string());
     }

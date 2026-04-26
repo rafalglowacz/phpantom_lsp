@@ -133,67 +133,7 @@ workspace symbols on large codebases.
 
 ---
 
-## F4. Return type and closure parameter type inlay hints
 
-**Impact: Medium · Effort: Medium**
-
-PHPantom's inlay hints currently show **parameter names** and
-**by-reference indicators** at call sites. Two additional hint kinds
-would bring PHPantom to parity with Devsense and ahead of Intelephense:
-
-### Return type hints
-
-Show an inferred return type hint after the closing parenthesis of
-functions, methods, closures, and arrow functions that lack an explicit
-return type declaration:
-
-```php
-function doubled($x)  // → : int
-{
-    return $x * 2;
-}
-
-$fn = fn($x) => $x * 2;  // → : int
-```
-
-The hint should only appear when the return type can be inferred from
-the function body (or from the callable context for closures). Functions
-that already have a native return type hint or a `@return` docblock
-should not receive a hint.
-
-Ideally, clicking the hint (or double-clicking, depending on editor
-support) should insert the return type declaration as a text edit.
-
-### Closure / arrow function parameter type hints
-
-Show an inferred type hint after untyped closure and arrow function
-parameters when the type can be inferred from the callable context:
-
-```php
-$users->map(fn($u) => $u->name);
-//            ^ : User
-
-$filtered = array_filter($items, function ($item) { ... });
-//                                         ^ : Item
-```
-
-The hint should only appear when the parameter has no native type hint
-and the type is inferred from the enclosing callable signature (e.g.
-a `Closure(User): bool` parameter type, or a `@param` on the receiving
-function). Parameters that already have a type hint should not receive
-a hint.
-
-### What to avoid
-
-- **Variable type hints at assignment sites.** Phpactor shows these
-  (e.g. `$x` `: string` after every assignment). This is noisy in
-  practice and clutters the editor. Do not add this kind.
-- **End-of-block labels.** Phpactor shows `// class Foo` or
-  `// method bar` at closing braces. This is an editor feature (most
-  editors already show sticky scroll or breadcrumbs) and would add
-  visual noise. Do not add this kind.
-
----
 
 ## F5. Call hierarchy
 
@@ -239,35 +179,6 @@ index (X4), the lookup becomes a simple index query.
 
 Consider implementing after X4 (full background indexing) ships, or
 accept the same scan-based latency that Find References currently has.
-
-## F6. Machine-readable CLI output formats
-
-**Impact: Medium · Effort: Low**
-
-Add a `--format` flag to `analyze` and `fix` that controls the output
-format. The default remains the current human-readable table.
-
-### Formats
-
-- **`github`** — Emit
-  [workflow commands](https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-a-warning-message)
-  (`::warning file=...::message`) so diagnostics appear as inline
-  annotations on pull request diffs. This is the highest-priority
-  format because GitHub Actions is the most common CI environment for
-  PHP projects.
-- **`json`** — One JSON object per diagnostic (or a top-level array).
-  Enables integration with custom dashboards, editor plugins, and
-  other tooling that wants to consume PHPantom output programmatically.
-
-### Implementation
-
-The output logic in `analyse.rs` and `fix.rs` currently writes
-directly to stderr/stdout with ANSI formatting. Extract the rendering
-behind a trait or enum so each format can be selected at the call
-site. The `--no-colour` flag becomes redundant for non-table formats
-but should continue to work for the default table output.
-
----
 
 ## F7. Evaluatable expression support (DAP integration)
 
@@ -367,139 +278,6 @@ pre-filter on the class name before parsing keeps it fast.
 No hard dependencies. Works with the existing class loader for the
 test → subject direction. The subject → test direction benefits from
 but does not require full indexing (X4).
-
----
-
-## F9. Namespace renaming
-
-**Impact: Medium · Effort: Medium**
-
-Extend the rename handler (`textDocument/rename`) to support renaming
-PHP namespaces. When the user triggers a rename on a namespace segment
-in a `namespace` declaration or a `use` statement, PHPantom should
-produce a `WorkspaceEdit` that updates:
-
-1. The `namespace` declaration in every file that belongs to the
-   renamed namespace (and its children).
-2. All `use` statements across the project that reference classes,
-   functions, or constants under the renamed namespace.
-3. Fully-qualified name references (`\Old\Namespace\Class`) in
-   docblocks, type hints, and string literals (class-string context).
-4. PSR-4 directory structure: include `RenameFile` resource operations
-   in the `WorkspaceEdit` to move files and directories so the
-   filesystem stays consistent with the new namespace. Intelephense
-   already does this: renaming a namespace emits `RenameFile` ops
-   that move files to match the new PSR-4 path. PHPantom should do
-   the same by default when a PSR-4 mapping exists in
-   `composer.json`.
-
-### Scope
-
-Renaming applies to a single namespace segment. For example, renaming
-`Bar` in `App\Bar\Service` affects `App\Bar\*` but not `App\Baz\*`.
-Renaming the root segment (`App`) would rename everything under
-`App\*`.
-
-### Bidirectional support
-
-Phpactor supports the inverse direction: moving a class file to a new
-directory and updating the namespace declaration and all references to
-match. PHPStorm also supports "Move class with full reference update."
-PHPantom should eventually support both directions:
-
-- **Rename namespace → move files** (this task). The user renames a
-  namespace segment and PHPantom moves the corresponding directory.
-- **Move file → fix namespace** (future, separate task). The user
-  moves a file in the file manager and PHPantom updates the
-  `namespace` declaration and all `use` statements to match the new
-  PSR-4 path. Phpactor exposes this as a "Fix namespace / class name"
-  code action. This direction can be tracked separately once F9
-  ships.
-
-### Edge cases
-
-- Namespace aliases (`use App\Old as X`) should preserve the alias
-  and only update the FQN portion.
-- Group use declarations (`use App\Old\{Foo, Bar}`) need the shared
-  prefix updated.
-- Files with multiple namespace declarations (rare but legal in PHP)
-  should only rename the matching namespace block.
-- Inline FQNs in `@param`, `@return`, `@var`, `@throws`, `@see`,
-  `@extends`, `@implements`, and `@template` docblock tags.
-
-### Implementation
-
-1. Detect that the cursor is on a namespace name token (in a
-   `namespace` declaration or `use` statement).
-2. Resolve the full namespace being renamed and the segment being
-   changed.
-3. Use the existing cross-file scanning infrastructure (classmap +
-   PSR-4 walk) to find all files that reference the namespace.
-4. Generate text edits for each affected location.
-5. Look up the PSR-4 autoload mapping in `composer.json` to determine
-   the corresponding directory. If a mapping exists, include
-   `RenameFile` resource operations in the `WorkspaceEdit` to move
-   the directory (and all files beneath it) to the new path.
-
----
-
-## F10. Linked editing ranges
-
-**Impact: Medium · Effort: Low**
-
-Implement the `textDocument/linkedEditingRange` LSP request so that
-renaming one occurrence of a paired token simultaneously updates the
-other. The primary use case in PHP is matching opening and closing
-tags in HTML-embedded PHP, but the most immediately useful case for
-pure PHP is variable renaming within a scope.
-
-### Use cases
-
-1. **Variables within a scope.** Place the cursor on `$userName` and
-   every other occurrence of `$userName` in the same function or
-   method body enters linked editing mode. Typing a new name updates
-   all occurrences simultaneously without triggering a full rename
-   request. This is faster and more fluid than `textDocument/rename`
-   for local renames.
-
-2. **Matching PHP open/close tags.** When editing `<?php ... ?>` in
-   mixed HTML/PHP files, linked editing could pair the tags. Lower
-   priority since most PHP files use only an opening tag.
-
-### Implementation
-
-1. **Register the capability.** Advertise
-   `linkedEditingRangeProvider: true` in the server capabilities
-   during `initialize`.
-
-2. **Handle the request.** When the client sends
-   `textDocument/linkedEditingRange`, determine what the cursor is
-   on:
-   - **Variable name:** use the scope collector to find all
-     occurrences of that variable in the enclosing scope. Return
-     their ranges. Set `wordPattern` to `\$[a-zA-Z_\x80-\xff][a-zA-Z0-9_\x80-\xff]*`
-     so the editor knows to include the `$` prefix in the linked
-     edit region.
-   - If the cursor is not on a supported token, return `null`.
-
-3. **Leverage existing infrastructure.** The scope collector
-   (`scope_collector/mod.rs`) already tracks variable definition and
-   read sites with byte offsets. The document highlight handler
-   (`highlight/mod.rs`) already finds all occurrences of a variable
-   in a scope and returns their ranges. The linked editing handler
-   is essentially the same logic but returning a
-   `LinkedEditingRanges` response instead of `DocumentHighlight[]`.
-
-### Constraints
-
-- All returned ranges must be on the same line or the client may
-  reject them (some clients impose this restriction, though the spec
-  does not). In practice, variable occurrences span multiple lines,
-  and modern clients (VS Code, Zed) handle multi-line linked editing
-  correctly.
-- The response must not include ranges that overlap or that would
-  produce invalid syntax when edited together. Since all ranges are
-  the same variable name, this is naturally satisfied.
 
 ---
 
@@ -682,4 +460,104 @@ command = "phpantom_lsp"
   point users at `brew install phpantom_lsp`.
 - Helix maintainers may want a brief README section documenting the
   server and its feature set.
+
+## F15. Go-to-declaration
+
+**Impact: Low-Medium · Effort: Low**
+
+Implement `textDocument/declaration` to jump from a concrete method to
+its abstract or interface prototype, complementing the existing
+go-to-definition (which jumps to the concrete implementation) and
+go-to-implementation (which jumps from an interface to concrete classes).
+
+### Behaviour
+
+When the cursor is on a method call or method name:
+
+1. Search for an **interface or abstract class** that declares a method
+   with the same name and is in the inheritance chain of the resolved
+   class.
+2. If found, jump to the interface/abstract method declaration.
+3. If no abstract prototype exists, fall back to the same result as
+   go-to-definition.
+
+### Implementation
+
+The existing `resolve_implementation` already does reverse lookups
+(concrete → prototype) via `resolve_reverse_implementation`. The
+declaration handler can reuse this: for `MemberAccess` and
+`MemberDeclaration` symbols, call the reverse-implementation resolver
+first. For class-level symbols, declaration and definition are the
+same.
+
+Register `declaration_provider` in `server.rs` and wire it to a thin
+handler that delegates to the existing infrastructure.
+
+## F16. On-type `}` brace de-indent
+
+**Impact: Low · Effort: Low**
+
+Extend the existing on-type formatting handler (currently triggered on
+`\n` for docblock generation) to also trigger on `}`, automatically
+de-indenting the closing brace to match its opening `{`.
+
+### Behaviour
+
+When the user types `}`:
+
+1. From the `}` position, scan backward through the document text to
+   find the matching `{` (tracking brace depth, skipping strings and
+   comments).
+2. Read the indentation of the line containing the matching `{`.
+3. If the `}` line has more indentation than the `{` line, return a
+   `TextEdit` that replaces the leading whitespace on the `}` line
+   with the `{` line's indentation.
+
+This is a pure text-based operation — no AST needed. Register `}` as
+an additional `on_type_formatting_trigger_character` alongside the
+existing `\n`.
+
+## F17. Class move with reference update
+
+**Impact: Medium · Effort: Medium-High**
+
+Move a class file to a new location and update all references across
+the project (namespace declaration, `use` statements, FQN references).
+PHPantom currently supports file rename on class rename but not the
+full move-with-reference-update workflow.
+
+The operation needs to:
+
+1. Accept a source file and a destination path.
+2. Compute the new namespace from the destination path using the
+   PSR-4 autoload map.
+3. Update the namespace declaration in the moved file.
+4. Find all references to the class across the project (use
+   statements, FQN occurrences, docblock type strings).
+5. Rewrite each reference to use the new FQN, or update the `use`
+   statement and leave short names unchanged.
+
+**References:**
+- Phpactor: `MoveClass` refactoring in the class-mover package.
+
+## F18. Fix namespace/class name from PSR-4
+
+**Impact: Medium · Effort: Low**
+
+When a class's namespace or name does not match its file path per
+PSR-4 mapping, offer a code action (or command) to fix the namespace
+and/or class name. The inverse direction (rename file on class rename)
+is already supported.
+
+The code action should:
+
+1. Resolve the expected namespace and class name from the file path
+   using the PSR-4 autoload map in `composer.json`.
+2. If the current namespace differs, offer "Fix namespace to
+   `App\Models\Foo`".
+3. If the class name differs from the filename, offer "Fix class name
+   to `Foo`".
+
+**References:**
+- Phpactor: `FixNamespaceClassName` code action.
 

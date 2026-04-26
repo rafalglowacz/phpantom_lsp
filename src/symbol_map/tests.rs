@@ -11,6 +11,7 @@ fn make_span(start: u32, end: u32, name: &str) -> SymbolSpan {
         kind: SymbolKind::ClassReference {
             name: name.to_string(),
             is_fqn: false,
+            context: ClassRefContext::Other,
         },
     }
 }
@@ -171,7 +172,10 @@ fn extends_fqn_sets_is_fqn() {
     let fqn_offset = php.find("\\App\\Bar").unwrap() as u32;
     let hit = map.lookup(fqn_offset);
     assert!(hit.is_some(), "Should have a span at the FQN");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\Bar");
         assert!(is_fqn, "FQN should be marked as is_fqn");
     } else {
@@ -705,7 +709,10 @@ fn docblock_fqn_type() {
     let user_offset = php.find("\\App\\Models\\User").unwrap() as u32;
     let hit = map.lookup(user_offset);
     assert!(hit.is_some(), "Should find FQN type in docblock");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\Models\\User");
         assert!(is_fqn, "Docblock FQN type should have is_fqn = true");
     } else {
@@ -753,7 +760,10 @@ fn attribute_class_reference() {
         .unwrap() as u32;
     let hit = map.lookup(attr_offset);
     assert!(hit.is_some(), "Should find attribute class reference");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(
             name,
             "Illuminate\\Database\\Eloquent\\Attributes\\CollectedBy"
@@ -803,7 +813,10 @@ fn fqn_type_hint_in_parameter() {
     let fqn_offset = php.find("\\Illuminate\\Support\\Collection").unwrap() as u32;
     let hit = map.lookup(fqn_offset);
     assert!(hit.is_some(), "Should find FQN type hint in parameter");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Support\\Collection");
         assert!(is_fqn, "FQN parameter type hint should have is_fqn = true");
     } else {
@@ -821,7 +834,10 @@ fn fqn_extends_class_reference() {
     let fqn_offset = php.find("\\Illuminate\\Database\\Eloquent\\Model").unwrap() as u32;
     let hit = map.lookup(fqn_offset);
     assert!(hit.is_some(), "Should find FQN in extends clause");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Model");
         assert!(is_fqn, "FQN extends should have is_fqn = true");
     } else {
@@ -855,7 +871,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find attribute FQN when cursor is on 'CollectedBy'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(
             name,
             "Illuminate\\Database\\Eloquent\\Attributes\\CollectedBy"
@@ -873,7 +892,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find attribute FQN when cursor is on 'Database'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(
             name,
             "Illuminate\\Database\\Eloquent\\Attributes\\CollectedBy"
@@ -890,7 +912,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find extends FQN when cursor is on 'Model'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Model");
         assert!(is_fqn);
     } else {
@@ -907,7 +932,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find extends FQN when cursor is on 'Eloquent'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Model");
         assert!(is_fqn);
     } else {
@@ -921,7 +949,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find docblock FQN when cursor is on 'HasMany'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Relations\\HasMany");
         assert!(is_fqn);
     } else {
@@ -935,7 +966,10 @@ fn fqn_lookup_at_middle_of_name() {
         hit.is_some(),
         "Should find docblock FQN when cursor is on 'Relations'"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Illuminate\\Database\\Eloquent\\Relations\\HasMany");
         assert!(is_fqn);
     } else {
@@ -975,7 +1009,10 @@ fn template_tag_bound_type_produces_class_reference() {
         hit.is_some(),
         "Should find bound type AstNode in @template tag"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "AstNode");
         assert!(!is_fqn);
     } else {
@@ -1018,7 +1055,10 @@ fn template_tag_fqn_bound() {
     let r_offset = php.find("\\App\\Contracts\\Renderable").unwrap() as u32;
     let hit = map.lookup(r_offset);
     assert!(hit.is_some(), "Should find FQN bound type");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\Contracts\\Renderable");
         assert!(is_fqn);
     } else {
@@ -2069,7 +2109,10 @@ fn docblock_closure_fqn_callable_produces_class_reference() {
     let closure_in_doc = php[docblock_start..].find("\\Closure").unwrap() + docblock_start;
     let hit = map.lookup(closure_in_doc as u32);
     assert!(hit.is_some(), "Should find \\Closure as a ClassReference");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Closure");
         assert!(is_fqn, "\\Closure should be FQN");
     } else {
@@ -2191,7 +2234,10 @@ fn docblock_parenthesized_callable_in_union_produces_class_reference() {
         hit.is_some(),
         "Should find \\Closure inside parenthesized callable as ClassReference"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Closure");
         assert!(is_fqn, "\\Closure should be FQN");
         // The span should cover exactly `\Closure`, not `(\Closure`.
@@ -2617,7 +2663,10 @@ fn static_class_constant_access_produces_class_reference() {
     let class_offset = php.find("\\App\\MyClass").unwrap() as u32;
     let hit = map.lookup(class_offset);
     assert!(hit.is_some(), "Should find \\App\\MyClass");
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "App\\MyClass");
         assert!(is_fqn);
     } else {
@@ -3384,7 +3433,10 @@ fn property_attribute_class_reference() {
         hit.is_some(),
         "Should find attribute class reference on property"
     );
-    if let SymbolKind::ClassReference { ref name, is_fqn } = hit.unwrap().kind {
+    if let SymbolKind::ClassReference {
+        ref name, is_fqn, ..
+    } = hit.unwrap().kind
+    {
         assert_eq!(name, "Assert\\NotBlank");
         assert!(is_fqn);
     } else {

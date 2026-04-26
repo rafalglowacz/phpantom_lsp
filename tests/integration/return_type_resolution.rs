@@ -478,11 +478,11 @@ async fn test_goto_definition_class_from_autoload_files() {
                     let fqn = if let Some(ref ns) = func.namespace {
                         format!("{}\\{}", ns, &func.name)
                     } else {
-                        func.name.clone()
+                        func.name.to_string()
                     };
                     fmap.insert(fqn.clone(), (uri.clone(), func.clone()));
                     if func.namespace.is_some() {
-                        fmap.entry(func.name.clone())
+                        fmap.entry(func.name.to_string())
                             .or_insert_with(|| (uri.clone(), func.clone()));
                     }
                 }
@@ -950,11 +950,11 @@ async fn test_goto_definition_function_return_type_cross_file() {
                     let fqn = if let Some(ref ns) = func.namespace {
                         format!("{}\\{}", ns, &func.name)
                     } else {
-                        func.name.clone()
+                        func.name.to_string()
                     };
                     fmap.insert(fqn.clone(), (uri.clone(), func.clone()));
                     if func.namespace.is_some() {
-                        fmap.entry(func.name.clone())
+                        fmap.entry(func.name.to_string())
                             .or_insert_with(|| (uri.clone(), func.clone()));
                     }
                 }
@@ -1487,6 +1487,7 @@ async fn test_goto_definition_inline_conditional_return_class_string() {
         "}\n",
         "\n",
         "/**\n",
+        " * @template TClass\n",
         " * @return ($abstract is class-string<TClass> ? TClass : ($abstract is null ? \\App : mixed))\n",
         " */\n",
         "function app($abstract = null, array $parameters = []) {}\n",
@@ -1514,7 +1515,7 @@ async fn test_goto_definition_inline_conditional_return_class_string() {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
             position: Position {
-                line: 13,
+                line: 14,
                 character: 36,
             },
         },

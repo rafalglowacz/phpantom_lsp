@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::atom::{Atom, AtomMap};
 use crate::php_type::PhpType;
 
 // ─── SharedVec ──────────────────────────────────────────────────────────────
@@ -134,6 +135,24 @@ impl<T> From<Vec<T>> for SharedVec<T> {
         SharedVec(Arc::new(v))
     }
 }
+
+// ─── MethodStore ────────────────────────────────────────────────────────────
+
+/// Key for the global method store: `(class_fqn, method_name)`.
+///
+/// The class FQN is fully qualified (e.g. `"App\\Models\\User"`).
+/// The method name is the original-case name (e.g. `"updateText"`).
+pub type MethodStoreKey = (String, String);
+
+/// Global method store mapping `(class_fqn, method_name)` to the
+/// method's metadata.
+///
+/// This is the first step toward eliminating method cloning during
+/// inheritance: once all consumers look up methods through the store
+/// instead of iterating `ClassInfo.methods`, the inheritance merge
+/// can copy `(fqn, name)` tuples instead of cloning full `MethodInfo`
+/// structs.
+pub type MethodStore = Arc<parking_lot::RwLock<HashMap<MethodStoreKey, Arc<MethodInfo>>>>;
 
 /// Callback that resolves a function name to its [`FunctionInfo`].
 ///
@@ -261,7 +280,7 @@ pub struct ExtractedMembers {
     /// Class constants declared directly in the class body.
     pub constants: Vec<ConstantInfo>,
     /// Trait names referenced by `use` statements inside the class body.
-    pub used_traits: Vec<String>,
+    pub used_traits: Vec<Atom>,
     /// `insteadof` precedence rules from trait `use` blocks.
     pub trait_precedences: Vec<TraitPrecedence>,
     /// `as` alias rules from trait `use` blocks.
@@ -269,7 +288,7 @@ pub struct ExtractedMembers {
     /// `@use` generics extracted from docblocks on trait `use` statements
     /// inside the class body (e.g. `/** @use BuildsQueries<TModel> */`).
     /// Each entry is `(trait_name, vec_of_type_args)`.
-    pub inline_use_generics: Vec<(String, Vec<PhpType>)>,
+    pub inline_use_generics: Vec<(Atom, Vec<PhpType>)>,
 }
 
 /// A type alias definition, either locally defined or imported from another class.
@@ -342,7 +361,7 @@ pub enum Visibility {
 #[derive(Debug, Clone)]
 pub struct ParameterInfo {
     /// The parameter name including the `$` prefix (e.g. "$text").
-    pub name: String,
+    pub name: Atom,
     /// Whether this parameter is required (no default value and not variadic).
     pub is_required: bool,
     /// Effective type hint after docblock override (e.g. `Collection<User>`).
@@ -426,7 +445,7 @@ impl ParameterInfo {
 #[derive(Debug, Clone)]
 pub struct MethodInfo {
     /// The method name (e.g. "updateText").
-    pub name: String,
+    pub name: Atom,
     /// Byte offset of the method's name token in the source file.
     ///
     /// Set to the `span.start.offset` of the name `LocalIdentifier` during
@@ -508,13 +527,13 @@ pub struct MethodInfo {
     /// These are distinct from class-level template parameters
     /// (`ClassInfo::template_params`) and are used for general
     /// method-level generic type substitution at call sites.
-    pub template_params: Vec<String>,
+    pub template_params: Vec<Atom>,
     /// Upper bounds for method-level template parameters.
     ///
     /// For `@template T of Model`, maps `"T"` → `PhpType::parse("Model")`.
     /// Used by hover to display the constraint when the return type or a
     /// parameter type is a method-level template parameter.
-    pub template_param_bounds: HashMap<String, PhpType>,
+    pub template_param_bounds: AtomMap<PhpType>,
     /// Mappings from method-level template parameter names to the method
     /// parameter names (with `$` prefix) that directly bind them via
     /// `@param` annotations.
@@ -523,7 +542,7 @@ pub struct MethodInfo {
     /// `[("T", "$model")]`.  At call sites the resolver uses these
     /// bindings to infer concrete types for each template parameter
     /// from the actual argument expressions.
-    pub template_bindings: Vec<(String, String)>,
+    pub template_bindings: Vec<(Atom, Atom)>,
     /// Whether this method has the `#[Scope]` attribute (Laravel 11+).
     ///
     /// Methods decorated with `#[\Illuminate\Database\Eloquent\Attributes\Scope]`
@@ -622,7 +641,7 @@ impl MethodInfo {
     /// ```
     pub fn virtual_method(name: &str, return_type: Option<&str>) -> Self {
         Self {
-            name: name.to_string(),
+            name: crate::atom::atom(name),
             name_offset: 0,
             parameters: Vec::new(),
             return_type: return_type.map(PhpType::parse),
@@ -637,7 +656,37 @@ impl MethodInfo {
             deprecation_message: None,
             deprecated_replacement: None,
             template_params: Vec::new(),
-            template_param_bounds: HashMap::new(),
+            template_param_bounds: AtomMap::default(),
+            template_bindings: Vec::new(),
+            has_scope_attribute: false,
+            is_abstract: false,
+            is_virtual: true,
+            type_assertions: Vec::new(),
+            throws: Vec::new(),
+        }
+    }
+
+    /// Like [`virtual_method`], but accepts the return type as a
+    /// `PhpType` directly, avoiding the `PhpType → String → PhpType`
+    /// round-trip when the caller already holds a `PhpType`.
+    pub fn virtual_method_typed(name: &str, return_type: Option<&PhpType>) -> Self {
+        Self {
+            name: crate::atom::atom(name),
+            name_offset: 0,
+            parameters: Vec::new(),
+            return_type: return_type.cloned(),
+            native_return_type: None,
+            description: None,
+            return_description: None,
+            links: Vec::new(),
+            see_refs: Vec::new(),
+            is_static: false,
+            visibility: Visibility::Public,
+            conditional_return: None,
+            deprecation_message: None,
+            deprecated_replacement: None,
+            template_params: Vec::new(),
+            template_param_bounds: AtomMap::default(),
             template_bindings: Vec::new(),
             has_scope_attribute: false,
             is_abstract: false,
@@ -653,7 +702,7 @@ impl MethodInfo {
 pub struct PropertyInfo {
     /// The property name WITHOUT the `$` prefix (e.g. "name", "age").
     /// This matches PHP access syntax: `$this->name` not `$this->$name`.
-    pub name: String,
+    pub name: Atom,
     /// Byte offset of the property's variable token (`$name`) in the source file.
     ///
     /// Set to the `span.start.offset` of the `DirectVariable` during parsing.
@@ -768,7 +817,7 @@ impl PropertyInfo {
     /// holds a `PhpType`.
     pub fn virtual_property_typed(name: &str, type_hint: Option<&PhpType>) -> Self {
         Self {
-            name: name.to_string(),
+            name: crate::atom::atom(name),
             name_offset: 0,
             type_hint: type_hint.cloned(),
             native_type_hint: None,
@@ -787,7 +836,7 @@ impl PropertyInfo {
 #[derive(Debug, Clone)]
 pub struct ConstantInfo {
     /// The constant name (e.g. "MAX_SIZE", "STATUS_ACTIVE").
-    pub name: String,
+    pub name: Atom,
     /// Byte offset of the constant's name token in the source file.
     ///
     /// Set to the `span.start.offset` of the name `LocalIdentifier` during
@@ -941,7 +990,7 @@ pub(crate) struct ResolvedCallableTarget {
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
     /// The function name (e.g. "array_map", "myHelper").
-    pub name: String,
+    pub name: Atom,
     /// Byte offset of the function's name token in the source file.
     ///
     /// Set to the `span.start.offset` of the name `LocalIdentifier` during
@@ -1036,7 +1085,7 @@ pub struct FunctionInfo {
     ///
     /// These mirror the `MethodInfo::template_params` field and are used
     /// for generic type substitution at call sites.
-    pub template_params: Vec<String>,
+    pub template_params: Vec<Atom>,
     /// Mappings from function-level template parameter names to the
     /// function parameter names (with `$` prefix) that directly bind
     /// them via `@param` annotations.
@@ -1045,7 +1094,15 @@ pub struct FunctionInfo {
     /// `[("T", "$model")]`.  At call sites the resolver uses these
     /// bindings to infer concrete types for each template parameter
     /// from the actual argument expressions.
-    pub template_bindings: Vec<(String, String)>,
+    pub template_bindings: Vec<(Atom, Atom)>,
+    /// Upper bounds for function-level template parameters
+    /// (`@template T of Foo` → maps `"T"` to `Foo`).
+    ///
+    /// Used by `build_function_template_subs` to replace unbound
+    /// template parameters with their declared bound (or `mixed`
+    /// when no bound exists) so that raw template names never leak
+    /// into downstream consumers.
+    pub template_param_bounds: AtomMap<PhpType>,
     /// Exception types from `@throws` docblock tags.
     ///
     /// Populated during parsing from the function's docblock.  Used by
@@ -1140,12 +1197,12 @@ pub enum AssertionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitPrecedence {
     /// The trait that provides the winning method (e.g. `"TraitA"`).
-    pub trait_name: String,
+    pub trait_name: Atom,
     /// The method name being resolved (e.g. `"method"`).
-    pub method_name: String,
+    pub method_name: Atom,
     /// The traits whose versions of the method are excluded
     /// (e.g. `["TraitB"]`).
-    pub insteadof: Vec<String>,
+    pub insteadof: Vec<Atom>,
 }
 
 /// A trait `as` alias adaptation.
@@ -1165,12 +1222,12 @@ pub struct TraitPrecedence {
 pub struct TraitAlias {
     /// The trait that provides the method (e.g. `Some("TraitB")`).
     /// `None` when the method reference is unqualified (e.g. `method as …`).
-    pub trait_name: Option<String>,
+    pub trait_name: Option<Atom>,
     /// The original method name (e.g. `"method"`).
-    pub method_name: String,
+    pub method_name: Atom,
     /// The alias name, if any (e.g. `Some("traitBMethod")`).
     /// `None` when only the visibility is changed (e.g. `method as protected`).
-    pub alias: Option<String>,
+    pub alias: Option<Atom>,
     /// Optional visibility override (e.g. `Some(Visibility::Protected)`).
     pub visibility: Option<Visibility>,
 }
@@ -1246,7 +1303,7 @@ pub mod attribute_target {
 /// Grouped into a sub-struct to keep the core `ClassInfo` focused on
 /// PHP semantics. All fields default to empty/`None`, so non-Laravel
 /// classes carry no overhead beyond a single struct value.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LaravelMetadata {
     /// Custom collection class for Eloquent models.
     ///
@@ -1262,7 +1319,7 @@ pub struct LaravelMetadata {
     /// `\Illuminate\Database\Eloquent\Collection` with this class in
     /// relationship property types and Builder-forwarded return types
     /// (e.g. `get()`, `all()`).
-    pub custom_collection: Option<String>,
+    pub custom_collection: Option<PhpType>,
     /// Eloquent cast definitions extracted from the `$casts` property
     /// initializer or the `casts()` method body.
     ///
@@ -1289,7 +1346,7 @@ pub struct LaravelMetadata {
     /// `("is_active", "bool")`, `("login_count", "int")`).
     /// The `LaravelModelProvider` uses these as a fallback when no
     /// `$casts` entry exists for the same column.
-    pub attributes_definitions: Vec<(String, String)>,
+    pub attributes_definitions: Vec<(String, PhpType)>,
     /// Column names extracted from `$fillable`, `$guarded`, `$hidden`,
     /// and `$appends` property arrays.
     ///
@@ -1329,12 +1386,31 @@ pub struct ClassInfo {
     /// The syntactic kind of this class-like declaration.
     pub kind: ClassLikeKind,
     /// The name of the class (e.g. "User").
-    pub name: String,
+    pub name: Atom,
     /// The methods defined directly in this class.
     ///
-    /// Wrapped in [`SharedVec`] so that cloning a `ClassInfo` is O(1)
-    /// for this field (Arc refcount bump) instead of O(N_methods).
-    pub methods: SharedVec<MethodInfo>,
+    /// Each method is wrapped in `Arc` so that inheritance merge can
+    /// share method metadata across parent and child classes without
+    /// deep-cloning the `MethodInfo` struct.  When no generic
+    /// substitution is needed, merging a parent method into a child
+    /// is a simple `Arc::clone` (refcount bump) instead of copying
+    /// all strings, vecs, and hashmaps inside `MethodInfo`.
+    ///
+    /// The outer [`SharedVec`] makes cloning the entire `ClassInfo`
+    /// O(1) (Arc refcount bump on the Vec itself).
+    pub methods: SharedVec<Arc<MethodInfo>>,
+    /// O(1) index from method name → position in `methods`.
+    ///
+    /// Rebuilt by [`rebuild_method_index`] after bulk mutations
+    /// (inheritance merge, parsing). The `get_method*` and `has_method`
+    /// helpers use this for O(1) lookup instead of linear scan.
+    /// When empty or stale (detected via `indexed_method_count`),
+    /// the helpers fall back to linear scan.
+    pub method_index: AtomMap<u32>,
+    /// The `methods.len()` at the time `method_index` was last built.
+    /// Used to detect staleness: if `methods.len() != indexed_method_count`,
+    /// the index is stale and the helpers fall back to linear scan.
+    pub indexed_method_count: u32,
     /// The properties defined directly in this class.
     pub properties: SharedVec<PropertyInfo>,
     /// The constants defined directly in this class.
@@ -1352,22 +1428,22 @@ pub struct ClassInfo {
     pub keyword_offset: u32,
     /// The parent class name from the `extends` clause, if any.
     /// This is the raw name as written in source (e.g. "BaseClass", "Foo\\Bar").
-    pub parent_class: Option<String>,
+    pub parent_class: Option<Atom>,
     /// Interface names from the `implements` clause (classes and enums only).
     ///
     /// These are resolved to fully-qualified names during post-processing
     /// (see `resolve_parent_class_names` in `parser/ast_update.rs`).
     /// Used by "Go to Implementation" to find classes that implement a
     /// given interface.
-    pub interfaces: Vec<String>,
+    pub interfaces: Vec<Atom>,
     /// Trait names used by this class via `use TraitName;` statements.
     /// These are resolved to fully-qualified names during post-processing.
-    pub used_traits: Vec<String>,
+    pub used_traits: Vec<Atom>,
     /// Class names from `@mixin` docblock tags.
     /// These declare that this class exposes public members from the listed
     /// classes via magic methods (`__call`, `__get`, `__set`, etc.).
     /// Resolved to fully-qualified names during post-processing.
-    pub mixins: Vec<String>,
+    pub mixins: Vec<Atom>,
     /// Generic type arguments from `@mixin` tags.
     ///
     /// Each entry is `(MixinClassName, [TypeArg1, TypeArg2, …])`.
@@ -1378,7 +1454,7 @@ pub struct ClassInfo {
     /// from the mixin class's `@template` parameters to the provided
     /// concrete types, analogous to how `extends_generics` works for
     /// parent class inheritance.
-    pub mixin_generics: Vec<(String, Vec<PhpType>)>,
+    pub mixin_generics: Vec<(Atom, Vec<PhpType>)>,
     /// Whether the class is declared `final`.
     ///
     /// Final classes cannot be extended, so `static::` is equivalent to
@@ -1416,7 +1492,7 @@ pub struct ClassInfo {
     ///
     /// For example, `Collection` with `@template TKey` and `@template TValue`
     /// would have `template_params: vec!["TKey".into(), "TValue".into()]`.
-    pub template_params: Vec<String>,
+    pub template_params: Vec<Atom>,
     /// Upper bounds for template parameters, keyed by parameter name.
     ///
     /// Populated from the `of` clause in `@template` tags. For example,
@@ -1426,7 +1502,7 @@ pub struct ClassInfo {
     /// When a type hint resolves to a template parameter name that cannot be
     /// concretely substituted, the resolver falls back to this bound so that
     /// completion and go-to-definition still work against the bound type.
-    pub template_param_bounds: HashMap<String, PhpType>,
+    pub template_param_bounds: AtomMap<PhpType>,
     /// Default values for template parameters, keyed by parameter name.
     ///
     /// Populated from the `= default` clause in `@template` tags. For example,
@@ -1435,19 +1511,19 @@ pub struct ClassInfo {
     /// When a conditional return type references a template parameter that
     /// has no explicit binding at the call site, the resolver uses the
     /// default value to evaluate the condition.
-    pub template_param_defaults: HashMap<String, PhpType>,
+    pub template_param_defaults: AtomMap<PhpType>,
     /// Generic type arguments from `@extends` / `@phpstan-extends` tags.
     ///
     /// Each entry is `(ClassName, [TypeArg1, TypeArg2, …])`.
     /// For example, `@extends Collection<int, Language>` produces
     /// `("Collection", [PhpType::parse("int"), PhpType::parse("Language")])`.
-    pub extends_generics: Vec<(String, Vec<PhpType>)>,
+    pub extends_generics: Vec<(Atom, Vec<PhpType>)>,
     /// Generic type arguments from `@implements` / `@phpstan-implements` tags.
     ///
     /// Each entry is `(InterfaceName, [TypeArg1, TypeArg2, …])`.
     /// For example, `@implements ArrayAccess<int, User>` produces
     /// `("ArrayAccess", [PhpType::parse("int"), PhpType::parse("User")])`.
-    pub implements_generics: Vec<(String, Vec<PhpType>)>,
+    pub implements_generics: Vec<(Atom, Vec<PhpType>)>,
     /// Generic type arguments from `@use` / `@phpstan-use` tags.
     ///
     /// Each entry is `(TraitName, [TypeArg1, TypeArg2, …])`.
@@ -1458,7 +1534,7 @@ pub struct ClassInfo {
     /// `@use SomeTrait<ConcreteType>`, the trait's template parameter `T`
     /// is substituted with `ConcreteType` in all inherited methods and
     /// properties.
-    pub use_generics: Vec<(String, Vec<PhpType>)>,
+    pub use_generics: Vec<(Atom, Vec<PhpType>)>,
     /// Type aliases defined via `@phpstan-type` / `@psalm-type` tags in the
     /// class-level docblock, and imported via `@phpstan-import-type` /
     /// `@psalm-import-type`.
@@ -1469,7 +1545,7 @@ pub struct ClassInfo {
     ///
     /// These are consulted during type resolution so that a method returning
     /// `UserData` resolves to the underlying `array{name: string, email: string}`.
-    pub type_aliases: HashMap<String, TypeAliasDef>,
+    pub type_aliases: AtomMap<TypeAliasDef>,
     /// Trait `insteadof` precedence adaptations.
     ///
     /// When a class uses multiple traits with conflicting method names,
@@ -1505,7 +1581,7 @@ pub struct ClassInfo {
     /// distinguish two classes with the same short name in different
     /// namespace blocks (e.g. `Illuminate\Database\Eloquent\Builder` vs
     /// `Illuminate\Database\Query\Builder`).
-    pub file_namespace: Option<String>,
+    pub file_namespace: Option<Atom>,
     /// The backing type of a backed enum (e.g. `string` or `int`).
     /// `None` for unit enums and non-enum class-like declarations.
     pub backed_type: Option<BackedEnumType>,
@@ -1533,11 +1609,97 @@ impl ClassInfo {
     /// Combines `file_namespace` and `name` into a single FQN string
     /// (e.g. `"App\\Models\\User"`).  When no namespace is set, returns
     /// the short name as-is.
-    pub fn fqn(&self) -> String {
+    pub fn fqn(&self) -> Atom {
         match &self.file_namespace {
-            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, self.name),
-            _ => self.name.clone(),
+            Some(ns) if !ns.is_empty() => crate::atom::atom(&format!("{}\\{}", ns, self.name)),
+            _ => self.name,
         }
+    }
+
+    /// Rebuild the `method_index` from the current `methods` vec.
+    ///
+    /// Call this after bulk mutations to `methods` (inheritance merge,
+    /// parsing, virtual member injection). Individual `push` calls in
+    /// test code can skip this — the lookup helpers fall back to linear
+    /// scan when the index is empty or stale.
+    pub fn rebuild_method_index(&mut self) {
+        self.method_index.clear();
+        self.method_index.reserve(self.methods.len());
+        for (i, method) in self.methods.iter().enumerate() {
+            // First-writer-wins: matches the semantics of
+            // `.iter().find(|m| m.name == name)` which returns the
+            // first match when duplicate names exist.
+            self.method_index.entry(method.name).or_insert(i as u32);
+        }
+        self.indexed_method_count = self.methods.len() as u32;
+    }
+
+    /// Returns `true` when `method_index` is populated and consistent
+    /// with the current `methods` vec length.
+    #[inline]
+    fn method_index_valid(&self) -> bool {
+        !self.method_index.is_empty() && self.methods.len() as u32 == self.indexed_method_count
+    }
+
+    /// Look up a method by exact name (case-sensitive).
+    ///
+    /// Uses the `method_index` for O(1) lookup when available,
+    /// falling back to linear scan otherwise.
+    #[inline]
+    pub fn get_method(&self, name: &str) -> Option<&MethodInfo> {
+        if self.method_index_valid() {
+            let atom = crate::atom::atom(name);
+            return self
+                .method_index
+                .get(&atom)
+                .and_then(|&idx| self.methods.get(idx as usize))
+                .map(|arc| arc.as_ref());
+        }
+        self.methods
+            .iter()
+            .find(|m| m.name == name)
+            .map(|arc| arc.as_ref())
+    }
+
+    /// Look up a method by name, ignoring ASCII case.
+    ///
+    /// Used for PHP magic methods like `__construct` where the casing
+    /// in source may vary. Always uses linear scan since the index is
+    /// keyed by exact name.
+    #[inline]
+    pub fn get_method_ci(&self, name: &str) -> Option<&MethodInfo> {
+        self.methods
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(name))
+            .map(|arc| arc.as_ref())
+    }
+
+    /// Check whether a method with the given exact name exists.
+    #[inline]
+    pub fn has_method(&self, name: &str) -> bool {
+        if self.method_index_valid() {
+            let atom = crate::atom::atom(name);
+            return self.method_index.contains_key(&atom);
+        }
+        self.methods.iter().any(|m| m.name == name)
+    }
+
+    /// Look up a method by exact name and return a clone of the `Arc`.
+    ///
+    /// Useful when the caller needs to hold onto the method beyond the
+    /// borrow of `self`, or when it will be inserted into another
+    /// `ClassInfo` without modification.
+    #[inline]
+    pub fn get_method_arc(&self, name: &str) -> Option<Arc<MethodInfo>> {
+        if self.method_index_valid() {
+            let atom = crate::atom::atom(name);
+            return self
+                .method_index
+                .get(&atom)
+                .and_then(|&idx| self.methods.get(idx as usize))
+                .map(Arc::clone);
+        }
+        self.methods.iter().find(|m| m.name == name).map(Arc::clone)
     }
 
     /// Compare two `ClassInfo` values by signature-relevant fields only.
@@ -1593,7 +1755,7 @@ impl ClassInfo {
             return false;
         }
         for method in &self.methods {
-            let Some(other_method) = other.methods.iter().find(|m| m.name == method.name) else {
+            let Some(other_method) = other.get_method(&method.name) else {
                 return false;
             };
             if !method.signature_eq(other_method) {
@@ -1651,12 +1813,8 @@ impl ClassInfo {
     /// offset, or `None` otherwise.  The `kind` string should be one of
     /// `"method"`, `"property"`, or `"constant"`.
     pub(crate) fn member_name_offset(&self, name: &str, kind: &str) -> Option<u32> {
-        let off = match kind {
-            "method" => self
-                .methods
-                .iter()
-                .find(|m| m.name == name)
-                .map(|m| m.name_offset),
+        let off: Option<u32> = match kind {
+            "method" => self.get_method(name).map(|m| m.name_offset),
             "property" => self
                 .properties
                 .iter()
@@ -1678,14 +1836,6 @@ impl ClassInfo {
     pub(crate) fn push_unique(results: &mut Vec<ClassInfo>, cls: ClassInfo) {
         if !results.iter().any(|c| c.name == cls.name) {
             results.push(cls);
-        }
-    }
-
-    /// Extend `results` with entries from `new_classes`, skipping any whose
-    /// name already appears in `results`.
-    pub(crate) fn extend_unique(results: &mut Vec<ClassInfo>, new_classes: Vec<ClassInfo>) {
-        for cls in new_classes {
-            Self::push_unique(results, cls);
         }
     }
 
@@ -1733,7 +1883,7 @@ pub struct ResolvedType {
     /// Resolved class info, present when the base type names a
     /// class/interface/trait/enum.  `None` for scalars, shapes
     /// where the base is `array`, and unresolvable types.
-    pub class_info: Option<ClassInfo>,
+    pub class_info: Option<Arc<ClassInfo>>,
 }
 
 impl ResolvedType {
@@ -1746,7 +1896,18 @@ impl ResolvedType {
     /// but loses generic parameters.  Future sprints will populate the
     /// type string from the actual return type annotation.
     pub fn from_class(class: ClassInfo) -> Self {
-        let type_string = PhpType::Named(class.name.clone());
+        let type_string = PhpType::Named(class.fqn().to_string());
+        Self {
+            type_string,
+            class_info: Some(Arc::new(class)),
+        }
+    }
+
+    /// Create a `ResolvedType` from an `Arc<ClassInfo>`, using its name
+    /// as the type string.  Avoids cloning when the caller already holds
+    /// an `Arc`.
+    pub fn from_arc(class: Arc<ClassInfo>) -> Self {
+        let type_string = PhpType::Named(class.fqn().to_string());
         Self {
             type_string,
             class_info: Some(class),
@@ -1775,15 +1936,59 @@ impl ResolvedType {
     pub fn from_both(type_string: PhpType, class: ClassInfo) -> Self {
         Self {
             type_string,
+            class_info: Some(Arc::new(class)),
+        }
+    }
+
+    /// Create a `ResolvedType` carrying both a type string and an
+    /// `Arc<ClassInfo>`.  Avoids cloning when the caller already holds
+    /// an `Arc`.
+    pub fn from_both_arc(type_string: PhpType, class: Arc<ClassInfo>) -> Self {
+        Self {
+            type_string,
             class_info: Some(class),
         }
+    }
+
+    /// Strip null from the type, preserving class info (since
+    /// null-stripping never invalidates the class).
+    #[allow(dead_code)]
+    pub(crate) fn strip_null(&mut self) {
+        if let Some(non_null) = self.type_string.non_null_type() {
+            self.type_string = non_null;
+        }
+    }
+
+    /// Replace the type string and clear `class_info` when the new type
+    /// no longer matches the original class.
+    pub(crate) fn replace_type(&mut self, new_type: PhpType) {
+        let still_matches = self.class_info.as_ref().is_some_and(|ci| {
+            // Check base_name first (fast path for simple Named/Generic types).
+            if let Some(bn) = new_type.base_name() {
+                let bn = bn.strip_prefix('\\').unwrap_or(bn);
+                if bn == ci.name || bn == ci.fqn() {
+                    return true;
+                }
+            }
+            // For unions/intersections, check whether the class still
+            // appears as a top-level member (e.g. `Foobar|int` still
+            // contains `Foobar`).
+            new_type.top_level_class_names().iter().any(|name| {
+                let name = name.strip_prefix('\\').unwrap_or(name);
+                name == ci.name || name == ci.fqn()
+            })
+        });
+        if !still_matches {
+            self.class_info = None;
+        }
+        self.type_string = new_type;
     }
 
     /// Extract just the class info, discarding the type string.
     ///
     /// Convenience method for callers that only need the `ClassInfo`
     /// (e.g. the completion builder).
-    pub fn into_class_info(self) -> Option<ClassInfo> {
+    pub fn into_class_info(self) -> Option<Arc<ClassInfo>> {
         self.class_info
     }
 
@@ -1817,8 +2022,8 @@ impl ResolvedType {
     /// This is a migration helper for code paths that still produce
     /// `Vec<ClassInfo>` internally (e.g. `type_hint_to_classes_typed`).
     /// Future sprints will populate proper type strings at the source.
-    pub(crate) fn from_classes(classes: Vec<ClassInfo>) -> Vec<ResolvedType> {
-        classes.into_iter().map(ResolvedType::from_class).collect()
+    pub(crate) fn from_classes(classes: Vec<Arc<ClassInfo>>) -> Vec<ResolvedType> {
+        classes.into_iter().map(ResolvedType::from_arc).collect()
     }
 
     /// Convert a `Vec<ClassInfo>` into `Vec<ResolvedType>`, preserving
@@ -1830,14 +2035,25 @@ impl ResolvedType {
     /// `type_hint_to_classes_typed`), each class uses its own name as the
     /// type string because the hint was already split into parts.
     pub(crate) fn from_classes_with_hint(
-        classes: Vec<ClassInfo>,
+        classes: Vec<Arc<ClassInfo>>,
         type_hint: PhpType,
     ) -> Vec<ResolvedType> {
         if classes.len() == 1 {
             let class = classes.into_iter().next().unwrap();
-            vec![ResolvedType::from_both(type_hint, class)]
+            vec![ResolvedType::from_both_arc(type_hint, class)]
+        } else if matches!(&type_hint, PhpType::Intersection(_)) {
+            // Intersection types: all classes contribute members to a
+            // single value.  Emit one ResolvedType per class (so
+            // `into_arced_classes` sees every member set) but tag each
+            // entry with the full intersection PhpType so that
+            // `types_joined` can reconstruct the intersection instead
+            // of wrapping them in a union.
+            classes
+                .into_iter()
+                .map(|c| ResolvedType::from_both_arc(type_hint.clone(), c))
+                .collect()
         } else {
-            classes.into_iter().map(ResolvedType::from_class).collect()
+            classes.into_iter().map(ResolvedType::from_arc).collect()
         }
     }
 
@@ -1849,13 +2065,13 @@ impl ResolvedType {
     pub(crate) fn into_classes(resolved: Vec<ResolvedType>) -> Vec<ClassInfo> {
         resolved
             .into_iter()
-            .filter_map(|rt| rt.class_info)
+            .filter_map(|rt| rt.class_info.map(Arc::unwrap_or_clone))
             .collect()
     }
 
-    /// Extract `Vec<Arc<ClassInfo>>` from `Vec<ResolvedType>`, wrapping
-    /// each class in an `Arc` and discarding entries that have no class
-    /// info (scalars, shapes, unresolvable types).
+    /// Extract `Vec<Arc<ClassInfo>>` from `Vec<ResolvedType>`, returning
+    /// the inner `Arc`s directly (no wrapping needed since `class_info`
+    /// is already `Arc<ClassInfo>`).
     ///
     /// This is the primary conversion used by callers of
     /// `resolve_target_classes` that need `Arc<ClassInfo>` for
@@ -1863,7 +2079,7 @@ impl ResolvedType {
     pub(crate) fn into_arced_classes(resolved: Vec<ResolvedType>) -> Vec<Arc<ClassInfo>> {
         resolved
             .into_iter()
-            .filter_map(|rt| rt.class_info.map(Arc::new))
+            .filter_map(|rt| rt.class_info)
             .collect()
     }
 
@@ -1887,7 +2103,7 @@ impl ResolvedType {
     ) {
         let mut classes: Vec<ClassInfo> = results
             .iter()
-            .filter_map(|rt| rt.class_info.clone())
+            .filter_map(|rt| rt.class_info.as_ref().map(|arc| arc.as_ref().clone()))
             .collect();
         f(&mut classes);
 
@@ -1930,6 +2146,16 @@ impl ResolvedType {
             0 => PhpType::mixed(),
             1 => resolved[0].type_string.clone(),
             _ => {
+                // When all entries share the same intersection type,
+                // they came from a single intersection — return it
+                // directly instead of wrapping in a Union.
+                if let PhpType::Intersection(_) = &resolved[0].type_string
+                    && resolved
+                        .iter()
+                        .all(|rt| rt.type_string == resolved[0].type_string)
+                {
+                    return resolved[0].type_string.clone();
+                }
                 let members: Vec<PhpType> =
                     resolved.iter().map(|rt| rt.type_string.clone()).collect();
                 PhpType::Union(members)
@@ -2040,6 +2266,7 @@ pub(crate) const MAX_ALIAS_DEPTH: u8 = 10;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atom::atom;
 
     /// Helper: create a minimal MethodInfo for testing signature_eq.
     fn method(name: &str) -> MethodInfo {
@@ -2054,7 +2281,7 @@ mod tests {
     /// Helper: create a minimal ConstantInfo for testing signature_eq.
     fn constant(name: &str) -> ConstantInfo {
         ConstantInfo {
-            name: name.to_string(),
+            name: crate::atom::atom(name),
             name_offset: 0,
             type_hint: Some(PhpType::parse("string")),
             visibility: Visibility::Public,
@@ -2072,7 +2299,7 @@ mod tests {
     /// Helper: create a minimal ParameterInfo for testing signature_eq.
     fn param(name: &str, type_hint: &str) -> ParameterInfo {
         ParameterInfo {
-            name: name.to_string(),
+            name: crate::atom::atom(name),
             is_required: true,
             type_hint: Some(PhpType::parse(type_hint)),
             native_type_hint: None,
@@ -2244,7 +2471,7 @@ mod tests {
     #[test]
     fn method_signature_eq_detects_template_change() {
         let mut a = method("foo");
-        a.template_params = vec!["T".to_string()];
+        a.template_params = vec![atom("T")];
         let b = method("foo");
         assert!(!a.signature_eq(&b));
     }
@@ -2399,11 +2626,11 @@ mod tests {
     #[test]
     fn class_signature_eq_identical_empty() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             ..Default::default()
         };
         assert!(a.signature_eq(&b));
@@ -2412,11 +2639,11 @@ mod tests {
     #[test]
     fn class_signature_eq_different_name() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Bar".to_string(),
+            name: crate::atom::atom("Bar"),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2425,12 +2652,12 @@ mod tests {
     #[test]
     fn class_signature_eq_different_kind() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             kind: ClassLikeKind::Class,
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             kind: ClassLikeKind::Interface,
             ..Default::default()
         };
@@ -2440,13 +2667,13 @@ mod tests {
     #[test]
     fn class_signature_eq_different_parent() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            parent_class: Some("Base".to_string()),
+            name: crate::atom::atom("Foo"),
+            parent_class: Some(crate::atom::atom("Base")),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
-            parent_class: Some("OtherBase".to_string()),
+            name: crate::atom::atom("Foo"),
+            parent_class: Some(crate::atom::atom("OtherBase")),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2455,12 +2682,12 @@ mod tests {
     #[test]
     fn class_signature_eq_different_interfaces() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            interfaces: vec!["Countable".to_string()],
+            name: crate::atom::atom("Foo"),
+            interfaces: vec![crate::atom::atom("Countable")],
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             interfaces: vec![],
             ..Default::default()
         };
@@ -2470,14 +2697,14 @@ mod tests {
     #[test]
     fn class_signature_eq_ignores_offsets() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             start_offset: 100,
             end_offset: 500,
             keyword_offset: 95,
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             start_offset: 200,
             end_offset: 600,
             keyword_offset: 195,
@@ -2489,12 +2716,12 @@ mod tests {
     #[test]
     fn class_signature_eq_ignores_link() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             links: vec!["https://example.com".to_string()],
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             links: vec![],
             ..Default::default()
         };
@@ -2504,13 +2731,13 @@ mod tests {
     #[test]
     fn class_signature_eq_methods_order_insensitive() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            methods: vec![method("alpha"), method("beta")].into(),
+            name: crate::atom::atom("Foo"),
+            methods: vec![Arc::new(method("alpha")), Arc::new(method("beta"))].into(),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
-            methods: vec![method("beta"), method("alpha")].into(),
+            name: crate::atom::atom("Foo"),
+            methods: vec![Arc::new(method("beta")), Arc::new(method("alpha"))].into(),
             ..Default::default()
         };
         assert!(a.signature_eq(&b));
@@ -2519,13 +2746,13 @@ mod tests {
     #[test]
     fn class_signature_eq_methods_different_count() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            methods: vec![method("alpha")].into(),
+            name: crate::atom::atom("Foo"),
+            methods: vec![Arc::new(method("alpha"))].into(),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
-            methods: vec![method("alpha"), method("beta")].into(),
+            name: crate::atom::atom("Foo"),
+            methods: vec![Arc::new(method("alpha")), Arc::new(method("beta"))].into(),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2536,13 +2763,13 @@ mod tests {
         let mut m = method("foo");
         m.return_type = Some(PhpType::parse("int"));
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            methods: vec![m].into(),
+            name: crate::atom::atom("Foo"),
+            methods: vec![Arc::new(m)].into(),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
-            methods: vec![method("foo")].into(),
+            name: crate::atom::atom("Foo"),
+            methods: vec![Arc::new(method("foo"))].into(),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2551,12 +2778,12 @@ mod tests {
     #[test]
     fn class_signature_eq_properties_order_insensitive() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             properties: vec![prop("x", "int"), prop("y", "string")].into(),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             properties: vec![prop("y", "string"), prop("x", "int")].into(),
             ..Default::default()
         };
@@ -2566,12 +2793,12 @@ mod tests {
     #[test]
     fn class_signature_eq_constants_order_insensitive() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             constants: vec![constant("A"), constant("B")].into(),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             constants: vec![constant("B"), constant("A")].into(),
             ..Default::default()
         };
@@ -2581,12 +2808,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_docblock_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             class_docblock: Some("/** @method void bar() */".to_string()),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             class_docblock: None,
             ..Default::default()
         };
@@ -2596,12 +2823,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_template_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            template_params: vec!["T".to_string()],
+            name: crate::atom::atom("Foo"),
+            template_params: vec![crate::atom::atom("T")],
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             template_params: vec![],
             ..Default::default()
         };
@@ -2611,17 +2838,17 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_extends_generics_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             extends_generics: vec![(
-                "Base".to_string(),
+                crate::atom::atom("Base"),
                 vec![crate::php_type::PhpType::parse("int")],
             )],
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             extends_generics: vec![(
-                "Base".to_string(),
+                crate::atom::atom("Base"),
                 vec![crate::php_type::PhpType::parse("string")],
             )],
             ..Default::default()
@@ -2632,12 +2859,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_trait_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            used_traits: vec!["SomeTrait".to_string()],
+            name: crate::atom::atom("Foo"),
+            used_traits: vec![crate::atom::atom("SomeTrait")],
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             used_traits: vec![],
             ..Default::default()
         };
@@ -2647,12 +2874,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_final_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             is_final: true,
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             is_final: false,
             ..Default::default()
         };
@@ -2662,12 +2889,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_abstract_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             is_abstract: true,
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             is_abstract: false,
             ..Default::default()
         };
@@ -2677,12 +2904,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_deprecation_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             deprecation_message: Some("Use Bar".to_string()),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             deprecation_message: None,
             ..Default::default()
         };
@@ -2692,13 +2919,13 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_backed_type_change() {
         let a = ClassInfo {
-            name: "Status".to_string(),
+            name: crate::atom::atom("Status"),
             kind: ClassLikeKind::Enum,
             backed_type: Some(BackedEnumType::String),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Status".to_string(),
+            name: crate::atom::atom("Status"),
             kind: ClassLikeKind::Enum,
             backed_type: Some(BackedEnumType::Int),
             ..Default::default()
@@ -2709,13 +2936,13 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_laravel_metadata_change() {
         let mut a = ClassInfo {
-            name: "User".to_string(),
+            name: crate::atom::atom("User"),
             ..Default::default()
         };
-        a.laravel_mut().custom_collection = Some("UserCollection".to_string());
+        a.laravel_mut().custom_collection = Some(PhpType::Named("UserCollection".to_string()));
 
         let b = ClassInfo {
-            name: "User".to_string(),
+            name: crate::atom::atom("User"),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2724,12 +2951,12 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_mixin_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            mixins: vec!["SomeClass".to_string()],
+            name: crate::atom::atom("Foo"),
+            mixins: vec![crate::atom::atom("SomeClass")],
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             mixins: vec![],
             ..Default::default()
         };
@@ -2739,13 +2966,13 @@ mod tests {
     #[test]
     fn class_signature_eq_detects_namespace_change() {
         let a = ClassInfo {
-            name: "Foo".to_string(),
-            file_namespace: Some("App\\Models".to_string()),
+            name: crate::atom::atom("Foo"),
+            file_namespace: Some(crate::atom::atom("App\\Models")),
             ..Default::default()
         };
         let b = ClassInfo {
-            name: "Foo".to_string(),
-            file_namespace: Some("App\\Services".to_string()),
+            name: crate::atom::atom("Foo"),
+            file_namespace: Some(crate::atom::atom("App\\Services")),
             ..Default::default()
         };
         assert!(!a.signature_eq(&b));
@@ -2768,11 +2995,11 @@ mod tests {
         c_a.description = Some("Old const desc".to_string());
 
         let a = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             start_offset: 10,
             end_offset: 500,
             keyword_offset: 5,
-            methods: vec![m_a].into(),
+            methods: vec![Arc::new(m_a)].into(),
             properties: vec![p_a].into(),
             constants: vec![c_a].into(),
             links: vec!["https://old.example.com".to_string()],
@@ -2792,11 +3019,11 @@ mod tests {
         c_b.description = Some("New const desc".to_string());
 
         let b = ClassInfo {
-            name: "Foo".to_string(),
+            name: crate::atom::atom("Foo"),
             start_offset: 15,
             end_offset: 510,
             keyword_offset: 10,
-            methods: vec![m_b].into(),
+            methods: vec![Arc::new(m_b)].into(),
             properties: vec![p_b].into(),
             constants: vec![c_b].into(),
             links: vec!["https://new.example.com".to_string()],
@@ -2807,5 +3034,189 @@ mod tests {
             a.signature_eq(&b),
             "Body-only changes (offsets, descriptions, links) must not break signature_eq"
         );
+    }
+
+    // ── ResolvedType helpers ────────────────────────────────────────
+
+    /// Helper: create a minimal ClassInfo with only a name.
+    fn class(name: &str) -> ClassInfo {
+        ClassInfo {
+            name: crate::atom::atom(name),
+            ..Default::default()
+        }
+    }
+
+    /// Helper: create a ClassInfo with a namespace.
+    fn class_with_ns(name: &str, ns: &str) -> ClassInfo {
+        ClassInfo {
+            name: crate::atom::atom(name),
+            file_namespace: Some(crate::atom::atom(ns)),
+            ..Default::default()
+        }
+    }
+
+    // ── from_classes_with_hint: intersection ────────────────────────
+
+    #[test]
+    fn from_classes_with_hint_single_class_uses_hint() {
+        let hint = PhpType::Named("Foo".to_owned());
+        let result =
+            ResolvedType::from_classes_with_hint(vec![Arc::new(class("Foo"))], hint.clone());
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].type_string, hint);
+        assert!(result[0].class_info.is_some());
+    }
+
+    #[test]
+    fn from_classes_with_hint_intersection_preserves_type() {
+        let hint = PhpType::Intersection(vec![
+            PhpType::Named("Countable".to_owned()),
+            PhpType::Named("Serializable".to_owned()),
+        ]);
+        let classes = vec![
+            Arc::new(class("Countable")),
+            Arc::new(class("Serializable")),
+        ];
+        let result = ResolvedType::from_classes_with_hint(classes, hint.clone());
+        assert_eq!(result.len(), 2);
+        // Both entries carry the full intersection type.
+        for rt in &result {
+            assert_eq!(rt.type_string, hint);
+            assert!(rt.class_info.is_some());
+        }
+    }
+
+    #[test]
+    fn from_classes_with_hint_union_uses_class_names() {
+        let hint = PhpType::Union(vec![
+            PhpType::Named("Foo".to_owned()),
+            PhpType::Named("Bar".to_owned()),
+        ]);
+        let classes = vec![Arc::new(class("Foo")), Arc::new(class("Bar"))];
+        let result = ResolvedType::from_classes_with_hint(classes, hint);
+        assert_eq!(result.len(), 2);
+        // Union: each entry uses the class's own name (old behaviour).
+        assert_eq!(result[0].type_string, PhpType::Named("Foo".to_owned()));
+        assert_eq!(result[1].type_string, PhpType::Named("Bar".to_owned()));
+    }
+
+    // ── types_joined: intersection ──────────────────────────────────
+
+    #[test]
+    fn types_joined_single_entry() {
+        let entries = vec![ResolvedType::from_type_string(PhpType::Named(
+            "Foo".to_owned(),
+        ))];
+        assert_eq!(
+            ResolvedType::types_joined(&entries),
+            PhpType::Named("Foo".to_owned())
+        );
+    }
+
+    #[test]
+    fn types_joined_intersection_entries_return_intersection() {
+        let intersection = PhpType::Intersection(vec![
+            PhpType::Named("Countable".to_owned()),
+            PhpType::Named("Serializable".to_owned()),
+        ]);
+        let entries = vec![
+            ResolvedType::from_both(intersection.clone(), class("Countable")),
+            ResolvedType::from_both(intersection.clone(), class("Serializable")),
+        ];
+        let joined = ResolvedType::types_joined(&entries);
+        assert_eq!(joined, intersection);
+    }
+
+    #[test]
+    fn types_joined_mixed_entries_return_union() {
+        let entries = vec![
+            ResolvedType::from_type_string(PhpType::Named("Foo".to_owned())),
+            ResolvedType::from_type_string(PhpType::Named("Bar".to_owned())),
+        ];
+        let joined = ResolvedType::types_joined(&entries);
+        assert_eq!(
+            joined,
+            PhpType::Union(vec![
+                PhpType::Named("Foo".to_owned()),
+                PhpType::Named("Bar".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn types_joined_empty_returns_mixed() {
+        let entries: Vec<ResolvedType> = vec![];
+        assert_eq!(ResolvedType::types_joined(&entries), PhpType::mixed());
+    }
+
+    // ── strip_null ──────────────────────────────────────────────────
+
+    #[test]
+    fn strip_null_removes_nullable() {
+        let mut rt = ResolvedType::from_both(
+            PhpType::Nullable(Box::new(PhpType::Named("Foo".to_owned()))),
+            class("Foo"),
+        );
+        rt.strip_null();
+        assert_eq!(rt.type_string, PhpType::Named("Foo".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    #[test]
+    fn strip_null_no_op_when_not_nullable() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("Foo".to_owned()), class("Foo"));
+        rt.strip_null();
+        assert_eq!(rt.type_string, PhpType::Named("Foo".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    // ── replace_type ────────────────────────────────────────────────
+
+    #[test]
+    fn replace_type_keeps_class_info_when_matching() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("Foo".to_owned()), class("Foo"));
+        rt.replace_type(PhpType::Named("Foo".to_owned()));
+        assert_eq!(rt.type_string, PhpType::Named("Foo".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    #[test]
+    fn replace_type_clears_class_info_when_mismatched() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("Foo".to_owned()), class("Foo"));
+        rt.replace_type(PhpType::Named("array".to_owned()));
+        assert_eq!(rt.type_string, PhpType::Named("array".to_owned()));
+        assert!(rt.class_info.is_none());
+    }
+
+    #[test]
+    fn replace_type_matches_fqn_with_leading_backslash() {
+        let mut rt = ResolvedType::from_both(
+            PhpType::Named("App\\Models\\User".to_owned()),
+            class_with_ns("User", "App\\Models"),
+        );
+        rt.replace_type(PhpType::Named("\\App\\Models\\User".to_owned()));
+        assert_eq!(
+            rt.type_string,
+            PhpType::Named("\\App\\Models\\User".to_owned())
+        );
+        assert!(
+            rt.class_info.is_some(),
+            "class_info should be preserved when FQN matches modulo leading backslash"
+        );
+    }
+
+    #[test]
+    fn replace_type_matches_short_name() {
+        let mut rt = ResolvedType::from_both(PhpType::Named("User".to_owned()), class("User"));
+        rt.replace_type(PhpType::Named("User".to_owned()));
+        assert!(rt.class_info.is_some());
+    }
+
+    #[test]
+    fn replace_type_clears_when_no_class_info() {
+        let mut rt = ResolvedType::from_type_string(PhpType::Named("int".to_owned()));
+        rt.replace_type(PhpType::Named("string".to_owned()));
+        assert_eq!(rt.type_string, PhpType::Named("string".to_owned()));
+        assert!(rt.class_info.is_none());
     }
 }

@@ -11,8 +11,9 @@ fn test_find_method_throws_tags_with_private() {
         "}\n",
     );
     let result = throws_analysis::find_method_throws_tags(content, "riskyOperation");
+    let names: Vec<String> = result.iter().map(|t| t.to_string()).collect();
     assert_eq!(
-        result,
+        names,
         vec!["ValidationException"],
         "Should find @throws through 'private' modifier"
     );
@@ -28,8 +29,9 @@ fn test_find_method_throws_tags_with_protected_static() {
         "}\n",
     );
     let result = throws_analysis::find_method_throws_tags(content, "dangerousCall");
+    let names: Vec<String> = result.iter().map(|t| t.to_string()).collect();
     assert_eq!(
-        result,
+        names,
         vec!["RuntimeException"],
         "Should find @throws through 'protected static' modifiers"
     );
@@ -43,8 +45,9 @@ fn test_find_method_throws_tags_without_modifier() {
         "function standalone(): void {}\n",
     );
     let result = throws_analysis::find_method_throws_tags(content, "standalone");
+    let names: Vec<String> = result.iter().map(|t| t.to_string()).collect();
     assert_eq!(
-        result,
+        names,
         vec!["LogicException"],
         "Should find @throws on a standalone function (no modifier)"
     );
@@ -136,7 +139,7 @@ fn test_find_inline_throws_annotations_in_catch() {
     "#;
     let result = throws_analysis::find_inline_throws_annotations(body);
     // Raw names are returned; short-name extraction happens in detect_catch_context
-    let names: Vec<&str> = result.iter().map(|t| t.type_name.as_str()).collect();
+    let names: Vec<String> = result.iter().map(|t| t.type_name.to_string()).collect();
     assert_eq!(
         names,
         vec!["ModelNotFoundException", "App\\Exceptions\\AuthException"]
@@ -152,7 +155,7 @@ fn test_find_inline_throws_multiline_docblock_in_catch() {
         doStuff();
     "#;
     let result = throws_analysis::find_inline_throws_annotations(body);
-    let names: Vec<&str> = result.iter().map(|t| t.type_name.as_str()).collect();
+    let names: Vec<String> = result.iter().map(|t| t.type_name.to_string()).collect();
     assert_eq!(names, vec!["RuntimeException"]);
 }
 

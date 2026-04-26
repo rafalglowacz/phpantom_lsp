@@ -53,9 +53,9 @@ const ACTION_KIND: &str = "phpstan.addIterableType";
 /// - Messages may also mention `iterable`, `Traversable`, `Generator`,
 ///   `Collection`, or any other iterable class/interface.
 ///
-/// Returns `None` if the message does not refer to a return type or
-/// does not match the expected pattern.
-fn extract_iterable_return_type(message: &str) -> Option<&str> {
+/// Returns the parsed `PhpType`, or `None` if the message does not
+/// refer to a return type or does not match the expected pattern.
+fn extract_iterable_return_type(message: &str) -> Option<PhpType> {
     // Only handle the "return type" variant.
     if !message.contains("return type") {
         return None;
@@ -73,7 +73,7 @@ fn extract_iterable_return_type(message: &str) -> Option<&str> {
         return None;
     }
 
-    Some(type_name)
+    Some(PhpType::parse(type_name))
 }
 
 /// Build the `@return` type from the iterable type name and a vector
@@ -293,10 +293,11 @@ impl Backend {
             }
 
             // Only handle the "return type" variant.
-            let iterable_type = match extract_iterable_return_type(&diag.message) {
+            let iterable_type_parsed = match extract_iterable_return_type(&diag.message) {
                 Some(t) => t,
                 None => continue,
             };
+            let iterable_type = iterable_type_parsed.to_string();
 
             let diag_line = diag.range.start.line as usize;
 
@@ -341,7 +342,7 @@ impl Backend {
 
             let extra = serde_json::json!({
                 "diagnostic_line": diag_line,
-                "iterable_type": iterable_type,
+                "iterable_type": &iterable_type,
                 "func_line": func_line,
             });
 
@@ -550,10 +551,7 @@ impl Backend {
 
         // If the inferred type is just `array`, `mixed`, or the bare
         // iterable type, we can't determine element types.
-        if parsed.is_bare_array()
-            || parsed.is_mixed()
-            || matches!(&parsed, PhpType::Named(n) if n.eq_ignore_ascii_case(iterable_type))
-        {
+        if parsed.is_bare_array() || parsed.is_mixed() || parsed.is_named_ci(iterable_type) {
             return None;
         }
 
@@ -675,39 +673,57 @@ mod tests {
     fn extracts_array_from_method_message() {
         let msg =
             "Method Foo::bar() return type has no value type specified in iterable type array.";
-        assert_eq!(extract_iterable_return_type(msg), Some("array"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("array"))
+        );
     }
 
     #[test]
     fn extracts_array_from_function_message() {
         let msg = "Function foo() return type has no value type specified in iterable type array.";
-        assert_eq!(extract_iterable_return_type(msg), Some("array"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("array"))
+        );
     }
 
     #[test]
     fn extracts_iterable_type() {
         let msg =
             "Method Foo::bar() return type has no value type specified in iterable type iterable.";
-        assert_eq!(extract_iterable_return_type(msg), Some("iterable"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("iterable"))
+        );
     }
 
     #[test]
     fn extracts_traversable_type() {
         let msg = "Method Foo::bar() return type has no value type specified in iterable type Traversable.";
-        assert_eq!(extract_iterable_return_type(msg), Some("Traversable"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("Traversable"))
+        );
     }
 
     #[test]
     fn extracts_generator_type() {
         let msg =
             "Function gen() return type has no value type specified in iterable type Generator.";
-        assert_eq!(extract_iterable_return_type(msg), Some("Generator"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("Generator"))
+        );
     }
 
     #[test]
     fn extracts_collection_type() {
         let msg = "Method Foo::bar() return type has no value type specified in iterable type Collection.";
-        assert_eq!(extract_iterable_return_type(msg), Some("Collection"));
+        assert_eq!(
+            extract_iterable_return_type(msg),
+            Some(PhpType::parse("Collection"))
+        );
     }
 
     #[test]

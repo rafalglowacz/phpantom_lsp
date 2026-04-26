@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::docblock;
 use crate::php_type::PhpType;
 use crate::types::{BracketSegment, ClassInfo};
-use crate::util::{find_semicolon_balanced, short_name};
+use crate::util::{find_semicolon_balanced, is_self_or_static, resolve_class_keyword, short_name};
 
 use crate::completion::resolver::{Loaders, ResolutionCtx};
 
@@ -410,7 +410,7 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
         let lhs = callable_text[..pos].trim_end_matches('?');
         let method_name = &callable_text[pos + 2..];
 
-        let owner = if lhs == "$this" || lhs == "self" || lhs == "static" {
+        let owner = if is_self_or_static(lhs) {
             current_class.cloned()
         } else if lhs.starts_with('$') {
             // Bare variable LHS like `$factory->create(...)`.
@@ -437,7 +437,7 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
 
         if let Some(cls) = owner {
             return crate::inheritance::resolve_method_return_type(&cls, method_name, class_loader)
-                .map(|ret| ret.replace_self(&cls.name));
+                .map(|ret| ret.replace_self(&cls.fqn()));
         }
         return None;
     }
@@ -447,12 +447,11 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
         let class_part = &callable_text[..pos];
         let method_name = &callable_text[pos + 2..];
 
-        let owner = if class_part == "self" || class_part == "static" {
+        let owner = if is_self_or_static(class_part) {
             current_class.cloned()
-        } else if class_part == "parent" {
-            current_class
-                .and_then(|cc| cc.parent_class.as_ref())
-                .and_then(|p| class_loader(p).map(Arc::unwrap_or_clone))
+        } else if let Some(resolved_name) = resolve_class_keyword(class_part, current_class) {
+            // Handles `parent` (case-insensitive) → load the resolved parent class.
+            class_loader(&resolved_name).map(Arc::unwrap_or_clone)
         } else {
             let lookup = short_name(class_part);
             all_classes
@@ -464,7 +463,7 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
 
         if let Some(cls) = owner {
             return crate::inheritance::resolve_method_return_type(&cls, method_name, class_loader)
-                .map(|ret| ret.replace_self(&cls.name));
+                .map(|ret| ret.replace_self(&cls.fqn()));
         }
         return None;
     }
@@ -496,7 +495,7 @@ pub(in crate::completion) fn try_chained_array_access_with_candidates<'a>(
     current_class: Option<&ClassInfo>,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<Vec<ClassInfo>> {
+) -> Option<Vec<Arc<ClassInfo>>> {
     let current_class_name = current_class.map(|c| c.name.as_str()).unwrap_or("");
 
     for candidate in candidates {
@@ -526,7 +525,7 @@ fn walk_array_segments_and_resolve(
     current_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<Vec<ClassInfo>> {
+) -> Option<Vec<Arc<ClassInfo>>> {
     // Expand type aliases before walking segments.  The raw type may
     // be an alias name like `UserData` that resolves to
     // `array{name: string, pen: Pen}`.  Without expansion the
@@ -572,8 +571,9 @@ fn walk_array_segments_and_resolve(
             )
             .into_iter()
             .find_map(|cls| {
+                let cache = crate::virtual_members::active_resolved_class_cache();
                 let merged =
-                    crate::virtual_members::resolve_class_fully(&cls, class_loader);
+                    crate::virtual_members::resolve_class_fully_maybe_cached(&cls, class_loader, cache);
                 crate::completion::variable::foreach_resolution::extract_iterable_element_type_from_class(
                     &merged,
                     class_loader,
@@ -661,7 +661,7 @@ fn resolve_lhs_to_class(
     let lhs = lhs.trim();
 
     // `$this` / `self` / `static`
-    if lhs == "$this" || lhs == "self" || lhs == "static" {
+    if is_self_or_static(lhs) {
         return current_class.cloned();
     }
 
@@ -717,8 +717,11 @@ fn resolve_lhs_to_class(
             }
             // `ClassName::method`
             if let Some((cls_part, m_part)) = inner_callee.rsplit_once("::") {
-                let resolved = if cls_part == "self" || cls_part == "static" {
+                let resolved = if is_self_or_static(cls_part) {
                     current_class.cloned()
+                } else if let Some(resolved_name) = resolve_class_keyword(cls_part, current_class) {
+                    // Handles `parent` (case-insensitive) → load the parent class.
+                    class_loader(&resolved_name).map(Arc::unwrap_or_clone)
                 } else {
                     let lookup = short_name(cls_part);
                     all_classes

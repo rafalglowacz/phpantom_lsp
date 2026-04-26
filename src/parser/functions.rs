@@ -7,8 +7,8 @@ use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
 use crate::Backend;
+use crate::atom::atom;
 use crate::docblock;
-use crate::php_type::PhpType;
 use crate::types::*;
 
 use super::{
@@ -104,7 +104,7 @@ impl Backend {
                         continue;
                     }
 
-                    let name = func.name.value.to_string();
+                    let name = atom(func.name.value);
                     let name_offset = func.name.span.start.offset;
                     let php_version = doc_ctx.and_then(|ctx| ctx.php_version);
                     let mut parameters = extract_parameters(
@@ -123,10 +123,9 @@ impl Backend {
                     // native type hint with the version-appropriate string.
                     let native_return_type = if let Some(ctx) = doc_ctx
                         && let Some(ver) = ctx.php_version
-                        && let Some(override_type) =
-                            super::extract_language_level_type(&func.attribute_lists, ctx, ver)
                     {
-                        Some(PhpType::parse(&override_type))
+                        super::extract_language_level_type(&func.attribute_lists, ctx, ver)
+                            .or(raw_native_return_type)
                     } else {
                         raw_native_return_type
                     };
@@ -154,6 +153,7 @@ impl Backend {
                         link_urls,
                         see_refs,
                         func_template_params,
+                        func_template_param_bounds,
                         func_template_bindings,
                         throws,
                     ) = if let Some(ctx) = doc_ctx {
@@ -173,22 +173,35 @@ impl Backend {
                         // Extract function-level @template params and their
                         // @param bindings for generic type substitution at
                         // call sites.
-                        let tpl_params: Vec<String> = info
+                        let params_full = info
                             .as_ref()
-                            .map(docblock::extract_template_params_from_info)
+                            .map(docblock::extract_template_params_full_from_info)
                             .unwrap_or_default();
-                        let tpl_bindings = if !tpl_params.is_empty() {
-                            info.as_ref()
-                                .map(|i| {
-                                    docblock::extract_template_param_bindings_from_info(
-                                        i,
-                                        &tpl_params,
-                                    )
+                        let tpl_params: Vec<String> =
+                            params_full.iter().map(|(n, _, _, _)| n.clone()).collect();
+                        let tpl_param_bounds: crate::atom::AtomMap<crate::php_type::PhpType> =
+                            params_full
+                                .iter()
+                                .filter_map(|(name, bound, _, _)| {
+                                    bound.as_ref().map(|b| (atom(name), b.clone()))
                                 })
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
+                                .collect();
+                        let tpl_bindings: Vec<(crate::atom::Atom, crate::atom::Atom)> =
+                            if !tpl_params.is_empty() {
+                                info.as_ref()
+                                    .map(|i| {
+                                        docblock::extract_template_param_bindings_from_info(
+                                            i,
+                                            &tpl_params,
+                                        )
+                                        .into_iter()
+                                        .map(|(a, b)| (atom(&a), atom(&b)))
+                                        .collect()
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
 
                         // If no explicit conditional return type was found,
                         // try to synthesize one from function-level @template
@@ -255,6 +268,7 @@ impl Backend {
                             link_urls,
                             see_refs,
                             tpl_params,
+                            tpl_param_bounds,
                             tpl_bindings,
                             throws,
                         )
@@ -274,6 +288,7 @@ impl Backend {
                             Vec::new(),
                             Vec::new(),
                             Vec::new(),
+                            crate::atom::AtomMap::<crate::php_type::PhpType>::default(),
                             Vec::new(),
                             Vec::new(),
                         )
@@ -351,7 +366,7 @@ impl Backend {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
                                 parameters.push(ParameterInfo {
-                                    name: tag_name,
+                                    name: atom(&tag_name),
                                     is_required: false,
                                     type_hint: Some(tag_type),
                                     native_type_hint: None,
@@ -365,6 +380,8 @@ impl Backend {
                         }
                     }
 
+                    let func_tpl_atoms: Vec<crate::atom::Atom> =
+                        func_template_params.iter().map(|s| atom(s)).collect();
                     functions.push(FunctionInfo {
                         name,
                         name_offset,
@@ -380,7 +397,8 @@ impl Backend {
                         type_assertions,
                         deprecation_message,
                         deprecated_replacement,
-                        template_params: func_template_params,
+                        template_params: func_tpl_atoms,
+                        template_param_bounds: func_template_param_bounds,
                         template_bindings: func_template_bindings,
                         throws,
                         is_polyfill: false,

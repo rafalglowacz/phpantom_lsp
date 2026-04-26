@@ -106,7 +106,7 @@ pub fn extract_psr4_mappings_from_package(package: &ComposerPackage) -> Vec<Psr4
     }
 
     // Sort by prefix length descending so longest-prefix-first matching works
-    mappings.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+    mappings.sort_by_key(|b| std::cmp::Reverse(b.prefix.len()));
 
     mappings
 }

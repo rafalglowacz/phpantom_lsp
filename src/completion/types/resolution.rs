@@ -19,6 +19,7 @@
 ///   type alias reference.
 use std::sync::Arc;
 
+use crate::atom::atom;
 use crate::inheritance::{apply_generic_args, build_generic_subs};
 use crate::php_type::PhpType;
 use crate::types::*;
@@ -34,7 +35,7 @@ pub(crate) fn resolve_property_types(
     class_info: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Vec<ClassInfo> {
+) -> Vec<Arc<ClassInfo>> {
     // Resolve inheritance so that inherited (and generic-substituted)
     // properties are visible.  For example, if `ConfigWrapper extends
     // Wrapper<Config>` and `Wrapper` has `/** @var T */ public $value`,
@@ -70,7 +71,7 @@ pub(crate) fn type_hint_to_classes_typed(
     owning_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Vec<ClassInfo> {
+) -> Vec<Arc<ClassInfo>> {
     type_hint_to_classes_typed_depth(ty, owning_class_name, all_classes, class_loader, 0)
 }
 
@@ -82,7 +83,7 @@ fn type_hint_to_classes_typed_depth(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     depth: u8,
-) -> Vec<ClassInfo> {
+) -> Vec<Arc<ClassInfo>> {
     if depth > MAX_ALIAS_DEPTH {
         return vec![];
     }
@@ -99,7 +100,7 @@ fn type_hint_to_classes_typed_depth(
 
         // ── Union type ─────────────────────────────────────────────
         PhpType::Union(members) => {
-            let mut results = Vec::new();
+            let mut results: Vec<Arc<ClassInfo>> = Vec::new();
             for member in members {
                 let resolved = type_hint_to_classes_typed_depth(
                     member,
@@ -108,14 +109,18 @@ fn type_hint_to_classes_typed_depth(
                     class_loader,
                     depth,
                 );
-                ClassInfo::extend_unique(&mut results, resolved);
+                for cls in resolved {
+                    if !results.iter().any(|existing| existing.name == cls.name) {
+                        results.push(cls);
+                    }
+                }
             }
             results
         }
 
         // ── Intersection type ──────────────────────────────────────
         PhpType::Intersection(members) => {
-            let mut results = Vec::new();
+            let mut results: Vec<Arc<ClassInfo>> = Vec::new();
             for member in members {
                 let resolved = type_hint_to_classes_typed_depth(
                     member,
@@ -124,7 +129,11 @@ fn type_hint_to_classes_typed_depth(
                     class_loader,
                     depth,
                 );
-                ClassInfo::extend_unique(&mut results, resolved);
+                for cls in resolved {
+                    if !results.iter().any(|existing| existing.name == cls.name) {
+                        results.push(cls);
+                    }
+                }
             }
             results
         }
@@ -135,7 +144,7 @@ fn type_hint_to_classes_typed_depth(
                 entries
                     .iter()
                     .map(|e| PropertyInfo {
-                        name: e.key.clone().unwrap_or_default(),
+                        name: atom(&e.key.clone().unwrap_or_default()),
                         name_offset: 0,
                         type_hint: Some(e.value_type.clone()),
                         native_type_hint: None,
@@ -150,11 +159,11 @@ fn type_hint_to_classes_typed_depth(
                     .collect(),
             );
 
-            vec![ClassInfo {
-                name: "__object_shape".to_string(),
+            vec![Arc::new(ClassInfo {
+                name: atom("__object_shape"),
                 properties,
                 ..ClassInfo::default()
-            }]
+            })]
         }
 
         // ── Named type (class name, keyword, or alias) ─────────────
@@ -206,7 +215,13 @@ fn resolve_named_type(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     depth: u8,
-) -> Vec<ClassInfo> {
+) -> Vec<Arc<ClassInfo>> {
+    // ── Fast reject: built-in scalar/pseudo types can never resolve
+    //    to a class and are never type aliases. ──────────────────────
+    if is_builtin_non_class_type(name) {
+        return vec![];
+    }
+
     // ── Type alias resolution ──────────────────────────────────────
     if let Some(alias_type) = resolve_type_alias_typed(
         &PhpType::Named(name.to_string()),
@@ -242,8 +257,8 @@ fn resolve_named_type(
             );
         }
         return find_class_by_name(all_classes, owning_class_name)
-            .map(|c| ClassInfo::clone(c))
-            .or_else(|| class_loader(owning_class_name).map(Arc::unwrap_or_clone))
+            .map(Arc::clone)
+            .or_else(|| class_loader(owning_class_name))
             .into_iter()
             .collect();
     }
@@ -252,12 +267,12 @@ fn resolve_named_type(
     // Case-insensitive to match PHP behaviour (`Parent::`, `PARENT::` are valid).
     if name.eq_ignore_ascii_case("parent") {
         let parent_name = find_class_by_name(all_classes, owning_class_name)
-            .and_then(|c| c.parent_class.clone())
-            .or_else(|| class_loader(owning_class_name).and_then(|c| c.parent_class.clone()));
+            .and_then(|c| c.parent_class)
+            .or_else(|| class_loader(owning_class_name).and_then(|c| c.parent_class));
         if let Some(parent) = parent_name {
             return find_class_by_name(all_classes, &parent)
-                .map(|c| ClassInfo::clone(c))
-                .or_else(|| class_loader(&parent).map(Arc::unwrap_or_clone))
+                .map(Arc::clone)
+                .or_else(|| class_loader(&parent))
                 .into_iter()
                 .collect();
         }
@@ -284,14 +299,14 @@ fn resolve_named_type(
 
     // ── Class lookup ───────────────────────────────────────────────
     let found = find_class_by_name(all_classes, name)
-        .map(|arc| ClassInfo::clone(arc))
-        .or_else(|| class_loader(name).map(Arc::unwrap_or_clone));
+        .map(Arc::clone)
+        .or_else(|| class_loader(name));
 
     match found {
         Some(cls) => {
             // ── Eloquent custom collection swapping ────────────────
             let cls = laravel::try_swap_custom_collection(
-                cls,
+                Arc::unwrap_or_clone(cls),
                 name,
                 generic_args,
                 all_classes,
@@ -301,12 +316,25 @@ fn resolve_named_type(
             // Apply generic substitution if the type hint carried
             // generic arguments and the class has template parameters.
             if !generic_args.is_empty() && !cls.template_params.is_empty() {
+                let generic_arg_strings: Vec<String> =
+                    generic_args.iter().map(|a| a.to_string()).collect();
                 let resolved = if let Some(cache) = virtual_members::active_resolved_class_cache() {
-                    virtual_members::resolve_class_fully_cached(&cls, class_loader, cache)
+                    virtual_members::resolve_class_fully_with_generics(
+                        &cls,
+                        class_loader,
+                        Some(cache),
+                        &generic_arg_strings,
+                        generic_args,
+                    )
                 } else {
-                    virtual_members::resolve_class_fully(&cls, class_loader)
+                    let base = virtual_members::resolve_class_fully(&cls, class_loader);
+                    if !base.template_params.is_empty() {
+                        std::sync::Arc::new(apply_generic_args(&base, generic_args))
+                    } else {
+                        base
+                    }
                 };
-                let mut result = apply_generic_args(&resolved, generic_args);
+                let mut result = std::sync::Arc::unwrap_or_clone(resolved);
 
                 // ── Template-param mixin resolution ────────────────
                 // When a class declares `@mixin TParam` where `TParam`
@@ -314,7 +342,11 @@ fn resolve_named_type(
                 // during `resolve_class_fully` because the concrete type
                 // is not yet known.  Now that generic args are concrete,
                 // resolve those mixins and merge their members.
-                if cls.mixins.iter().any(|m| cls.template_params.contains(m)) {
+                if cls
+                    .mixins
+                    .iter()
+                    .any(|m| cls.template_params.iter().any(|t| t == m.as_str()))
+                {
                     let subs = build_generic_subs(&cls, generic_args);
                     if !subs.is_empty() {
                         let mixin_members = virtual_members::phpdoc::resolve_template_param_mixins(
@@ -351,9 +383,9 @@ fn resolve_named_type(
                     class_loader,
                 );
 
-                vec![result]
+                vec![Arc::new(result)]
             } else {
-                vec![cls]
+                vec![Arc::new(cls)]
             }
         }
         None => {
@@ -369,8 +401,8 @@ fn resolve_named_type(
             };
 
             if let Some(owner) = owning
-                && owner.template_params.contains(&short.to_string())
-                && let Some(bound) = owner.template_param_bounds.get(short)
+                && owner.template_params.iter().any(|p| p.as_str() == short)
+                && let Some(bound) = owner.template_param_bounds.get(&atom(short))
             {
                 return type_hint_to_classes_typed_depth(
                     bound,
@@ -383,10 +415,10 @@ fn resolve_named_type(
 
             // ── stdClass fallback ──────────────────────────────────
             if short == "stdClass" {
-                return vec![ClassInfo {
-                    name: "stdClass".to_string(),
+                return vec![Arc::new(ClassInfo {
+                    name: atom("stdClass"),
                     ..ClassInfo::default()
-                }];
+                })];
             }
 
             vec![]
@@ -405,6 +437,59 @@ fn resolve_named_type(
 ///
 /// Pass an empty `owning_class_name` to search all classes without
 /// priority (used by the array-key completion path).
+/// Returns `true` for type names that are PHP built-in scalar or
+/// pseudo types which can never be class names or type aliases.
+/// This allows skipping the expensive alias/class lookup for the
+/// most common return types.
+#[inline]
+fn is_builtin_non_class_type(name: &str) -> bool {
+    matches!(
+        name,
+        "int"
+            | "float"
+            | "string"
+            | "bool"
+            | "array"
+            | "object"
+            | "null"
+            | "void"
+            | "never"
+            | "mixed"
+            | "true"
+            | "false"
+            | "callable"
+            | "iterable"
+            | "resource"
+            | "numeric"
+            | "scalar"
+            | "positive-int"
+            | "negative-int"
+            | "non-negative-int"
+            | "non-positive-int"
+            | "non-zero-int"
+            | "numeric-string"
+            | "non-empty-string"
+            | "non-falsy-string"
+            | "truthy-string"
+            | "literal-string"
+            | "class-string"
+            | "interface-string"
+            | "array-key"
+            | "list"
+            | "non-empty-list"
+            | "non-empty-array"
+            | "empty"
+            | "no-return"
+            | "never-return"
+            | "never-returns"
+            | "number"
+            | "double"
+            | "boolean"
+            | "integer"
+            | "real"
+    )
+}
+
 pub(crate) fn resolve_type_alias_typed(
     ty: &PhpType,
     owning_class_name: &str,
@@ -452,7 +537,7 @@ fn resolve_type_alias_once(
     let owning_class = all_classes.iter().find(|c| c.name == owning_class_name);
 
     if let Some(cls) = owning_class
-        && let Some(def) = cls.type_aliases.get(name)
+        && let Some(def) = cls.type_aliases.get(&atom(name))
     {
         return expand_type_alias_def(def, all_classes, class_loader);
     }
@@ -467,7 +552,7 @@ fn resolve_type_alias_once(
         if cls.name == owning_class_name {
             continue; // Already checked above.
         }
-        if let Some(def) = cls.type_aliases.get(name) {
+        if let Some(def) = cls.type_aliases.get(&atom(name)) {
             return expand_type_alias_def(def, all_classes, class_loader);
         }
     }
@@ -516,7 +601,7 @@ pub(crate) fn resolve_imported_type_alias(
         .or_else(|| class_loader(source_class_name).map(Arc::unwrap_or_clone));
 
     let source_class = source_class?;
-    let def = source_class.type_aliases.get(original_name)?;
+    let def = source_class.type_aliases.get(&atom(original_name))?;
 
     // Don't follow nested imports — just return the local definition.
     match def {

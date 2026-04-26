@@ -63,6 +63,37 @@ pub(crate) enum SelfStaticParentKind {
     This,
 }
 
+/// The syntactic context in which a `ClassReference` appears.
+///
+/// Used by the invalid-class-kind diagnostic to check whether the
+/// referenced class's kind (class, interface, trait, enum) is valid
+/// for the position it appears in.  The completion system uses the
+/// parallel [`ClassNameContext`](crate::completion::context::class_completion::ClassNameContext)
+/// enum for the same purpose at completion time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum ClassRefContext {
+    /// Context not determined or not relevant for diagnostics.
+    #[default]
+    Other,
+    /// After `new` keyword — only concrete (non-abstract) classes and enums.
+    New,
+    /// After `extends` in a class declaration.
+    ExtendsClass,
+    /// After `extends` in an interface declaration.
+    ExtendsInterface,
+    /// After `implements` in a class or enum declaration.
+    Implements,
+    /// After `use` inside a class body — trait use statement.
+    TraitUse,
+    /// RHS of `instanceof` operator.
+    Instanceof,
+    /// In a `catch (X $e)` type hint.
+    Catch,
+    /// In a native type-hint position (parameter type, return type,
+    /// property type).
+    TypeHint,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum SymbolKind {
     /// Class/interface/trait/enum name in a type context:
@@ -74,11 +105,15 @@ pub(crate) enum SymbolKind {
         /// (fully-qualified name).  When set, the resolver should use the
         /// name as-is without prepending the file's namespace.
         is_fqn: bool,
+        /// The syntactic context this reference appears in.  Used by
+        /// the invalid-class-kind diagnostic to validate that the
+        /// referenced class's kind matches the position.
+        context: ClassRefContext,
     },
     /// Class/interface/trait/enum name at its *declaration* site
-    /// (`class Foo`, `interface Bar`, etc.).  Not navigable for
-    /// go-to-definition (the cursor is already at the definition),
-    /// but useful for document highlights and other features.
+    /// (`class Foo`, `interface Bar`, etc.).  Go-to-definition returns
+    /// the symbol's own location so editors can fall back to
+    /// Find References.  Also useful for document highlights.
     ClassDeclaration { name: String },
 
     /// Member name on the RHS of `->`, `?->`, or `::`.
@@ -120,9 +155,10 @@ pub(crate) enum SymbolKind {
 
     /// A method, property, or constant name at its *declaration* site.
     ///
-    /// Not navigable for go-to-definition or hover (the cursor is
-    /// already at the definition), but needed for find-references and
-    /// rename so that the declaration site participates in the match.
+    /// Go-to-definition returns the symbol's own location so editors
+    /// can fall back to Find References.  Also needed for
+    /// find-references and rename so that the declaration site
+    /// participates in the match.
     MemberDeclaration {
         /// The member name (e.g. `"save"`, `"name"`, `"MAX_SIZE"`).
         /// For properties this is the name WITHOUT the `$` prefix.
@@ -130,6 +166,12 @@ pub(crate) enum SymbolKind {
         /// Whether this is a static member (`static function`, `static $prop`,
         /// or class constant — constants are always accessed statically).
         is_static: bool,
+    },
+    /// A namespace name at its declaration site (`namespace App\Models;`).
+    /// Used by the rename handler to support namespace renaming.
+    NamespaceDeclaration {
+        /// The full namespace name (e.g. `"App\\Models"`).
+        name: String,
     },
 }
 
@@ -257,10 +299,38 @@ pub(crate) struct VarDefSite {
     pub effective_from: u32,
 }
 
+/// A closure or arrow function passed as an argument to a callable-typed
+/// parameter.  Used by inlay hints to show:
+/// - **Parameter type hints** for untyped closure parameters when the type
+///   can be inferred from the enclosing callable signature.
+/// - **Return type hints** when the closure lacks an explicit return type
+///   and the callable signature specifies one.
+#[derive(Debug, Clone)]
+pub(crate) struct UntypedClosureSite {
+    /// The call expression string of the parent call (same format as
+    /// `CallSite::call_expression`).
+    pub parent_call_expression: String,
+    /// 0-based index of the closure argument within the parent call's
+    /// argument list.
+    pub arg_index_in_parent: usize,
+    /// Byte offset of the closing `)` of the closure's parameter list.
+    /// Used to place the return type hint.  `None` when the closure
+    /// already has an explicit return type declaration.
+    pub close_paren_offset: Option<u32>,
+    /// Untyped parameters: `(param_index, param_variable_offset)`.
+    /// Only parameters that lack a native type hint are included.
+    pub untyped_params: Vec<(usize, u32)>,
+}
+
 /// The kind of variable definition site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VarDefKind {
     Assignment,
+    /// Compound assignment (`+=`, `-=`, `.=`, `??=`, etc.).  Semantically
+    /// the variable is modified in place rather than rebound to a
+    /// completely different value.  Linked editing treats this the same
+    /// as a read (it does not start a new definition region).
+    CompoundAssignment,
     Parameter,
     Property,
     Foreach,
@@ -345,6 +415,10 @@ pub(crate) struct SymbolMap {
     /// Switch body boundaries `(start_offset, end_offset)` where
     /// `case` / `default` labels are valid.
     pub switch_scopes: Vec<(u32, u32)>,
+    /// Closures and arrow functions passed as arguments to callable-typed
+    /// parameters.  Used by inlay hints to show inferred parameter types
+    /// and return types from the enclosing callable signature.
+    pub untyped_closure_sites: Vec<UntypedClosureSite>,
 }
 
 impl SymbolMap {

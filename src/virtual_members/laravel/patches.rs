@@ -50,6 +50,8 @@
 //!    overrides these return types so that downstream property access
 //!    on query results resolves correctly.
 
+use std::sync::Arc;
+
 use crate::php_type::PhpType;
 use crate::types::ClassInfo;
 
@@ -101,6 +103,7 @@ pub fn apply_laravel_patches(class: &mut ClassInfo, fqn: &str) {
 fn patch_eloquent_builder_call_return_type(class: &mut ClassInfo) {
     let static_type = PhpType::static_();
     for method in class.methods.make_mut().iter_mut() {
+        let method = Arc::make_mut(method);
         if (method.name == "__call" || method.name == "__callStatic")
             && method.return_type.as_ref().is_some_and(|rt| rt.is_mixed())
         {
@@ -125,8 +128,9 @@ fn patch_eloquent_builder_call_return_type(class: &mut ClassInfo) {
 /// returns void and the method returns the receiver) and preserves
 /// chain continuation.
 fn patch_conditionable_when_unless(class: &mut ClassInfo) {
-    let this_type = PhpType::Named("$this".to_string());
+    let this_type = PhpType::this();
     for method in class.methods.make_mut().iter_mut() {
+        let method = Arc::make_mut(method);
         if method.name != "when" && method.name != "unless" {
             continue;
         }
@@ -169,30 +173,8 @@ fn is_likely_template_param(ty: &PhpType) -> bool {
         _ => return false,
     };
 
-    // Self-like types are not template params.
-    if matches!(name, "static" | "self" | "$this") {
-        return false;
-    }
-
-    // PHP built-in / keyword types.
-    if matches!(
-        name,
-        "null"
-            | "void"
-            | "never"
-            | "mixed"
-            | "int"
-            | "float"
-            | "string"
-            | "bool"
-            | "true"
-            | "false"
-            | "array"
-            | "object"
-            | "callable"
-            | "iterable"
-            | "resource"
-    ) {
+    // PHP built-in / keyword types (includes self, static, $this, parent).
+    if crate::php_type::is_keyword_type(name) {
         return false;
     }
 
@@ -230,27 +212,23 @@ fn is_likely_template_param(ty: &PhpType) -> bool {
 /// `selectOne`).  Patching this here lets property access on query
 /// results resolve correctly across the codebase.
 fn patch_db_select_return_types(class: &mut ClassInfo) {
-    let array_of_std = PhpType::Generic(
-        "array".to_string(),
-        vec![PhpType::int(), PhpType::Named("stdClass".to_string())],
-    );
-    let std_or_null = PhpType::Nullable(Box::new(PhpType::Named("stdClass".to_string())));
+    let std_class = PhpType::Named("stdClass".to_owned());
+    let array_of_std = PhpType::generic_array(PhpType::int(), std_class.clone());
+    let std_or_null = PhpType::Nullable(Box::new(std_class));
 
     for method in class.methods.make_mut().iter_mut() {
+        let method = Arc::make_mut(method);
         match method.name.as_str() {
-            "select" | "selectFromWriteConnection" | "selectResultSets" => {
+            "select" | "selectFromWriteConnection" | "selectResultSets"
                 if method
                     .return_type
                     .as_ref()
-                    .is_some_and(|rt| rt.is_bare_array())
-                {
-                    method.return_type = Some(array_of_std.clone());
-                }
+                    .is_some_and(|rt| rt.is_bare_array()) =>
+            {
+                method.return_type = Some(array_of_std.clone());
             }
-            "selectOne" => {
-                if method.return_type.as_ref().is_some_and(|rt| rt.is_mixed()) {
-                    method.return_type = Some(std_or_null.clone());
-                }
+            "selectOne" if method.return_type.as_ref().is_some_and(|rt| rt.is_mixed()) => {
+                method.return_type = Some(std_or_null.clone());
             }
             _ => {}
         }

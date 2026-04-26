@@ -605,20 +605,8 @@ fn find_type_in_foreach(
 
     // Determine if this foreach's value or key variable matches var_name
     let is_value_var = match &foreach.target {
-        ForeachTarget::Value(val) => {
-            if let Expression::Variable(Variable::Direct(dv)) = val.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
-        ForeachTarget::KeyValue(kv) => {
-            if let Expression::Variable(Variable::Direct(dv)) = kv.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
+        ForeachTarget::Value(val) => unwrap_foreach_ref_var(val.value, var_name),
+        ForeachTarget::KeyValue(kv) => unwrap_foreach_ref_var(kv.value, var_name),
     };
 
     let is_key_var = match &foreach.target {
@@ -694,6 +682,22 @@ fn extract_foreach_expression_type(
     }
 
     docblock::find_iterable_raw_type_in_source(content, foreach_offset, expr_text)
+}
+
+/// Check whether a foreach value expression (possibly wrapped in `&`)
+/// is a direct variable matching `var_name`.
+fn unwrap_foreach_ref_var(expr: &Expression<'_>, var_name: &str) -> bool {
+    let inner = match expr {
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            up.operand
+        }
+        other => other,
+    };
+    if let Expression::Variable(Variable::Direct(dv)) = inner {
+        dv.name == var_name
+    } else {
+        false
+    }
 }
 
 // ─── Class-resolution-based foreach type extraction ─────────────────────────
@@ -894,20 +898,8 @@ fn resolve_foreach_binding_via_class(
 
     // Check if the cursor variable matches the foreach value or key.
     let is_value_var = match &foreach.target {
-        ForeachTarget::Value(val) => {
-            if let Expression::Variable(Variable::Direct(dv)) = val.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
-        ForeachTarget::KeyValue(kv) => {
-            if let Expression::Variable(Variable::Direct(dv)) = kv.value {
-                dv.name == var_name
-            } else {
-                false
-            }
-        }
+        ForeachTarget::Value(val) => unwrap_foreach_ref_var(val.value, var_name),
+        ForeachTarget::KeyValue(kv) => unwrap_foreach_ref_var(kv.value, var_name),
     };
 
     let is_key_var = match &foreach.target {
@@ -980,7 +972,7 @@ fn resolve_expression_to_classes(
     current_class: &ClassInfo,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Vec<ClassInfo> {
+) -> Vec<Arc<ClassInfo>> {
     // Simple variable: try to resolve its type.
     if expr_text.starts_with('$') && !expr_text.contains("->") && !expr_text.contains("::") {
         // Try @var annotation.
@@ -995,7 +987,7 @@ fn resolve_expression_to_classes(
             );
         }
         // Try variable resolution.
-        let types = ResolvedType::into_classes(
+        let types = ResolvedType::into_arced_classes(
             crate::completion::variable::resolution::resolve_variable_types(
                 expr_text,
                 current_class,
@@ -1488,6 +1480,7 @@ fn infer_callable_param_types_for_call(
                     cursor_offset: obj_span.end.offset,
                     class_loader: closure_ctx.class_loader,
                     function_loader: None,
+                    scope_var_resolver: None,
                     resolved_class_cache: None,
                 };
                 let receiver_classes = ResolvedType::into_arced_classes(
@@ -1525,6 +1518,7 @@ fn infer_callable_param_types_for_call(
                     cursor_offset: obj_span.end.offset,
                     class_loader: closure_ctx.class_loader,
                     function_loader: None,
+                    scope_var_resolver: None,
                     resolved_class_cache: None,
                 };
                 let receiver_classes = ResolvedType::into_arced_classes(
@@ -1549,12 +1543,12 @@ fn infer_callable_param_types_for_call(
                 let method_name = ident.value.to_string();
                 let class_name = match sc.class {
                     Expression::Self_(_) | Expression::Static(_) => {
-                        closure_ctx.current_class.map(|c| c.name.clone())
+                        closure_ctx.current_class.map(|c| c.name.to_string())
                     }
                     Expression::Identifier(id) => Some(id.value().to_string()),
                     Expression::Parent(_) => closure_ctx
                         .current_class
-                        .and_then(|c| c.parent_class.clone()),
+                        .and_then(|c| c.parent_class.map(|a| a.to_string())),
                     _ => None,
                 };
                 let cls = class_name.and_then(|name| {
@@ -1624,7 +1618,7 @@ fn find_callable_params_on_method(
     method_name: &str,
     arg_idx: usize,
 ) -> Option<Vec<PhpType>> {
-    let method = class.methods.iter().find(|m| m.name == method_name)?;
+    let method = class.get_method(method_name)?;
     let param = method.parameters.get(arg_idx)?;
     let hint = param.type_hint.as_ref()?;
     let callable_params = hint.callable_param_types()?;

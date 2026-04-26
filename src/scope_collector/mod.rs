@@ -40,6 +40,29 @@ mod tests;
 use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
+// ─── By-reference parameter resolution ──────────────────────────────────────
+
+/// Describes a call expression so the by-ref resolver can look up
+/// the callee's parameter list.
+pub(crate) enum ByRefCallKind<'a> {
+    /// A standalone function call (e.g. `myFunc($var)`).
+    Function(&'a str),
+    /// A static method call (e.g. `Cls::method($var)`).
+    StaticMethod(&'a str, &'a str),
+    /// A constructor call (e.g. `new Cls($var)`).
+    Constructor(&'a str),
+    /// An instance method call on `$this` (e.g. `$this->method($var)`).
+    /// The class name is the enclosing class at the call site.
+    InstanceMethod(&'a str, &'a str),
+}
+
+/// Callback that resolves by-reference parameter positions for a call.
+///
+/// Given a [`ByRefCallKind`] describing the call, returns a list of
+/// 0-based argument positions that are by-reference.  Returns `None`
+/// if the function/method cannot be resolved.
+pub(crate) type ByRefResolver<'a> = &'a dyn Fn(&ByRefCallKind<'_>) -> Option<Vec<usize>>;
+
 // ─── Core types ─────────────────────────────────────────────────────────────
 
 /// Whether a variable access is a read or a write.
@@ -399,24 +422,49 @@ impl ScopeMap {
 // ─── Collection (forward-pass AST walker) ───────────────────────────────────
 
 /// Internal state for the forward-pass walker.
-struct Collector {
+struct Collector<'a> {
     accesses: Vec<VarAccess>,
     frames: Vec<Frame>,
     has_this_or_self: bool,
     has_reference_params: bool,
     /// Stack of frame start offsets for determining the current scope.
     frame_stack: Vec<u32>,
+    /// Optional callback that resolves by-reference parameter positions
+    /// for function/static-method/constructor calls.
+    by_ref_resolver: Option<ByRefResolver<'a>>,
+    /// Name of the enclosing class (when walking a method body).
+    /// Used to resolve `$this->method()` by-ref parameters.
+    enclosing_class_name: Option<String>,
 }
 
-impl Collector {
+impl<'a> Collector<'a> {
     fn new() -> Self {
-        Self {
+        Collector {
             accesses: Vec::new(),
             frames: Vec::new(),
             has_this_or_self: false,
             has_reference_params: false,
             frame_stack: Vec::new(),
+            by_ref_resolver: None,
+            enclosing_class_name: None,
         }
+    }
+
+    fn with_resolver(resolver: ByRefResolver<'a>) -> Self {
+        Collector {
+            accesses: Vec::new(),
+            frames: Vec::new(),
+            has_this_or_self: false,
+            has_reference_params: false,
+            frame_stack: Vec::new(),
+            by_ref_resolver: Some(resolver),
+            enclosing_class_name: None,
+        }
+    }
+
+    /// Return the enclosing class name, if set.
+    fn enclosing_class_name(&self) -> Option<&str> {
+        self.enclosing_class_name.as_deref()
     }
 
     fn push_access(&mut self, name: String, offset: u32, kind: AccessKind) {
@@ -444,7 +492,22 @@ pub(crate) fn collect_scope(
     body_start: u32,
     body_end: u32,
 ) -> ScopeMap {
-    let mut collector = Collector::new();
+    collect_scope_with_resolver(statements, body_start, body_end, None)
+}
+
+/// Like [`collect_scope`] but accepts an optional [`ByRefResolver`]
+/// callback for detecting by-reference parameters in user-defined
+/// function and static method calls.
+pub(crate) fn collect_scope_with_resolver(
+    statements: &[Statement<'_>],
+    body_start: u32,
+    body_end: u32,
+    resolver: Option<ByRefResolver<'_>>,
+) -> ScopeMap {
+    let mut collector = match resolver {
+        Some(r) => Collector::with_resolver(r),
+        None => Collector::new(),
+    };
 
     collector.push_frame(Frame {
         start: body_start,
@@ -509,6 +572,26 @@ pub(crate) fn collect_function_scope<'a>(
     collect_function_scope_with_kind(params, body, body_start, body_end, FrameKind::Function)
 }
 
+/// Like [`collect_function_scope`] but accepts an optional
+/// [`ByRefResolver`] callback.
+pub(crate) fn collect_function_scope_with_resolver<'a>(
+    params: &FunctionLikeParameterList<'a>,
+    body: &[Statement<'a>],
+    body_start: u32,
+    body_end: u32,
+    resolver: Option<ByRefResolver<'_>>,
+) -> ScopeMap {
+    collect_function_scope_with_kind_and_resolver(
+        params,
+        body,
+        body_start,
+        body_end,
+        FrameKind::Function,
+        resolver,
+        None,
+    )
+}
+
 /// Like [`collect_function_scope`] but allows specifying the
 /// [`FrameKind`] for the outermost frame.  Use `FrameKind::Method`
 /// when collecting inside a class method.
@@ -519,7 +602,28 @@ pub(crate) fn collect_function_scope_with_kind<'a>(
     body_end: u32,
     kind: FrameKind,
 ) -> ScopeMap {
-    let mut collector = Collector::new();
+    collect_function_scope_with_kind_and_resolver(
+        params, body, body_start, body_end, kind, None, None,
+    )
+}
+
+/// Like [`collect_function_scope_with_kind`] but accepts an optional
+/// [`ByRefResolver`] callback for detecting by-reference parameters
+/// in user-defined function and static method calls.
+pub(crate) fn collect_function_scope_with_kind_and_resolver<'a>(
+    params: &FunctionLikeParameterList<'a>,
+    body: &[Statement<'a>],
+    body_start: u32,
+    body_end: u32,
+    kind: FrameKind,
+    resolver: Option<ByRefResolver<'_>>,
+    enclosing_class_name: Option<String>,
+) -> ScopeMap {
+    let mut collector = match resolver {
+        Some(r) => Collector::with_resolver(r),
+        None => Collector::new(),
+    };
+    collector.enclosing_class_name = enclosing_class_name;
 
     let param_names: Vec<String> = params
         .parameters
@@ -560,7 +664,7 @@ pub(crate) fn collect_function_scope_with_kind<'a>(
 
 // ─── Statement walker ───────────────────────────────────────────────────────
 
-fn walk_statement(stmt: &Statement<'_>, collector: &mut Collector) {
+fn walk_statement(stmt: &Statement<'_>, collector: &mut Collector<'_>) {
     match stmt {
         Statement::Expression(expr_stmt) => {
             walk_expression(expr_stmt.expression, collector);
@@ -605,7 +709,17 @@ fn walk_statement(stmt: &Statement<'_>, collector: &mut Collector) {
             if let Some(key_expr) = foreach.target.key() {
                 walk_expression_as_write(key_expr, collector);
             }
-            walk_expression_as_write(foreach.target.value(), collector);
+            let value_expr = foreach.target.value();
+            if value_expr.is_reference() {
+                // By-reference foreach (`&$value`): the binding is
+                // semantically "used" because writes through the
+                // reference mutate the original array.  Record as
+                // ReadWrite so the unused-variable diagnostic does
+                // not fire on the foreach variable.
+                walk_expression_as_readwrite(value_expr, collector);
+            } else {
+                walk_expression_as_write(value_expr, collector);
+            }
 
             match &foreach.body {
                 ForeachBody::Statement(inner) => {
@@ -756,7 +870,7 @@ fn walk_statement(stmt: &Statement<'_>, collector: &mut Collector) {
     }
 }
 
-fn walk_if_statement_body(if_body: &IfStatementBody<'_>, collector: &mut Collector) {
+fn walk_if_statement_body(if_body: &IfStatementBody<'_>, collector: &mut Collector<'_>) {
     walk_statement(if_body.statement, collector);
     for clause in if_body.else_if_clauses.iter() {
         walk_expression(clause.condition, collector);
@@ -769,7 +883,7 @@ fn walk_if_statement_body(if_body: &IfStatementBody<'_>, collector: &mut Collect
 
 // ─── Expression walker ──────────────────────────────────────────────────────
 
-fn walk_expression(expr: &Expression<'_>, collector: &mut Collector) {
+fn walk_expression(expr: &Expression<'_>, collector: &mut Collector<'_>) {
     match expr {
         Expression::Variable(var) => {
             walk_variable_read(var, collector);
@@ -778,27 +892,34 @@ fn walk_expression(expr: &Expression<'_>, collector: &mut Collector) {
             walk_assignment(assignment, collector);
         }
         // ── Function / method / static-method calls ──
-        Expression::Call(call) => {
-            match call {
-                Call::Function(func_call) => {
-                    walk_expression(func_call.function, collector);
-                    walk_arguments(&func_call.argument_list, collector);
-                }
-                Call::Method(method_call) => {
-                    walk_expression(method_call.object, collector);
-                    // method selector is not a variable read
-                    walk_arguments(&method_call.argument_list, collector);
-                }
-                Call::NullSafeMethod(method_call) => {
-                    walk_expression(method_call.object, collector);
-                    walk_arguments(&method_call.argument_list, collector);
-                }
-                Call::StaticMethod(static_call) => {
-                    walk_expression(static_call.class, collector);
-                    walk_arguments(&static_call.argument_list, collector);
-                }
+        Expression::Call(call) => match call {
+            Call::Function(func_call) => {
+                walk_expression(func_call.function, collector);
+                walk_function_call_arguments(func_call, collector);
             }
-        }
+            Call::Method(method_call) => {
+                walk_expression(method_call.object, collector);
+                walk_method_call_arguments_inner(
+                    method_call.object,
+                    &method_call.method,
+                    &method_call.argument_list,
+                    collector,
+                );
+            }
+            Call::NullSafeMethod(method_call) => {
+                walk_expression(method_call.object, collector);
+                walk_method_call_arguments_inner(
+                    method_call.object,
+                    &method_call.method,
+                    &method_call.argument_list,
+                    collector,
+                );
+            }
+            Call::StaticMethod(static_call) => {
+                walk_expression(static_call.class, collector);
+                walk_static_method_call_arguments(static_call, collector);
+            }
+        },
         // ── Property / constant access ──
         Expression::Access(access) => match access {
             Access::Property(pa) => {
@@ -810,10 +931,13 @@ fn walk_expression(expr: &Expression<'_>, collector: &mut Collector) {
             }
             Access::StaticProperty(spa) => {
                 walk_expression(spa.class, collector);
-                // Static property access: the property name variable is a read.
-                if let Variable::Direct(dv) = &spa.property {
-                    let name = dv.name.to_string();
-                    collector.push_access(name, dv.span().start.offset, AccessKind::Read);
+                // Direct is a member name (self::$prop), not a local variable.
+                // Indirect/Nested contain expressions that may reference local vars
+                // (e.g. self::$$prop, self::${expr}).
+                match &spa.property {
+                    Variable::Direct(_) => {}
+                    Variable::Indirect(iv) => walk_expression(iv.expression, collector),
+                    Variable::Nested(nv) => walk_variable_read(nv.variable, collector),
                 }
             }
             Access::ClassConstant(cca) => {
@@ -879,7 +1003,7 @@ fn walk_expression(expr: &Expression<'_>, collector: &mut Collector) {
         Expression::Instantiation(inst) => {
             walk_expression(inst.class, collector);
             if let Some(ref args) = inst.argument_list {
-                walk_arguments(args, collector);
+                walk_constructor_arguments(inst, args, collector);
             }
         }
         Expression::Throw(throw) => {
@@ -1038,7 +1162,9 @@ fn walk_expression(expr: &Expression<'_>, collector: &mut Collector) {
 
 /// Walk an expression that appears in a write position (LHS of
 /// assignment, foreach binding, unset argument, etc.).
-fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector) {
+///
+/// See also [`walk_expression_as_readwrite`] for by-reference foreach bindings.
+fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector<'_>) {
     match expr {
         Expression::Variable(Variable::Direct(dv)) => {
             let name = dv.name.to_string();
@@ -1090,7 +1216,7 @@ fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector) {
                 let name = dv.name.to_string();
                 collector.push_access(name, dv.span().start.offset, AccessKind::ReadWrite);
             } else {
-                walk_expression(access.array, collector);
+                walk_expression_as_write(access.array, collector);
             }
             walk_expression(access.index, collector);
         }
@@ -1100,7 +1226,7 @@ fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector) {
                 let name = dv.name.to_string();
                 collector.push_access(name, dv.span().start.offset, AccessKind::ReadWrite);
             } else {
-                walk_expression(append.array, collector);
+                walk_expression_as_write(append.array, collector);
             }
         }
         Expression::Access(Access::Property(pa)) => {
@@ -1112,6 +1238,15 @@ fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector) {
         }
         Expression::Access(Access::StaticProperty(spa)) => {
             walk_expression(spa.class, collector);
+            match &spa.property {
+                Variable::Direct(_) => {}
+                Variable::Indirect(iv) => walk_expression(iv.expression, collector),
+                Variable::Nested(nv) => walk_variable_read(nv.variable, collector),
+            }
+        }
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            // `&$value` in foreach — the inner variable is being written.
+            walk_expression_as_write(up.operand, collector);
         }
         _ => {
             // For anything else, walk as read.
@@ -1120,8 +1255,26 @@ fn walk_expression_as_write(expr: &Expression<'_>, collector: &mut Collector) {
     }
 }
 
+/// Walk an expression that is being both read and written (e.g. a
+/// by-reference foreach binding like `&$value`).
+fn walk_expression_as_readwrite(expr: &Expression<'_>, collector: &mut Collector<'_>) {
+    match expr {
+        Expression::UnaryPrefix(up) if matches!(up.operator, UnaryPrefixOperator::Reference(_)) => {
+            walk_expression_as_readwrite(up.operand, collector);
+        }
+        Expression::Variable(Variable::Direct(dv)) => {
+            let name = dv.name.to_string();
+            collector.push_access(name, dv.span().start.offset, AccessKind::ReadWrite);
+        }
+        _ => {
+            // Fallback: treat as a plain write.
+            walk_expression_as_write(expr, collector);
+        }
+    }
+}
+
 /// Walk a variable in read position.
-fn walk_variable_read(var: &Variable<'_>, collector: &mut Collector) {
+fn walk_variable_read(var: &Variable<'_>, collector: &mut Collector<'_>) {
     match var {
         Variable::Direct(dv) => {
             let name = dv.name.to_string();
@@ -1141,7 +1294,7 @@ fn walk_variable_read(var: &Variable<'_>, collector: &mut Collector) {
 }
 
 /// Walk an assignment expression.
-fn walk_assignment(assignment: &Assignment<'_>, collector: &mut Collector) {
+fn walk_assignment(assignment: &Assignment<'_>, collector: &mut Collector<'_>) {
     // Determine if this is a compound assignment (`+=`, `.=`, etc.)
     let is_compound = !assignment.operator.is_assign();
 
@@ -1163,14 +1316,274 @@ fn walk_assignment(assignment: &Assignment<'_>, collector: &mut Collector) {
 }
 
 /// Walk arguments in a function/method call.
-fn walk_arguments(args: &ArgumentList<'_>, collector: &mut Collector) {
+fn walk_arguments(args: &ArgumentList<'_>, collector: &mut Collector<'_>) {
     for arg in args.arguments.iter() {
         walk_expression(arg.value(), collector);
     }
 }
 
+/// Known PHP functions with by-reference out-parameters.
+///
+/// Each entry maps a function name to a list of 0-based argument
+/// positions that are by-reference out-parameters.  When the scope
+/// collector encounters a call to one of these functions, those
+/// argument positions are recorded as writes instead of reads.
+const BY_REF_OUT_PARAMS: &[(&str, &[usize])] = &[
+    // Regex
+    ("preg_match", &[2]),
+    ("preg_match_all", &[2]),
+    ("preg_replace", &[4]),
+    ("preg_replace_callback", &[4]),
+    // String/parsing
+    ("exec", &[1, 2]),
+    ("mb_parse_str", &[1]),
+    ("parse_str", &[1]),
+    ("similar_text", &[2]),
+    ("sscanf", &[2, 3, 4, 5, 6, 7]),
+    // cURL
+    ("curl_multi_exec", &[1]),
+    ("curl_multi_info_read", &[1]),
+    // Sockets/streams
+    ("fsockopen", &[2, 3]),
+    ("pfsockopen", &[2, 3]),
+    ("socket_create_pair", &[3]),
+    ("stream_socket_accept", &[2]),
+    ("stream_socket_client", &[1, 2]),
+    ("stream_socket_recvfrom", &[3]),
+    ("stream_socket_server", &[1, 2]),
+    // OpenSSL
+    ("openssl_csr_new", &[1]),
+    ("openssl_encrypt", &[6]),
+    ("openssl_open", &[1]),
+    ("openssl_pkey_export", &[1]),
+    ("openssl_pkcs12_export", &[1]),
+    ("openssl_pkcs12_read", &[1]),
+    ("openssl_public_encrypt", &[1]),
+    ("openssl_random_pseudo_bytes", &[1]),
+    ("openssl_seal", &[1, 2, 6]),
+    ("openssl_sign", &[1]),
+    // Process
+    ("pcntl_wait", &[0]),
+    ("pcntl_waitpid", &[1]),
+    // Image
+    ("exif_thumbnail", &[1, 2, 3]),
+    ("getimagesize", &[1]),
+    ("getimagesizefromstring", &[1]),
+    // DNS
+    ("dns_get_mx", &[1, 2]),
+    ("dns_get_record", &[2, 3]),
+    ("getmxrr", &[1, 2]),
+    // File/IO
+    ("flock", &[2]),
+    // IPC
+    ("msg_receive", &[2, 4, 7]),
+    ("msg_send", &[5]),
+    // LDAP
+    ("ldap_parse_result", &[2, 3, 4, 5, 6]),
+    // Misc
+    ("getopt", &[2]),
+    ("grapheme_extract", &[4]),
+    ("headers_sent", &[0, 1]),
+];
+
+/// Walk arguments for a direct function call, treating known
+/// by-reference out-parameters as writes.
+fn walk_function_call_arguments(func_call: &FunctionCall<'_>, collector: &mut Collector<'_>) {
+    // Try to extract a bare function name.
+    let func_name = match func_call.function {
+        Expression::Identifier(ident) => {
+            let raw = ident.value();
+            // Strip leading backslash for FQN calls like \preg_match
+            raw.strip_prefix('\\').unwrap_or(raw)
+        }
+        _ => {
+            // Not a bare name — fall through to default handling.
+            walk_arguments(&func_call.argument_list, collector);
+            return;
+        }
+    };
+
+    // Look up by-ref out-parameter positions: first the hardcoded
+    // table, then the optional resolver callback.
+    let hardcoded = BY_REF_OUT_PARAMS
+        .iter()
+        .find(|(name, _)| *name == func_name)
+        .map(|(_, positions)| *positions);
+
+    let resolved_positions: Vec<usize>;
+    let out_positions: Option<&[usize]> = if let Some(positions) = hardcoded {
+        Some(positions)
+    } else if let Some(ref resolver) = collector.by_ref_resolver {
+        let kind = ByRefCallKind::Function(func_name);
+        if let Some(positions) = resolver(&kind) {
+            resolved_positions = positions;
+            if resolved_positions.is_empty() {
+                None
+            } else {
+                Some(&resolved_positions)
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    match out_positions {
+        Some(positions) => {
+            for (idx, arg) in func_call.argument_list.arguments.iter().enumerate() {
+                if positions.contains(&idx) {
+                    walk_expression_as_write(arg.value(), collector);
+                } else {
+                    walk_expression(arg.value(), collector);
+                }
+            }
+        }
+        None => {
+            walk_arguments(&func_call.argument_list, collector);
+        }
+    }
+}
+
+/// Walk arguments for an instance method call (`$obj->method(...)`),
+/// checking the optional resolver for by-reference parameter positions
+/// when the receiver is `$this`.
+fn walk_method_call_arguments_inner(
+    object: &Expression<'_>,
+    method: &ClassLikeMemberSelector<'_>,
+    argument_list: &ArgumentList<'_>,
+    collector: &mut Collector<'_>,
+) {
+    // Only handle `$this->method()` — for arbitrary receivers we cannot
+    // resolve the class type in the scope collector.
+    let is_this =
+        matches!(object, Expression::Variable(Variable::Direct(dv)) if dv.name == "$this");
+    if !is_this {
+        walk_arguments(argument_list, collector);
+        return;
+    }
+
+    let method_name = match method {
+        ClassLikeMemberSelector::Identifier(ident) => ident.value,
+        _ => {
+            walk_arguments(argument_list, collector);
+            return;
+        }
+    };
+
+    // Find the enclosing class name from the collector's class stack.
+    let enclosing_class = collector.enclosing_class_name();
+    let enclosing_class = match enclosing_class {
+        Some(name) => name,
+        None => {
+            walk_arguments(argument_list, collector);
+            return;
+        }
+    };
+
+    if let Some(ref resolver) = collector.by_ref_resolver {
+        let kind = ByRefCallKind::InstanceMethod(enclosing_class, method_name);
+        if let Some(positions) = resolver(&kind)
+            && !positions.is_empty()
+        {
+            for (idx, arg) in argument_list.arguments.iter().enumerate() {
+                if positions.contains(&idx) {
+                    walk_expression_as_write(arg.value(), collector);
+                } else {
+                    walk_expression(arg.value(), collector);
+                }
+            }
+            return;
+        }
+    }
+
+    walk_arguments(argument_list, collector);
+}
+
+fn walk_static_method_call_arguments(
+    static_call: &StaticMethodCall<'_>,
+    collector: &mut Collector<'_>,
+) {
+    // Extract the class name from the AST.
+    let class_name = match static_call.class {
+        Expression::Identifier(ident) => ident.value(),
+        Expression::Self_(_) => "self",
+        Expression::Static(_) => "static",
+        Expression::Parent(_) => "parent",
+        _ => {
+            walk_arguments(&static_call.argument_list, collector);
+            return;
+        }
+    };
+
+    let method_name = match &static_call.method {
+        ClassLikeMemberSelector::Identifier(ident) => ident.value,
+        // Variable method name (`Cls::$method()`) — can't resolve statically.
+        _ => {
+            walk_arguments(&static_call.argument_list, collector);
+            return;
+        }
+    };
+
+    if let Some(ref resolver) = collector.by_ref_resolver {
+        let kind = ByRefCallKind::StaticMethod(class_name, method_name);
+        if let Some(positions) = resolver(&kind)
+            && !positions.is_empty()
+        {
+            for (idx, arg) in static_call.argument_list.arguments.iter().enumerate() {
+                if positions.contains(&idx) {
+                    walk_expression_as_write(arg.value(), collector);
+                } else {
+                    walk_expression(arg.value(), collector);
+                }
+            }
+            return;
+        }
+    }
+
+    walk_arguments(&static_call.argument_list, collector);
+}
+
+/// Walk arguments for a constructor call (`new Cls(...)`), checking
+/// the optional resolver for by-reference parameter positions.
+fn walk_constructor_arguments(
+    inst: &Instantiation<'_>,
+    args: &ArgumentList<'_>,
+    collector: &mut Collector<'_>,
+) {
+    // Extract the class name from the AST.
+    let class_name = match inst.class {
+        Expression::Identifier(ident) => ident.value(),
+        Expression::Self_(_) => "self",
+        Expression::Static(_) => "static",
+        Expression::Parent(_) => "parent",
+        _ => {
+            walk_arguments(args, collector);
+            return;
+        }
+    };
+
+    if let Some(ref resolver) = collector.by_ref_resolver {
+        let kind = ByRefCallKind::Constructor(class_name);
+        if let Some(positions) = resolver(&kind)
+            && !positions.is_empty()
+        {
+            for (idx, arg) in args.arguments.iter().enumerate() {
+                if positions.contains(&idx) {
+                    walk_expression_as_write(arg.value(), collector);
+                } else {
+                    walk_expression(arg.value(), collector);
+                }
+            }
+            return;
+        }
+    }
+
+    walk_arguments(args, collector);
+}
+
 /// Walk array elements in a read context.
-fn walk_array_element(element: &ArrayElement<'_>, collector: &mut Collector) {
+fn walk_array_element(element: &ArrayElement<'_>, collector: &mut Collector<'_>) {
     match element {
         ArrayElement::KeyValue(kv) => {
             walk_expression(kv.key, collector);
@@ -1190,7 +1603,7 @@ fn walk_array_element(element: &ArrayElement<'_>, collector: &mut Collector) {
 ///
 /// Creates a new frame for the closure body.  Records `use()` captures
 /// and parameter declarations as writes in the new frame.
-fn walk_closure(closure: &Closure<'_>, collector: &mut Collector) {
+fn walk_closure(closure: &Closure<'_>, collector: &mut Collector<'_>) {
     let body_start = closure.body.left_brace.start.offset;
     let body_end = closure.body.right_brace.end.offset;
 
@@ -1248,7 +1661,7 @@ fn walk_closure(closure: &Closure<'_>, collector: &mut Collector) {
 ///
 /// Creates a new frame for the arrow function body expression.  Arrow
 /// functions implicitly capture all outer variables by value.
-fn walk_arrow_function(arrow: &ArrowFunction<'_>, collector: &mut Collector) {
+fn walk_arrow_function(arrow: &ArrowFunction<'_>, collector: &mut Collector<'_>) {
     let body_start = arrow.arrow.start.offset;
     let body_end = arrow.expression.span().end.offset;
 

@@ -482,6 +482,26 @@ User-defined functions in `global_functions` always take precedence over stubs b
 
 Deduplication uses the map key (FQN), so two functions with the same short name in different namespaces both appear as separate completion items.
 
+### Stub Patches
+
+The embedded phpstorm-stubs sometimes lack `@template` annotations or have overly broad return types (e.g. `mixed`) for functions whose return type actually depends on an argument. PHPStan solves this with dynamic return type extensions written in PHP; PHPantom solves it by patching the parsed `FunctionInfo` or `ClassInfo` at load time.
+
+#### Function patches
+
+`stub_patches.rs` provides `apply_function_stub_patches(func)`, called from `find_or_load_function` in Phase 2 after parsing each function from stub source and before caching it in `global_functions`. The function dispatches to per-function patch functions based on the function name. Only functions with known deficiencies are patched; all others pass through unchanged.
+
+Current patches:
+
+1. **`array_reduce`** — phpstorm-stubs declare `mixed` return type. The actual return type is the type of the initial value (3rd argument). The patch adds `@template TReturn` bound to `$initial` and sets the return type to `TReturn`, matching PHPStan's `stubs/arrayFunctions.stub`.
+
+This is analogous to the [Laravel Class Patches](#laravel-class-patches) system but for built-in PHP functions rather than framework classes. When phpstorm-stubs gains proper annotations for a patched function, the corresponding patch can be deleted.
+
+**When to add a patch here vs. hardcoded logic in `rhs_resolution.rs`:** if the correct behaviour can be expressed with `@template` / `@return` annotations (i.e. PHPStan's own stubs already have the fix), it belongs in `stub_patches.rs`. If the behaviour requires inspecting call-site argument *values* at resolution time (e.g. `array_map`'s callback return type, or `array_filter` preserving the input array's element type), it must stay as hardcoded logic in `rhs_resolution.rs` / `raw_type_inference.rs`. Those functions are tracked in `ARRAY_PRESERVING_FUNCS` and `ARRAY_ELEMENT_FUNCS` in `completion/variable/mod.rs`, with the full inventory in `docs/todo/completion.md` C1.
+
+#### Class patches
+
+Class stub patches work the same way but are applied by `apply_class_stub_patches(class)` in `parse_and_cache_content_versioned` for URIs starting with `phpantom-stub://` or `phpantom-stub-fn://`. Current class patches add `@template` parameters and `@implements` generics to SPL collection classes (`ArrayIterator`, `ArrayObject`, `SplDoublyLinkedList`, `SplQueue`, `SplStack`, `SplPriorityQueue`, `SplFixedArray`, `SplObjectStorage`, `WeakMap`) that are missing them in phpstorm-stubs. These patches enable generic type substitution through the interface chain (e.g. `ArrayIterator<int, Rule>::current()` resolves to `Rule` via `Iterator::current()` returning `TValue`).
+
 ### Runtime Lookup — Constants
 
 The `stub_constant_index` (`HashMap<&'static str, &'static str>`) is built at construction time from `STUB_CONSTANT_MAP`, mapping constant names like `PHP_EOL`, `PHP_INT_MAX`, `SORT_ASC` to their stub file source. It is consulted by the constant-value loader (`Backend::constant_loader`) during variable type resolution: when a variable is assigned from a global constant (e.g. `$eol = PHP_EOL`), the loader extracts the constant's initializer value from the stub source and the type is inferred from the literal (`string`, `int`, `float`, `bool`, `null`, or `array`). The same lookup chain also serves hover, completion of standalone constant names, and go-to-definition.
@@ -976,11 +996,16 @@ Files that are not open (vendor files loaded via PSR-4 on demand) do not get a s
 
 ## Diagnostic Philosophy
 
-PHPantom's diagnostics assert **type coverage**, not bug detection. The question they answer is: "can the LSP resolve every class, member, and function call in this project?" When the answer is yes, completion works everywhere with no dead spots, and downstream tools like PHPStan get the type information they need to find real bugs at every strictness level.
+PHPantom earns trust through two promises:
 
-This is a deliberate division of labour. PHPStan only complains about missing types at levels 6, 9, and 10. PHPantom fills those gaps cheaply and immediately so PHPStan can focus on logic errors rather than fighting incomplete type information. The two tools complement each other at any PHPStan level: PHPantom rejects structural problems fast (unknown class, unknown member, wrong argument count, unimplemented interface method), and PHPStan hunts for semantic bugs (type mismatches, unreachable code, null safety violations) with full type context available.
+1. **Provide suggestions for everything the developer expects.** Completion, hover, go-to-definition, and every other LSP feature should work on every symbol in the project with no dead spots.
+2. **Stay silent on everything the developer knows works.** Every diagnostic PHPantom reports must be something that is genuinely wrong, not something that is merely imprecise or unconventional. If the code runs without errors, PHPantom should not complain about it.
 
-The native diagnostic categories reflect this philosophy:
+Most PHP developers have learned to ignore IDE errors. They have seen tools produce walls of false positives from bugs in the inference engine, mistakes in stubs, or overly strict rules applied to code that works perfectly well in production. The result is that developers treat red squiggles as noise and test in production to see if a problem is real. PHPantom exists to break that cycle. When a diagnostic appears, it must mean something. A single false positive costs more trust than ten missed true positives, because it teaches the developer to stop reading.
+
+### Type Coverage Diagnostics
+
+The core diagnostic categories assert **type coverage**: can the LSP resolve every class, member, and function call in the project?
 
 | Diagnostic | What it asserts |
 |---|---|
@@ -990,11 +1015,35 @@ The native diagnostic categories reflect this philosophy:
 | Unknown members | Every member access resolves to a declared member. |
 | Unknown functions | Every function call resolves to a declared function. |
 | Argument count | Call sites match the target's parameter count. |
+| Argument type mismatch | Every argument's type is definitely compatible with the parameter's declared type. |
 | Implementation errors | Concrete classes satisfy their interface/abstract contracts. |
 | Undefined variables | Every variable read has a prior definition in scope. |
 | Deprecated usage | The developer is aware of deprecation. |
 
-None of these are type-compatibility checks, dead-code analysis, or control-flow reasoning. That is by design. A project that passes all of PHPantom's diagnostics has 100% type coverage from the LSP's perspective: every symbol is resolvable, every completion trigger produces results, and every hover shows a type.
+A project that passes all of these has 100% type coverage from the LSP's perspective: every symbol is resolvable, every completion trigger produces results, and every hover shows a type.
+
+This also serves as a deliberate division of labour with PHPStan. PHPStan only complains about missing types at levels 6, 9, and 10. PHPantom fills those gaps cheaply and immediately so PHPStan can focus on logic errors rather than fighting incomplete type information. PHPantom rejects structural problems fast (unknown class, unknown member, wrong argument count, unimplemented interface method), and PHPStan hunts for semantic bugs with full type context available.
+
+### Type Compatibility Diagnostics: Yes / No / Maybe
+
+Argument type mismatch diagnostics (`type_error.argument`) go beyond coverage into type-compatibility territory. Here the risk of false positives is highest, because PHP is a dynamically typed language with pervasive implicit coercion, and real-world codebases are full of patterns that are technically imprecise but functionally correct.
+
+Every type check is classified into one of three buckets:
+
+- **Yes** (definitely compatible). `Cat` passed to `Animal` where `Cat extends Animal`. No diagnostic.
+- **No** (definitely incompatible). `array` passed to `int`. Diagnostic reported.
+- **Maybe** (might work, might not). `?Carbon` passed to `Carbon`, bare `array` passed to `array<string>`, `HtmlString` passed to `string`. No diagnostic.
+
+**Only "no" produces a diagnostic.** The "maybe" bucket is deliberately wide. If there is any reasonable interpretation under which the code could work at runtime, PHPantom stays silent. Examples of "maybe":
+
+- **Nullable to non-nullable** (`?Carbon` to `Carbon`). The developer may have null-checked before the call. We cannot see the guard clause from the call site alone.
+- **Bare array to typed array** (`array` to `array<string>`). A bare `array` is untyped. It might contain strings. We cannot prove otherwise.
+- **Stringable objects to string** (`HtmlString` to `string`). PHP calls `__toString()` at runtime. We follow PHP's runtime behaviour.
+- **Int to string**. PHP coerces integers to strings in many contexts and we cannot know the `strict_types` setting.
+- **`list<X>` and `array<int, X>`**. Used interchangeably in practice. array<int, X> might have sequential-keys in actuality.
+- **Interface to concrete subtype** (`CarbonInterface` to `Carbon`). The interface is broader, but in practice the value is almost always the expected concrete type.
+
+This conservatism is the foundation for trust. Once developers learn that PHPantom's red squiggles are never false alarms, they start paying attention to them. At that point, a stricter mode can be offered as an opt-in for teams that want more help. But the default must be: if we are not certain, we stay silent.
 
 ## Analyze Command
 
@@ -1012,9 +1061,22 @@ Output uses PHPStan's table format (with progress bar and coloured output) so th
 
 ## Diagnostic Worker Architecture
 
-Diagnostics run in a background `tokio::spawn` task so they never block completion, hover, or signature help. The worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slot) are shared by `Arc::clone`, so the worker sees every mutation the main `Backend` makes.
+Diagnostics run in three independent background `tokio::spawn` tasks so they never block completion, hover, or signature help:
 
-Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the worker is spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the worker would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
+1. **Native diagnostic worker** — collects fast (syntax errors, unused imports, deprecated usage) and slow (unknown classes/members/functions, argument count, implementation errors) diagnostics. Debounces at 500 ms.
+2. **PHPStan worker** — runs PHPStan in editor mode (`--tmp-file` / `--instead-of`). Debounces at 2 000 ms.
+3. **PHPCS worker** — runs PHP_CodeSniffer via `phpcs --report=json` with stdin piping. Debounces at 2 000 ms.
+
+Each worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slots) are shared by `Arc::clone`, so every worker sees all mutations the main `Backend` makes. The PHPStan and PHPCS workers each have their own notify handle, pending-URI slot, and diagnostic cache so they run independently of each other and of the native diagnostic worker.
+
+Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the workers are spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the workers would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
+
+## Forward Walker
+
+The forward walker (`src/completion/variable/forward_walk.rs`) walks
+method bodies top-to-bottom, building a scope of variable types at
+each statement boundary. It is shared by diagnostics, completion,
+hover, go-to-definition, and signature help.
 
 ## Name Resolution
 

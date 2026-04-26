@@ -327,42 +327,6 @@ $one->  // should see Foo members
 
 ---
 
-## T12. Intersection types flattened to unions by `type_strings_joined`
-**Impact: Low-Medium · Effort: Low**
-
-`ResolvedType::type_strings_joined` joins all resolved type entries
-with `|`. When a variable has an intersection type (`A&B`), the
-resolution pipeline produces separate `ResolvedType` entries for each
-part, and the join produces `A|B` instead of `A&B`.
-
-This affects any consumer that reads the joined type string, including
-hover display, extract function parameter types, and docblock
-generation on extracted methods.
-
-**Example:**
-
-```php
-function measure(Countable&Serializable $thing): void {
-    // Select and extract:
-    echo $thing->count();
-}
-// Extracted method gets `Countable|Serializable $thing` instead of
-// `Countable&Serializable $thing`.
-```
-
-**Remaining work.** `PhpType::Intersection` already exists and
-`ResolvedType::types_joined()` returns a structured `PhpType`, but
-the resolution pipeline still produces separate `ResolvedType` entries
-for each part of an intersection. The fix is to make the pipeline emit
-a single `ResolvedType` with `PhpType::Intersection` when the source
-type is an intersection.
-
-**After fixing:** verify that extract function docblock generation
-preserves intersection types in both the native hint and the `@param`
-tag.
-
----
-
 ## T13. Closure variables lose callable signature detail
 **Impact: Low-Medium · Effort: Medium**
 
@@ -447,8 +411,9 @@ NonEmptyCountable.
 `Psalm/Storage/Assertion/`. PHPStan's `TypeSpecifier` returns
 `SpecifiedTypes` with dual sure/sureNot maps.
 
-**Depends on:** T19 (structured types make reconciliation much
-simpler, but basic reconciliation can work with strings too).
+**Depends on:** The structured type representation (`PhpType`) has
+landed, which makes reconciliation much simpler than working with
+raw strings.
 
 ---
 
@@ -490,83 +455,89 @@ is now resolved by the `DB::select()` return type patch (B14) combined
 with `stdClass` property access suppression, but the general gap
 remains for any `$arr[$i] instanceof Foo` pattern.
 
----
+## T25. Call-site template argument inference for callable parameters
 
-## T25. Forward-walking scope model for variable type resolution
-**Impact: High · Effort: Very High**
+**Impact: Medium · Effort: Medium — partially done**
 
-PHPantom resolves variable types lazily: when the user triggers
-completion on `$x->`, it walks backward from the cursor to find
-where `$x` was assigned, then recursively resolves any variables
-referenced in the RHS. Each level of indirection adds a call to
-`resolve_variable_types`, which re-parses the file and re-walks the
-AST. A global depth counter (`MAX_VAR_RESOLUTION_DEPTH`, currently 4)
-caps the recursion to prevent stack overflows.
+When a function has a `@template T` and a parameter typed
+`callable(T): T`, the closure inlay hint system cannot resolve `T`
+to a concrete type because it reads the callable signature literally.
+For example:
 
-PHPStan, Psalm, and Mago all use the opposite strategy: an eager,
-single-pass, forward-walking scope model. They walk statements
-top-to-bottom, carrying a mutable type map (`expressionTypes` in
-PHPStan, `locals` in Mago). When they encounter `$a = $b->prop`,
-they look up `$b` in the already-populated map, resolve the property,
-and store `$a`'s type. Variable lookup is a flat O(1) map fetch with
-zero recursion regardless of assignment chain depth.
+```php
+/**
+ * @template T
+ * @param array<T> $items
+ * @param callable(T): T $fn
+ * @return array<T>
+ */
+function transform(array $items, callable $fn): array { ... }
 
-The backward-scanning approach causes several problems:
+transform([1, 2, 3], fn($x) => $x * 2);
+//                      ^ no hint — $x is T, not int
+```
 
-- **Depth limit fragility.** Every real-world pattern that adds one
-  more level of indirection (e.g. array shape literals referencing
-  variables assigned from foreach bindings inside conditional
-  branches) requires bumping the limit. The limit was 3, then 4;
-  it will need to grow again.
-- **Redundant work.** Each recursive call re-parses the source and
-  re-walks the AST from the top. A forward pass would parse once and
-  walk once.
-- **No scope threading.** Narrowing, guard clauses, and branch-aware
-  resolution are bolted on as post-hoc corrections rather than
-  flowing naturally through the scope.
+To show `int` for `$x`, the hint system needs to:
 
-**Depth limits eliminated by this item:**
+1. Resolve other arguments at the call site to infer `T = int` from
+   `array<T>` matched against `[1, 2, 3]` (which is `array<int>`).
+2. Substitute `T → int` in the callable's parameter and return types.
+3. Pass the substituted `callable(int): int` to the hint emitter.
 
-| Constant | Value | Location | Why it exists |
-|---|---|---|---|
-| `MAX_VAR_RESOLUTION_DEPTH` | 4 | `completion/variable/resolution.rs` | Each variable in an assignment chain triggers a full re-parse and re-walk. Was 3, bumped to 4 for array shapes in conditional loop branches. |
-| `MAX_CLOSURE_INFER_DEPTH` | 4 | `completion/variable/closure_resolution.rs` | `infer_callable_params_from_receiver` resolves the receiver type to infer closure parameter types, which can trigger another variable resolution cycle. |
+**Step 1 (done):** `emit_closure_hints` in `inlay_hints.rs` now
+accepts the `call_sites` slice, finds the matching `CallSite` for
+each `UntypedClosureSite`, extracts the full argument text from
+content, and passes it to `resolve_callable_target_with_args`
+instead of the no-args `resolve_callable_target`. This wires the
+existing `build_function_template_subs` / `build_method_template_subs`
+machinery into the inlay hint path. Integration tests document the
+desired behaviour.
 
-Both share the same root cause: resolving a variable's type triggers
-a full re-parse and re-walk from scratch, which recurses when the RHS
-references another variable. In a forward-walking model, both would
-be flat map lookups with zero recursion.
+**Step 2 (remaining — see B27):** The `CallSite` matching logic
+does not yet find the parent call site for all AST shapes. The
+offset comparison between `UntypedClosureSite` offsets and
+`CallSite.args_start`/`args_end` fails in practice, leaving
+`call_args_text` as `None`. Without it, template parameters fall
+back to their upper bound (`mixed`) via the fill-in-unbound logic,
+and `is_mixed()` filters the hint. Fixing the matching condition
+in `emit_closure_hints` (tracked in B27) completes the feature.
 
-The remaining depth limits (`MAX_INHERITANCE_DEPTH`,
-`MAX_TRAIT_DEPTH`, `MAX_MIXIN_DEPTH`, `MAX_ALIAS_DEPTH`) guard
-against walking PHP class/type hierarchies and are unrelated to the
-resolution architecture. They mirror limits that PHPStan and Mago
-also have and should stay as-is.
+**References:**
+- PHPStan: `GenericFunctionsReturnTypeExtension`, argument-based
+  template inference in `FunctionCallNode`.
+- Mago: `resolve_template_arguments` in the type checker.
 
-A forward-walking scope model would:
+## T26. Globbed constant unions (`Foo::BAR_*`)
 
-1. Parse the enclosing function body once.
-2. Walk statements in order, maintaining a `HashMap<VarName, PhpType>`
-   scope that is updated on each assignment, foreach binding, catch
-   clause, and narrowing point.
-3. At the cursor position, read the variable's type from the map.
+**Impact: Low · Effort: Low**
 
-This eliminates the depth limit entirely and makes the resolution
-cost proportional to the number of statements before the cursor,
-not the depth of the assignment chain.
+Resolve wildcard constant patterns like `Foo::BAR_*` to the union of
+all matching constant types on the class. PHPStan supports this syntax
+in docblock type strings:
 
-**Depends on:** T19 (structured type representation) should land
-first so the scope map stores `PhpType` values instead of strings.
+```php
+class Status {
+    const STATUS_ACTIVE = 1;
+    const STATUS_INACTIVE = 2;
+    const STATUS_PENDING = 3;
+}
 
-**Migration path:** Start with a parallel implementation behind a
-feature flag. The existing backward-scanning resolver stays as a
-fallback. Migrate one resolution context at a time (completion,
-hover, diagnostics) once the forward walker covers enough cases.
+/** @param Status::STATUS_* $status */
+function setStatus(int $status): void { ... }
+// $status should resolve to 1|2|3
+```
 
-**Reference:** PHPStan's `MutatingScope.expressionTypes` +
-`NodeScopeResolver.processStmtNode`, Mago's `BlockContext.locals` +
-statement analyzers. Both converge on the same architecture: the
-scope is the single source of truth, populated eagerly as the walk
-progresses.
+When the type engine encounters a constant pattern containing `*`,
+it should:
+
+1. Resolve the class (`Status`).
+2. Enumerate all constants matching the glob pattern (`STATUS_*`).
+3. Build a union of their literal types.
+
+**References:**
+- PHPStan: `ConstantWildcardType` / constant enum resolution.
+- Phpactor: `GlobbedConstantUnionType`.
+
+
 
 

@@ -10,14 +10,13 @@ use mago_syntax::ast::sequence::TokenSeparatedSequence;
 use mago_syntax::ast::*;
 
 use super::docblock::{
-    class_ref_span, extract_docblock_symbols, extract_param_var_spans,
+    class_ref_span, class_ref_span_ctx, extract_docblock_symbols, extract_param_var_spans,
     get_docblock_text_with_offset, is_navigable_type,
 };
 use super::{
-    CallSite, SelfStaticParentKind, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
-    VarDefKind, VarDefSite,
+    CallSite, ClassRefContext, SelfStaticParentKind, SymbolKind, SymbolMap, SymbolSpan,
+    TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite,
 };
-use crate::php_type::PhpType;
 use crate::util::strip_fqn_prefix;
 
 // ─── Extraction context ─────────────────────────────────────────────────────
@@ -64,6 +63,9 @@ struct ExtractionCtx<'a> {
     trivias: &'a [Trivia<'a>],
     /// The full source text of the file being extracted.
     content: &'a str,
+    /// Closures and arrow functions passed as arguments to callable-typed
+    /// parameters, used by inlay hints.
+    untyped_closure_sites: Vec<UntypedClosureSite>,
 }
 
 // ─── AST extraction ─────────────────────────────────────────────────────────
@@ -87,6 +89,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
         switch_scopes: Vec::new(),
         trivias: program.trivia.as_slice(),
         content,
+        untyped_closure_sites: Vec::new(),
     };
 
     for stmt in program.statements.iter() {
@@ -150,6 +153,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
         breakable_scopes: ctx.breakable_scopes,
         loop_scopes: ctx.loop_scopes,
         switch_scopes: ctx.switch_scopes,
+        untyped_closure_sites: ctx.untyped_closure_sites,
     }
 }
 
@@ -162,6 +166,17 @@ fn extract_from_statement<'a>(
 ) {
     match stmt {
         Statement::Namespace(ns) => {
+            // Emit a span for the namespace name itself so rename can target it.
+            if let Some(ref ident) = ns.name {
+                let name = ident.value().to_string();
+                if !name.is_empty() {
+                    ctx.spans.push(SymbolSpan {
+                        start: ident.span().start.offset,
+                        end: ident.span().end.offset,
+                        kind: SymbolKind::NamespaceDeclaration { name },
+                    });
+                }
+            }
             for inner in ns.statements().iter() {
                 extract_from_statement(inner, ctx, scope_start);
             }
@@ -292,7 +307,7 @@ fn extract_from_statement<'a>(
             }
             for catch in try_stmt.catch_clauses.iter() {
                 // Catch type hint is a navigable class reference.
-                extract_from_hint(&catch.hint, &mut ctx.spans);
+                extract_from_hint_ctx(&catch.hint, &mut ctx.spans, ClassRefContext::Catch);
                 // The caught variable.
                 if let Some(ref var) = catch.variable {
                     let var_name = var.name.strip_prefix('$').unwrap_or(var.name).to_string();
@@ -546,10 +561,11 @@ fn extract_from_class<'a>(class: &'a Class<'a>, ctx: &mut ExtractionCtx<'a>) {
     if let Some(ref extends) = class.extends {
         for ident in extends.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::ExtendsClass,
             ));
         }
     }
@@ -558,10 +574,11 @@ fn extract_from_class<'a>(class: &'a Class<'a>, ctx: &mut ExtractionCtx<'a>) {
     if let Some(ref implements) = class.implements {
         for ident in implements.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::Implements,
             ));
         }
     }
@@ -576,7 +593,7 @@ fn extract_from_class<'a>(class: &'a Class<'a>, ctx: &mut ExtractionCtx<'a>) {
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound: bound.map(|b| PhpType::parse(&b)),
+                bound,
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -605,10 +622,11 @@ fn extract_from_interface<'a>(iface: &'a Interface<'a>, ctx: &mut ExtractionCtx<
     if let Some(ref extends) = iface.extends {
         for ident in extends.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::ExtendsInterface,
             ));
         }
     }
@@ -622,7 +640,7 @@ fn extract_from_interface<'a>(iface: &'a Interface<'a>, ctx: &mut ExtractionCtx<
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound: bound.map(|b| PhpType::parse(&b)),
+                bound,
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -656,7 +674,7 @@ fn extract_from_trait<'a>(trait_def: &'a Trait<'a>, ctx: &mut ExtractionCtx<'a>)
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound: bound.map(|b| PhpType::parse(&b)),
+                bound,
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -684,10 +702,11 @@ fn extract_from_enum<'a>(enum_def: &'a Enum<'a>, ctx: &mut ExtractionCtx<'a>) {
     if let Some(ref implements) = enum_def.implements {
         for ident in implements.types.iter() {
             let raw = ident.value().to_string();
-            ctx.spans.push(class_ref_span(
+            ctx.spans.push(class_ref_span_ctx(
                 ident.span().start.offset,
                 ident.span().end.offset,
                 &raw,
+                ClassRefContext::Implements,
             ));
         }
     }
@@ -701,7 +720,7 @@ fn extract_from_enum<'a>(enum_def: &'a Enum<'a>, ctx: &mut ExtractionCtx<'a>) {
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound: bound.map(|b| PhpType::parse(&b)),
+                bound,
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -745,7 +764,12 @@ fn extract_from_attribute_lists<'a>(
                 extract_from_arguments(&arg_list.arguments, ctx, scope_start);
                 let class_name = raw.trim_start_matches('\\');
                 if !class_name.is_empty() {
-                    emit_call_site(format!("new {}", class_name), arg_list, &mut ctx.call_sites);
+                    emit_call_site(
+                        format!("new {}", class_name),
+                        arg_list,
+                        &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
+                    );
                 }
             }
         }
@@ -774,10 +798,11 @@ fn extract_from_class_member<'a>(member: &'a ClassLikeMember<'a>, ctx: &mut Extr
 
             for ident in trait_use.trait_names.iter() {
                 let raw = ident.value().to_string();
-                ctx.spans.push(class_ref_span(
+                ctx.spans.push(class_ref_span_ctx(
                     ident.span().start.offset,
                     ident.span().end.offset,
                     &raw,
+                    ClassRefContext::TraitUse,
                 ));
             }
 
@@ -991,7 +1016,7 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound: bound.map(|b| PhpType::parse(&b)),
+                bound,
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -1037,7 +1062,7 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
         // Attributes (PHP 8) on the parameter.
         extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
         if let Some(ref hint) = param.hint {
-            extract_from_hint(hint, &mut ctx.spans);
+            extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
         }
         // Docblock attached to the parameter itself (e.g. promoted
         // constructor properties with `/** @var list<Subscription> */`).
@@ -1074,7 +1099,7 @@ fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) 
 
     // Return type hint.
     if let Some(ref return_type) = method.return_type_hint {
-        extract_from_hint(&return_type.hint, &mut ctx.spans);
+        extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Method body.
@@ -1117,7 +1142,7 @@ fn extract_from_property<'a>(property: &Property<'a>, ctx: &mut ExtractionCtx<'a
 
     // Property type hint.
     if let Some(hint) = property.hint() {
-        extract_from_hint(hint, &mut ctx.spans);
+        extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Property variable names and default value expressions.
@@ -1199,7 +1224,7 @@ fn extract_from_class_constant<'a>(
 
     // Type hint on constant (PHP 8.3+).
     if let Some(ref hint) = constant.hint {
-        extract_from_hint(hint, &mut ctx.spans);
+        extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Constant value expressions.
@@ -1236,7 +1261,7 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
             ctx.template_defs.push(TemplateParamDef {
                 name_offset,
                 name,
-                bound: bound.map(|b| PhpType::parse(&b)),
+                bound,
                 variance,
                 scope_start: doc_offset,
                 scope_end,
@@ -1277,7 +1302,7 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
         // Attributes (PHP 8) on the parameter.
         extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
         if let Some(ref hint) = param.hint {
-            extract_from_hint(hint, &mut ctx.spans);
+            extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
         }
         // Docblock attached to the parameter itself (e.g. `/** @var list<Foo> */`).
         if let Some((doc_text, doc_offset)) =
@@ -1316,7 +1341,7 @@ fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut ExtractionCtx<'a>
 
     // Return type hint.
     if let Some(ref return_type) = func.return_type_hint {
-        extract_from_hint(&return_type.hint, &mut ctx.spans);
+        extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
     }
 
     // Function body.
@@ -1337,7 +1362,11 @@ fn extract_from_use_statement(use_stmt: &Use<'_>, spans: &mut Vec<SymbolSpan>) {
         spans.push(SymbolSpan {
             start: item.name.span().start.offset,
             end: item.name.span().end.offset,
-            kind: SymbolKind::ClassReference { name, is_fqn: true },
+            kind: SymbolKind::ClassReference {
+                name,
+                is_fqn: true,
+                context: ClassRefContext::Other,
+            },
         });
     }
 
@@ -1378,32 +1407,35 @@ fn extract_from_use_statement(use_stmt: &Use<'_>, spans: &mut Vec<SymbolSpan>) {
 
 // ─── Type hint extractor ────────────────────────────────────────────────────
 
-fn extract_from_hint(hint: &Hint<'_>, spans: &mut Vec<SymbolSpan>) {
+/// Extract navigable symbols from a type hint, tagging emitted
+/// `ClassReference` spans with the given [`ClassRefContext`].
+fn extract_from_hint_ctx(hint: &Hint<'_>, spans: &mut Vec<SymbolSpan>, ref_ctx: ClassRefContext) {
     match hint {
         Hint::Identifier(ident) => {
             let raw = ident.value().to_string();
             let name_clean = strip_fqn_prefix(&raw).to_string();
             if is_navigable_type(&name_clean) {
-                spans.push(class_ref_span(
+                spans.push(class_ref_span_ctx(
                     ident.span().start.offset,
                     ident.span().end.offset,
                     &raw,
+                    ref_ctx,
                 ));
             }
         }
         Hint::Nullable(nullable) => {
-            extract_from_hint(nullable.hint, spans);
+            extract_from_hint_ctx(nullable.hint, spans, ref_ctx);
         }
         Hint::Union(union) => {
-            extract_from_hint(union.left, spans);
-            extract_from_hint(union.right, spans);
+            extract_from_hint_ctx(union.left, spans, ref_ctx);
+            extract_from_hint_ctx(union.right, spans, ref_ctx);
         }
         Hint::Intersection(intersection) => {
-            extract_from_hint(intersection.left, spans);
-            extract_from_hint(intersection.right, spans);
+            extract_from_hint_ctx(intersection.left, spans, ref_ctx);
+            extract_from_hint_ctx(intersection.right, spans, ref_ctx);
         }
         Hint::Parenthesized(paren) => {
-            extract_from_hint(paren.hint, spans);
+            extract_from_hint_ctx(paren.hint, spans, ref_ctx);
         }
         Hint::Self_(kw) => {
             spans.push(SymbolSpan {
@@ -1501,10 +1533,11 @@ fn extract_from_expression<'a>(
             match inst.class {
                 Expression::Identifier(ident) => {
                     let raw = ident.value().to_string();
-                    ctx.spans.push(class_ref_span(
+                    ctx.spans.push(class_ref_span_ctx(
                         ident.span().start.offset,
                         ident.span().end.offset,
                         &raw,
+                        ClassRefContext::New,
                     ));
                 }
                 Expression::Self_(kw) => {
@@ -1536,7 +1569,12 @@ fn extract_from_expression<'a>(
                 // Emit call site for constructor: `new ClassName(...)`
                 let class_text = expr_to_subject_text(inst.class);
                 if !class_text.is_empty() {
-                    emit_call_site(format!("new {}", class_text), args, &mut ctx.call_sites);
+                    emit_call_site(
+                        format!("new {}", class_text),
+                        args,
+                        &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
+                    );
                 }
                 extract_from_arguments(&args.arguments, ctx, scope_start);
             }
@@ -1565,7 +1603,12 @@ fn extract_from_expression<'a>(
                 // Emit call site for function call
                 let func_text = expr_to_subject_text(func_call.function);
                 if !func_text.is_empty() {
-                    emit_call_site(func_text, &func_call.argument_list, &mut ctx.call_sites);
+                    emit_call_site(
+                        func_text,
+                        &func_call.argument_list,
+                        &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
+                    );
                 }
                 extract_from_arguments(&func_call.argument_list.arguments, ctx, scope_start);
             }
@@ -1580,6 +1623,7 @@ fn extract_from_expression<'a>(
                         format!("{}->{}", &subject_text, &member_name),
                         &method_call.argument_list,
                         &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
                     );
                     ctx.spans.push(SymbolSpan {
                         start: ident.span.start.offset,
@@ -1608,6 +1652,7 @@ fn extract_from_expression<'a>(
                         format!("{}->{}", &subject_text, &member_name),
                         &method_call.argument_list,
                         &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
                     );
                     ctx.spans.push(SymbolSpan {
                         start: ident.span.start.offset,
@@ -1634,6 +1679,7 @@ fn extract_from_expression<'a>(
                         format!("{}::{}", &subject_text, &member_name),
                         &static_call.argument_list,
                         &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
                     );
                     ctx.spans.push(SymbolSpan {
                         start: ident.span.start.offset,
@@ -1751,10 +1797,15 @@ fn extract_from_expression<'a>(
             match assign.lhs {
                 Expression::Variable(Variable::Direct(dv)) => {
                     let name = dv.name.strip_prefix('$').unwrap_or(dv.name).to_string();
+                    let kind = if assign.operator.is_assign() {
+                        VarDefKind::Assignment
+                    } else {
+                        VarDefKind::CompoundAssignment
+                    };
                     ctx.var_defs.push(VarDefSite {
                         offset: dv.span.start.offset,
                         name,
-                        kind: VarDefKind::Assignment,
+                        kind,
                         scope_start,
                         effective_from: effective,
                     });
@@ -1786,7 +1837,22 @@ fn extract_from_expression<'a>(
         // ── Binary operations ──
         Expression::Binary(bin) => {
             extract_from_expression(bin.lhs, ctx, scope_start);
-            extract_from_expression(bin.rhs, ctx, scope_start);
+            // Tag the RHS of `instanceof` with the Instanceof context.
+            if bin.operator.is_instanceof() {
+                if let Expression::Identifier(ident) = bin.rhs {
+                    let raw = ident.value().to_string();
+                    ctx.spans.push(class_ref_span_ctx(
+                        ident.span().start.offset,
+                        ident.span().end.offset,
+                        &raw,
+                        ClassRefContext::Instanceof,
+                    ));
+                } else {
+                    extract_from_expression(bin.rhs, ctx, scope_start);
+                }
+            } else {
+                extract_from_expression(bin.rhs, ctx, scope_start);
+            }
         }
 
         // ── Unary operations ──
@@ -1841,7 +1907,7 @@ fn extract_from_expression<'a>(
                 // Attributes (PHP 8) on the parameter.
                 extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
                 if let Some(ref hint) = param.hint {
-                    extract_from_hint(hint, &mut ctx.spans);
+                    extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
                 }
                 let name = param
                     .variable
@@ -1894,7 +1960,7 @@ fn extract_from_expression<'a>(
                 }
             }
             if let Some(ref return_type) = closure.return_type_hint {
-                extract_from_hint(&return_type.hint, &mut ctx.spans);
+                extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
             }
             for s in closure.body.statements.iter() {
                 extract_from_statement(s, ctx, closure_scope_start);
@@ -1914,7 +1980,7 @@ fn extract_from_expression<'a>(
                 // Attributes (PHP 8) on the parameter.
                 extract_from_attribute_lists(&param.attribute_lists, ctx, 0);
                 if let Some(ref hint) = param.hint {
-                    extract_from_hint(hint, &mut ctx.spans);
+                    extract_from_hint_ctx(hint, &mut ctx.spans, ClassRefContext::TypeHint);
                 }
                 let name = param
                     .variable
@@ -1941,7 +2007,7 @@ fn extract_from_expression<'a>(
                 }
             }
             if let Some(ref return_type) = arrow.return_type_hint {
-                extract_from_hint(&return_type.hint, &mut ctx.spans);
+                extract_from_hint_ctx(&return_type.hint, &mut ctx.spans, ClassRefContext::TypeHint);
             }
             extract_from_expression(arrow.expression, ctx, arrow_scope_start);
         }
@@ -2327,6 +2393,7 @@ fn emit_call_site(
     call_expression: String,
     argument_list: &ArgumentList<'_>,
     call_sites: &mut Vec<CallSite>,
+    untyped_closure_sites: &mut Vec<UntypedClosureSite>,
 ) {
     if call_expression.is_empty() {
         return;
@@ -2380,6 +2447,16 @@ fn emit_call_site(
         .iter()
         .any(|arg| matches!(arg, Argument::Positional(pos) if pos.ellipsis.is_some()));
 
+    // Check arguments for closures/arrows with untyped parameters or
+    // missing return types.
+    for (arg_idx, arg) in argument_list.arguments.iter().enumerate() {
+        let expr = match arg {
+            Argument::Positional(pos) => pos.value,
+            Argument::Named(named) => named.value,
+        };
+        collect_untyped_closure_site(expr, &call_expression, arg_idx, untyped_closure_sites);
+    }
+
     call_sites.push(CallSite {
         args_start,
         args_end,
@@ -2391,6 +2468,54 @@ fn emit_call_site(
         named_arg_indices,
         named_arg_names,
         spread_arg_indices,
+    });
+}
+
+/// If `expr` is a closure or arrow function, collect an [`UntypedClosureSite`]
+/// with its untyped parameters and (optionally) its close-paren offset for a
+/// return type hint.
+fn collect_untyped_closure_site(
+    expr: &Expression<'_>,
+    parent_call_expression: &str,
+    arg_index: usize,
+    out: &mut Vec<UntypedClosureSite>,
+) {
+    let (params, close_paren_offset, has_return_type) = match expr {
+        Expression::Closure(c) => (
+            &c.parameter_list.parameters,
+            c.parameter_list.span().end.offset,
+            c.return_type_hint.is_some(),
+        ),
+        Expression::ArrowFunction(a) => (
+            &a.parameter_list.parameters,
+            a.parameter_list.span().end.offset,
+            a.return_type_hint.is_some(),
+        ),
+        _ => return,
+    };
+
+    let mut untyped_params = Vec::new();
+    for (param_idx, param) in params.iter().enumerate() {
+        if param.hint.is_none() {
+            untyped_params.push((param_idx, param.variable.span.start.offset));
+        }
+    }
+
+    // Only emit a site if there is something for inlay hints to show:
+    // untyped parameters or a missing return type.
+    if untyped_params.is_empty() && has_return_type {
+        return;
+    }
+
+    out.push(UntypedClosureSite {
+        parent_call_expression: parent_call_expression.to_string(),
+        arg_index_in_parent: arg_index,
+        close_paren_offset: if has_return_type {
+            None
+        } else {
+            Some(close_paren_offset)
+        },
+        untyped_params,
     });
 }
 

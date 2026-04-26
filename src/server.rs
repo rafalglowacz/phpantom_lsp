@@ -134,6 +134,9 @@ impl LanguageServer for Backend {
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(
+                    true,
+                )),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
                         code_action_kinds: Some(vec![
@@ -312,6 +315,30 @@ impl LanguageServer for Backend {
             phpstan_backend.phpstan_worker().await;
         });
 
+        // Spawn the PHPCS worker as a separate background task.
+        // Same pattern as the PHPStan worker: dedicated task, own
+        // debounce timer, single pending-URI slot.
+        let phpcs_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            phpcs_backend.phpcs_worker().await;
+        });
+
+        // Spawn the Mago lint worker.  Same pattern as PHPCS: dedicated
+        // task, own debounce timer, single pending-URI slot.  Mago lint
+        // is fast (AST-level rules) so it uses the same debounce as PHPCS.
+        let mago_lint_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            mago_lint_backend.mago_lint_worker().await;
+        });
+
+        // Spawn the Mago analyze worker.  Mago analyze is slower
+        // (type-aware) so it follows the PHPStan pattern with a longer
+        // debounce.
+        let mago_analyze_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            mago_analyze_backend.mago_analyze_worker().await;
+        });
+
         // ── Dynamic capability registration ─────────────────────────
         // lsp-types 0.94 does not expose a `type_hierarchy_provider`
         // field on `ServerCapabilities`, so we register the capability
@@ -328,15 +355,18 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        // Signal background workers (diagnostic, PHPStan) to stop.
-        // The PHPStan `run_command_with_timeout` poll loop also checks
-        // this flag, so a running child process is killed within 50ms
-        // instead of waiting up to 60 seconds.
+        // Signal background workers (diagnostic, PHPStan, PHPCS) to
+        // stop.  The PHPStan/PHPCS poll loops also check this flag,
+        // so running child processes are killed within 50ms instead
+        // of waiting up to 60 seconds.
         self.shutdown_flag.store(true, Ordering::Release);
-        // Wake both workers so they see the flag immediately instead
+        // Wake all workers so they see the flag immediately instead
         // of sleeping until the next edit arrives.
         self.diag_notify.notify_one();
         self.phpstan_notify.notify_one();
+        self.phpcs_notify.notify_one();
+        self.mago_lint_notify.notify_one();
+        self.mago_analyze_notify.notify_one();
         Ok(())
     }
 
@@ -588,6 +618,22 @@ impl LanguageServer for Backend {
 
         self.handle_with_position("document_highlight", &uri, position, |content| {
             self.handle_document_highlight(&uri, content, position)
+        })
+    }
+
+    async fn linked_editing_range(
+        &self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+
+        self.handle_with_position("linked_editing_range", &uri, position, |content| {
+            self.handle_linked_editing_range(&uri, content, position)
         })
     }
 
@@ -994,6 +1040,12 @@ impl Backend {
         f: impl FnOnce(&str) -> T,
     ) -> Option<T> {
         let content = self.get_file_content(uri)?;
+        // Activate the chain resolution cache so that shared chain prefixes
+        // (e.g. `$model->where(...)` in `$model->where(...)->orderBy(...)`)
+        // are resolved once and reused across all LSP handlers, not just
+        // diagnostics.  The guard is re-entrant safe: if a diagnostic pass
+        // already activated the cache, this is a no-op.
+        let _chain_guard = crate::completion::resolver::with_chain_resolution_cache();
         crate::util::catch_panic_unwind_safe(handler_name, uri, position, || f(&content))
     }
 
@@ -1316,7 +1368,7 @@ impl Backend {
         // longest-prefix-first matching works.
         {
             let mut psr4 = self.psr4_mappings.write();
-            psr4.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+            psr4.sort_by_key(|b| std::cmp::Reverse(b.prefix.len()));
         }
 
         // ── Full-scan loose files ───────────────────────────────────

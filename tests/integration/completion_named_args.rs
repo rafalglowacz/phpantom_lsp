@@ -929,3 +929,179 @@ async fn test_named_args_new_expression_chain() {
         tags
     );
 }
+
+// ─── Suppression inside array arguments ─────────────────────────────────────
+
+/// Named arg completion must NOT fire when the cursor is inside an array
+/// literal that is itself a call argument.
+///
+/// Regression test: `view('pages.index', ['list' => |])` used to suggest
+/// the third parameter name (`mergedData:`) instead of normal completions.
+#[tokio::test]
+async fn test_named_args_not_triggered_inside_array_arg() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///na_array_arg.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function view(string $view, array $data = [], array $mergedData = []): string {\n",
+        "    return '';\n",
+        "}\n",
+        "function test() {\n",
+        "    view('pages.index', [\n",
+        "        'list' => \n",
+        "    ]);\n",
+        "}\n",
+    );
+
+    // Cursor after `=>` on line 6 (0-indexed), character 19
+    let items = complete_at(&backend, &uri, text, 6, 19).await;
+
+    let named_arg_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.insert_text.as_deref().is_some_and(|t| t.ends_with(": ")))
+        .collect();
+
+    assert!(
+        named_arg_items.is_empty(),
+        "Should NOT suggest named args (like 'mergedData:') inside array literal. Got: {:?}",
+        named_arg_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Named arg completion must NOT fire when cursor is inside a nested
+/// short array `[…]` even when typing a prefix that matches a param name.
+#[tokio::test]
+async fn test_named_args_not_triggered_inside_nested_array_with_prefix() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///na_nested_arr.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function render(string $template, array $vars = [], array $options = []): string {\n",
+        "    return '';\n",
+        "}\n",
+        "function test() {\n",
+        "    render('home', ['title' => 'Hi', opt\n",
+        "    ]);\n",
+        "}\n",
+    );
+
+    // Cursor after `opt` on line 5, character 42
+    let items = complete_at(&backend, &uri, text, 5, 42).await;
+
+    let named_arg_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.insert_text.as_deref().is_some_and(|t| t.ends_with(": ")))
+        .collect();
+
+    assert!(
+        named_arg_items.is_empty(),
+        "Should NOT suggest named args inside nested array even with matching prefix. Got: {:?}",
+        named_arg_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+// ─── Named args are additive (mixed with normal completions) ────────────────
+
+/// Named arg items must appear alongside normal completions, not replace them.
+///
+/// Regression test: `view(m|)` used to return ONLY `mergedData:` because
+/// the named-arg strategy short-circuited the pipeline.  Now `m` should
+/// also produce normal completions (classes, functions, constants, etc.).
+#[tokio::test]
+async fn test_named_args_mixed_with_normal_completions() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///na_mixed.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function my_helper(): string { return ''; }\n",
+        "function view(string $view, array $data = [], array $mergedData = []): string {\n",
+        "    return '';\n",
+        "}\n",
+        "function test() {\n",
+        "    view('index', [], m\n",
+        "}\n",
+    );
+
+    // Cursor after `m` on line 6, character 23
+    let items = complete_at(&backend, &uri, text, 6, 23).await;
+
+    let named_arg_items: Vec<_> = items
+        .iter()
+        .filter(|i| i.insert_text.as_deref().is_some_and(|t| t.ends_with(": ")))
+        .collect();
+    let non_named_arg_items: Vec<_> = items
+        .iter()
+        .filter(|i| !i.insert_text.as_deref().is_some_and(|t| t.ends_with(": ")))
+        .collect();
+
+    assert!(
+        !named_arg_items.is_empty(),
+        "Should suggest named arg 'mergedData:' matching prefix 'm'. Got labels: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(
+        !non_named_arg_items.is_empty(),
+        "Should ALSO include normal completions (functions, classes, etc.) alongside named args. Got labels: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// When the cursor is after `name: value_prefix`, normal completions for the
+/// value must still appear even though the prefix might match another param.
+#[tokio::test]
+async fn test_named_args_value_position_has_normal_completions() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///na_value.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function do_stuff(): string { return ''; }\n",
+        "function run(string $data, int $debug = 0): void {}\n",
+        "function test() {\n",
+        "    run(data: d\n",
+        "}\n",
+    );
+
+    // Cursor after `d` on line 4, character 15
+    let items = complete_at(&backend, &uri, text, 4, 15).await;
+
+    let non_named_arg_items: Vec<_> = items
+        .iter()
+        .filter(|i| !i.insert_text.as_deref().is_some_and(|t| t.ends_with(": ")))
+        .collect();
+
+    assert!(
+        !non_named_arg_items.is_empty(),
+        "After 'data: d', normal completions (like 'do_stuff') should appear. Got labels: {:?}",
+        items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// When no parameter name matches the prefix, normal completions must
+/// still be returned (previously the named-arg strategy returned `None`
+/// which fell through correctly, but this guards the new merge path).
+#[tokio::test]
+async fn test_named_args_no_match_still_has_normal_completions() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///na_nomatch.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function array_values(array $array): array { return []; }\n",
+        "function view(string $view, array $data = []): string {\n",
+        "    return '';\n",
+        "}\n",
+        "function test() {\n",
+        "    view('index', array_\n",
+        "}\n",
+    );
+
+    // Cursor after `array_` on line 6, character 25
+    let items = complete_at(&backend, &uri, text, 6, 25).await;
+
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+
+    assert!(
+        labels.iter().any(|l| l.contains("array_values")),
+        "Should suggest 'array_values' as normal completion inside call. Got: {:?}",
+        labels
+    );
+}

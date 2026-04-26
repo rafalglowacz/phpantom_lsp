@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::enrich_builder_type_in_scope;
+use crate::atom::atom;
 use crate::php_type::PhpType;
 use crate::test_fixtures::make_class;
 
@@ -9,7 +10,7 @@ use crate::types::{ClassInfo, ResolvedType};
 
 fn make_model(name: &str) -> ClassInfo {
     let mut class = make_class(name);
-    class.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+    class.parent_class = Some(atom("Illuminate\\Database\\Eloquent\\Model"));
     class
 }
 
@@ -255,26 +256,26 @@ function test() {
     // Classes that exist in this file
     let processor = {
         let mut c = make_class("Processor");
-        c.methods.push(MethodInfo {
+        c.methods.push(Arc::new(MethodInfo {
             is_static: false,
             ..MethodInfo::virtual_method("getOutput", Some("string"))
-        });
+        }));
         c
     };
     let builder = {
         let mut c = make_class("Builder");
-        c.methods.push(MethodInfo {
+        c.methods.push(Arc::new(MethodInfo {
             is_static: false,
             ..MethodInfo::virtual_method("process", Some("Processor"))
-        });
+        }));
         c
     };
     let factory = {
         let mut c = make_class("Factory");
-        c.methods.push(MethodInfo {
+        c.methods.push(Arc::new(MethodInfo {
             is_static: true,
             ..MethodInfo::virtual_method("create", Some("Builder"))
-        });
+        }));
         c
     };
 
@@ -342,43 +343,45 @@ function test() {
     // `factory()` with return type `Database\Factories\UserFactory`.
     let has_factory_trait = {
         let mut c = make_class("HasFactory");
-        c.file_namespace = Some("Illuminate\\Database\\Eloquent\\Factories".to_string());
-        c.template_params = vec!["TFactory".to_string()];
-        c.methods.push(MethodInfo {
+        c.file_namespace = Some(atom("Illuminate\\Database\\Eloquent\\Factories"));
+        c.template_params = vec![atom("TFactory")];
+        c.methods.push(Arc::new(MethodInfo {
             is_static: true,
             ..MethodInfo::virtual_method("factory", Some("TFactory"))
-        });
+        }));
         c
     };
 
     // Factory base class: `public function create(): TModel`
     let factory_base = {
         let mut c = make_class("Factory");
-        c.file_namespace = Some("Illuminate\\Database\\Eloquent\\Factories".to_string());
-        c.template_params = vec!["TModel".to_string()];
+        c.file_namespace = Some(atom("Illuminate\\Database\\Eloquent\\Factories"));
+        c.template_params = vec![atom("TModel")];
+        c.methods.push(Arc::new(MethodInfo::virtual_method(
+            "create",
+            Some("TModel"),
+        )));
         c.methods
-            .push(MethodInfo::virtual_method("create", Some("TModel")));
-        c.methods
-            .push(MethodInfo::virtual_method("make", Some("TModel")));
+            .push(Arc::new(MethodInfo::virtual_method("make", Some("TModel"))));
         c
     };
 
     // UserFactory extends Factory — convention says TModel = User.
     let user_factory = {
         let mut c = make_class("UserFactory");
-        c.file_namespace = Some("Database\\Factories".to_string());
-        c.parent_class = Some("Illuminate\\Database\\Eloquent\\Factories\\Factory".to_string());
+        c.file_namespace = Some(atom("Database\\Factories"));
+        c.parent_class = Some(atom("Illuminate\\Database\\Eloquent\\Factories\\Factory"));
         // The virtual member provider would synthesize create()/make()
         // returning User, but for this unit test we add them directly
         // with the substituted return type.
-        c.methods.push(MethodInfo::virtual_method(
+        c.methods.push(Arc::new(MethodInfo::virtual_method(
             "create",
             Some("App\\Models\\User"),
-        ));
-        c.methods.push(MethodInfo::virtual_method(
+        )));
+        c.methods.push(Arc::new(MethodInfo::virtual_method(
             "make",
             Some("App\\Models\\User"),
-        ));
+        )));
         c
     };
 
@@ -389,17 +392,21 @@ function test() {
     // After trait merging, factory() returns UserFactory.
     let user = {
         let mut c = make_class("User");
-        c.file_namespace = Some("App\\Models".to_string());
-        c.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
-        c.used_traits = vec!["Illuminate\\Database\\Eloquent\\Factories\\HasFactory".to_string()];
+        c.file_namespace = Some(atom("App\\Models"));
+        c.parent_class = Some(atom("Illuminate\\Database\\Eloquent\\Model"));
+        c.used_traits = vec![atom(
+            "Illuminate\\Database\\Eloquent\\Factories\\HasFactory",
+        )];
         // Simulate the result of trait merging with convention-based
         // TFactory substitution: factory() returns UserFactory FQN.
-        c.methods.push(MethodInfo {
+        c.methods.push(Arc::new(MethodInfo {
             is_static: true,
             ..MethodInfo::virtual_method("factory", Some("Database\\Factories\\UserFactory"))
-        });
-        c.methods
-            .push(MethodInfo::virtual_method("greet", Some("string")));
+        }));
+        c.methods.push(Arc::new(MethodInfo::virtual_method(
+            "greet",
+            Some("string"),
+        )));
         c
     };
 
@@ -762,31 +769,31 @@ class LoggedConnection extends BaseConnector {
 
     let response = {
         let mut c = make_class("Response");
-        c.methods.push(MethodInfo {
+        c.methods.push(Arc::new(MethodInfo {
             is_static: false,
             ..MethodInfo::virtual_method("status", Some("int"))
-        });
-        c.methods.push(MethodInfo {
+        }));
+        c.methods.push(Arc::new(MethodInfo {
             is_static: false,
             ..MethodInfo::virtual_method("body", Some("string"))
-        });
+        }));
         c
     };
     let base = {
         let mut c = make_class("BaseConnector");
-        c.methods.push(MethodInfo {
+        c.methods.push(Arc::new(MethodInfo {
             is_static: false,
             ..MethodInfo::virtual_method("call", Some("Response"))
-        });
+        }));
         c
     };
     let logged = {
         let mut c = make_class("LoggedConnection");
-        c.parent_class = Some("BaseConnector".to_string());
-        c.methods.push(MethodInfo {
+        c.parent_class = Some(atom("BaseConnector"));
+        c.methods.push(Arc::new(MethodInfo {
             is_static: false,
             ..MethodInfo::virtual_method("call", Some("Response"))
-        });
+        }));
         c
     };
 
@@ -822,4 +829,281 @@ class LoggedConnection extends BaseConnector {
         "$response should resolve to Response via parent::call(), got: {:?}",
         names
     );
+}
+
+/// Nested array access assignments like `$b['a']['b'] = 'x'` should
+/// produce a nested array shape `array{a: array{b: string}}`.
+#[test]
+fn resolve_var_shape_from_nested_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $b['a']['a'] = 'a';
+    $b['x']
+}
+"#;
+    let cursor_offset = content.find("$b['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$b",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $b to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("a: array{a: string}"),
+        "Shape should contain nested 'a: array{{a: string}}', got: {ts}"
+    );
+}
+
+/// Deeply nested key assignments like `$c['a']['b']['c'] = 42` should
+/// produce `array{a: array{b: array{c: int}}}`.
+#[test]
+fn resolve_var_shape_from_deeply_nested_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $config['db']['host']['primary'] = 'localhost';
+    $config['x']
+}
+"#;
+    let cursor_offset = content.find("$config['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$config",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $config to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("db: array{host: array{primary: string}}"),
+        "Shape should contain deeply nested keys, got: {ts}"
+    );
+}
+
+/// Mixed single-level and nested key assignments should merge correctly.
+#[test]
+fn resolve_var_shape_mixed_single_and_nested_keys() {
+    let content = r#"<?php
+function test() {
+    $data['name'] = 'John';
+    $data['address']['city'] = 'NYC';
+    $data['address']['zip'] = '10001';
+    $data['x']
+}
+"#;
+    let cursor_offset = content.find("$data['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$data",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders::default(),
+    );
+
+    assert!(!results.is_empty(), "Should resolve $data to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("name: string"),
+        "Shape should contain 'name: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("city: string"),
+        "Shape should contain nested 'city: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("zip: string"),
+        "Shape should contain nested 'zip: string', got: {ts}"
+    );
+}
+
+/// `array_sum` should resolve to `int|float`.
+#[test]
+fn resolve_var_array_sum() {
+    let content = r#"<?php
+function test() {
+    $result = array_sum([10, 20, 30]);
+    echo $result;
+}
+"#;
+    let cursor_offset = content.find("echo $result").unwrap() as u32;
+
+    // Provide a function loader that returns FunctionInfo with the
+    // stub return type (int|float), matching what the real backend
+    // produces from phpstorm-stubs.
+    let func_loader = |name: &str| -> Option<crate::types::FunctionInfo> {
+        if name.eq_ignore_ascii_case("array_sum") || name.eq_ignore_ascii_case("array_product") {
+            Some(stub_function_info(
+                name,
+                Some(PhpType::Union(vec![PhpType::int(), PhpType::float()])),
+            ))
+        } else {
+            None
+        }
+    };
+
+    let results = super::resolve_variable_types(
+        "$result",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders {
+            function_loader: Some(&func_loader),
+            ..Loaders::default()
+        },
+    );
+
+    assert!(!results.is_empty(), "Should resolve $result to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("int") && ts.contains("float"),
+        "array_sum should return int|float, got: {ts}"
+    );
+}
+
+/// `array_product` should resolve to `int|float`.
+#[test]
+fn resolve_var_array_product() {
+    let content = r#"<?php
+function test() {
+    $result = array_product([2, 3, 4]);
+    echo $result;
+}
+"#;
+    let cursor_offset = content.find("echo $result").unwrap() as u32;
+
+    let func_loader = |name: &str| -> Option<crate::types::FunctionInfo> {
+        if name.eq_ignore_ascii_case("array_sum") || name.eq_ignore_ascii_case("array_product") {
+            Some(stub_function_info(
+                name,
+                Some(PhpType::Union(vec![PhpType::int(), PhpType::float()])),
+            ))
+        } else {
+            None
+        }
+    };
+
+    let results = super::resolve_variable_types(
+        "$result",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        Loaders {
+            function_loader: Some(&func_loader),
+            ..Loaders::default()
+        },
+    );
+
+    assert!(!results.is_empty(), "Should resolve $result to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("int") && ts.contains("float"),
+        "array_product should return int|float, got: {ts}"
+    );
+}
+
+/// `array_reduce` with a class initial value should resolve to that class.
+#[test]
+fn resolve_var_array_reduce_initial_value() {
+    let content = r#"<?php
+class Accumulator { public function total(): int { return 0; } }
+function test() {
+    $result = array_reduce([1, 2, 3], function(Accumulator $carry, int $item): Accumulator {
+        return $carry;
+    }, new Accumulator());
+    $result->
+}
+"#;
+    let acc = make_class("Accumulator");
+    let all_classes: Vec<Arc<ClassInfo>> = vec![Arc::new(acc.clone())];
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        if name == "Accumulator" {
+            Some(Arc::new(make_class("Accumulator")))
+        } else {
+            None
+        }
+    };
+
+    // Provide a function loader that returns a patched array_reduce
+    // FunctionInfo (with @template TReturn bound to $initial),
+    // matching what the real backend produces after stub patches.
+    let func_loader = |name: &str| -> Option<crate::types::FunctionInfo> {
+        if name.eq_ignore_ascii_case("array_reduce") {
+            let mut fi = stub_function_info(name, Some(PhpType::mixed()));
+            fi.parameters = vec![
+                crate::test_fixtures::make_param("$array", Some("array"), true),
+                crate::test_fixtures::make_param("$callback", Some("callable"), true),
+                crate::test_fixtures::make_param("$initial", Some("mixed"), false),
+            ];
+            crate::stub_patches::apply_function_stub_patches(&mut fi);
+            Some(fi)
+        } else {
+            None
+        }
+    };
+
+    let cursor_offset = content.find("$result->").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$result",
+        &ClassInfo::default(),
+        &all_classes,
+        content,
+        cursor_offset,
+        &class_loader,
+        Loaders {
+            function_loader: Some(&func_loader),
+            ..Loaders::default()
+        },
+    );
+
+    assert!(!results.is_empty(), "Should resolve $result to a type");
+    let ts = ResolvedType::types_joined(&results).to_string();
+    assert!(
+        ts.contains("Accumulator"),
+        "array_reduce should return type of initial value, got: {ts}"
+    );
+}
+
+/// Helper: build a minimal `FunctionInfo` with a given name and return type,
+/// simulating what the real backend produces from phpstorm-stubs.
+fn stub_function_info(name: &str, return_type: Option<PhpType>) -> crate::types::FunctionInfo {
+    crate::types::FunctionInfo {
+        name: crate::atom::atom(name),
+        name_offset: 0,
+        parameters: Vec::new(),
+        return_type,
+        native_return_type: None,
+        description: None,
+        return_description: None,
+        links: Vec::new(),
+        see_refs: Vec::new(),
+        namespace: None,
+        conditional_return: None,
+        type_assertions: Vec::new(),
+        deprecation_message: None,
+        deprecated_replacement: None,
+        template_params: Vec::new(),
+        template_bindings: Vec::new(),
+        template_param_bounds: Default::default(),
+        throws: Vec::new(),
+        is_polyfill: false,
+    }
 }

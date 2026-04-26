@@ -1,8 +1,11 @@
+use std::net::SocketAddr;
+
 use clap::Parser;
 use clap::builder::Styles;
 use clap::builder::styling::AnsiColor;
 use phpantom_lsp::Backend;
 use phpantom_lsp::config;
+use tokio::net::TcpListener;
 use tower_lsp::{LspService, Server};
 
 const STYLES: Styles = Styles::styled()
@@ -24,8 +27,17 @@ struct Cli {
     // this allows LSP wrapper programs to pass a --stdio flag.
     // since this is the only supported communication at this time, this
     // flag can be ignored
-    #[arg(long, global = true)]
+    #[arg(long)]
     stdio: bool,
+
+    /// Listen on a TCP address instead of stdin/stdout.
+    ///
+    /// Accepts a full address (e.g. 127.0.0.1:9257) or just a port number
+    /// (e.g. 9257), in which case 127.0.0.1 is used as the host. Use port
+    /// 0 to let the OS pick an available port. The server accepts a single
+    /// connection and exits when the client disconnects.
+    #[arg(long, value_name = "ADDR")]
+    tcp: Option<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -55,6 +67,11 @@ enum Command {
         /// Project root directory. Defaults to the current working directory.
         #[arg(long, value_name = "DIR")]
         project_root: Option<std::path::PathBuf>,
+
+        /// Output format. When running in GitHub Actions the default
+        /// automatically includes workflow annotations alongside the table.
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<FormatArg>,
     },
 
     /// Apply automated code fixes across PHP files.
@@ -91,6 +108,11 @@ enum Command {
         /// Project root directory. Defaults to the current working directory.
         #[arg(long, value_name = "DIR")]
         project_root: Option<std::path::PathBuf>,
+
+        /// Output format. When running in GitHub Actions the default
+        /// automatically includes workflow annotations alongside the table.
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<FormatArg>,
     },
 
     /// Create a default .phpantom.toml configuration file in the current directory.
@@ -114,6 +136,27 @@ impl From<SeverityArg> for phpantom_lsp::analyse::SeverityFilter {
             SeverityArg::All => Self::All,
             SeverityArg::Warning => Self::Warning,
             SeverityArg::Error => Self::Error,
+        }
+    }
+}
+
+/// Output format for the analyze and fix commands.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum FormatArg {
+    /// Human-readable table (default).
+    Table,
+    /// GitHub Actions workflow annotations.
+    Github,
+    /// Machine-readable JSON object.
+    Json,
+}
+
+impl From<FormatArg> for phpantom_lsp::analyse::OutputFormat {
+    fn from(arg: FormatArg) -> Self {
+        match arg {
+            FormatArg::Table => Self::Table,
+            FormatArg::Github => Self::Github,
+            FormatArg::Json => Self::Json,
         }
     }
 }
@@ -151,6 +194,7 @@ async fn main() {
             severity,
             no_colour,
             project_root,
+            format,
         }) => {
             let workspace_root = project_root
                 .or_else(|| std::env::current_dir().ok())
@@ -158,16 +202,21 @@ async fn main() {
                     eprintln!("Error: cannot determine project root directory");
                     std::process::exit(1);
                 });
-
             // Auto-detect colour support: enabled unless --no-colour is
             // passed or stdout is not a terminal.
             let use_colour = !no_colour && atty_stdout();
+
+            let output_format = match format {
+                Some(f) => f.into(),
+                None => phpantom_lsp::analyse::OutputFormat::Table,
+            };
 
             let options = phpantom_lsp::analyse::AnalyseOptions {
                 workspace_root,
                 path_filter: path,
                 severity_filter: severity.into(),
                 use_colour,
+                output_format,
             };
 
             let exit_code = phpantom_lsp::analyse::run(options).await;
@@ -180,6 +229,7 @@ async fn main() {
             with_phpstan,
             no_colour,
             project_root,
+            format,
         }) => {
             let workspace_root = project_root
                 .or_else(|| std::env::current_dir().ok())
@@ -187,8 +237,12 @@ async fn main() {
                     eprintln!("Error: cannot determine project root directory");
                     std::process::exit(1);
                 });
-
             let use_colour = !no_colour && atty_stdout();
+
+            let output_format = match format {
+                Some(f) => f.into(),
+                None => phpantom_lsp::analyse::OutputFormat::Table,
+            };
 
             let options = phpantom_lsp::fix::FixOptions {
                 workspace_root,
@@ -197,26 +251,70 @@ async fn main() {
                 dry_run,
                 use_colour,
                 with_phpstan,
+                output_format,
             };
 
             let exit_code = phpantom_lsp::fix::run(options).await;
             std::process::exit(exit_code);
         }
         None => {
-            // Default: run the LSP server over stdin/stdout.
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
                 .with_writer(std::io::stderr)
                 .init();
 
-            let stdin = tokio::io::stdin();
-            let stdout = tokio::io::stdout();
+            if let Some(addr_str) = cli.tcp {
+                // TCP transport: accept a single connection and serve the LSP over it.
+                let addr = parse_tcp_address(&addr_str);
+                let listener = TcpListener::bind(addr).await.unwrap_or_else(|e| {
+                    eprintln!("Error: failed to bind to {}: {}", addr, e);
+                    std::process::exit(1);
+                });
 
-            let (service, socket) = LspService::build(Backend::new).finish();
+                let bound_addr = listener.local_addr().unwrap();
+                eprintln!("PHPantom LSP listening on tcp://{}", bound_addr);
 
-            Server::new(stdin, stdout, socket).serve(service).await;
+                let (stream, peer) = listener.accept().await.unwrap_or_else(|e| {
+                    eprintln!("Error: failed to accept connection: {}", e);
+                    std::process::exit(1);
+                });
+                eprintln!("Client connected from {}", peer);
+
+                let (read, write) = tokio::io::split(stream);
+                let (service, socket) = LspService::build(Backend::new).finish();
+                Server::new(read, write, socket).serve(service).await;
+            } else {
+                // Default: run the LSP server over stdin/stdout.
+                let stdin = tokio::io::stdin();
+                let stdout = tokio::io::stdout();
+
+                let (service, socket) = LspService::build(Backend::new).finish();
+                Server::new(stdin, stdout, socket).serve(service).await;
+            }
         }
     }
+}
+
+/// Parse a TCP address string into a `SocketAddr`.
+///
+/// Accepts either a full address like `127.0.0.1:9257` or just a port number
+/// like `9257`. When only a port is given, defaults to `127.0.0.1`.
+fn parse_tcp_address(input: &str) -> SocketAddr {
+    // Try parsing as a full SocketAddr first.
+    if let Ok(addr) = input.parse::<SocketAddr>() {
+        return addr;
+    }
+
+    // Try parsing as a bare port number.
+    if let Ok(port) = input.parse::<u16>() {
+        return SocketAddr::from(([127, 0, 0, 1], port));
+    }
+
+    eprintln!(
+        "Error: invalid TCP address '{}'. Expected HOST:PORT or just PORT.",
+        input
+    );
+    std::process::exit(1);
 }
 
 /// Check if stdout is a terminal (for colour auto-detection).

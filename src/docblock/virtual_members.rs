@@ -7,7 +7,7 @@
 //!   - `@method ReturnType methodName(ParamType $param, ...)`
 //!   - `@method static ReturnType methodName(...)`
 
-use std::collections::HashMap;
+use crate::atom::AtomMap;
 
 use mago_docblock::document::TagKind;
 
@@ -183,11 +183,11 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
 
         // Strip trailing punctuation that could leak from descriptions,
         // preserving the full type string including nullability.
-        let return_type = return_type_raw.map(|s| s.trim_end_matches(['.', ',']).to_string());
-        let return_type = match return_type {
-            Some(ref s) if s.is_empty() => None,
-            other => other,
-        };
+        // Parse directly to PhpType, avoiding an intermediate String.
+        let return_type: Option<PhpType> = return_type_raw
+            .map(|s| s.trim_end_matches(['.', ',']))
+            .filter(|s| !s.is_empty())
+            .map(PhpType::parse);
 
         // Parse parameters from the content between `(` and `)`.
         let params_str = if let Some(close_paren) = after_paren.rfind(')') {
@@ -203,10 +203,10 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
         };
 
         results.push(MethodInfo {
-            name: method_name.to_string(),
+            name: crate::atom::atom(method_name),
             name_offset: 0,
             parameters,
-            return_type: return_type.as_deref().map(PhpType::parse),
+            return_type,
             native_return_type: None,
             description: None,
             return_description: None,
@@ -218,7 +218,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             deprecation_message: None,
             deprecated_replacement: None,
             template_params: Vec::new(),
-            template_param_bounds: HashMap::new(),
+            template_param_bounds: AtomMap::default(),
             template_bindings: Vec::new(),
             has_scope_attribute: false,
             is_abstract: false,
@@ -262,7 +262,7 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
         // Scan tokens right-to-left to find the `$name` token (it may be
         // followed by `= default`).
         let dollar_pos = part.rfind('$');
-        let (type_hint, param_name) = if let Some(dp) = dollar_pos {
+        let (parsed_type, param_name) = if let Some(dp) = dollar_pos {
             let name_and_rest = &part[dp..];
             // The name ends at whitespace, `=`, `)`, or end of string.
             let name_end = name_and_rest
@@ -271,17 +271,18 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
             let name = &name_and_rest[..name_end];
 
             let before = part[..dp].trim().trim_end_matches("...");
-            let type_str = if before.is_empty() {
+            let parsed_type = if before.is_empty() {
                 None
             } else {
-                Some(before.trim_end_matches(['.', ',']).to_string())
-            };
-            let type_str = match type_str {
-                Some(ref s) if s.is_empty() => None,
-                other => other,
+                let trimmed = before.trim_end_matches(['.', ',']);
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(PhpType::parse(trimmed))
+                }
             };
 
-            (type_str, name.to_string())
+            (parsed_type, name.to_string())
         } else {
             // No `$` found — treat the whole thing as a name-less param.
             // This is unusual but we handle it gracefully.
@@ -290,9 +291,8 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
 
         let is_required = !has_default && !is_variadic;
 
-        let parsed_type = type_hint.as_deref().map(PhpType::parse);
         result.push(ParameterInfo {
-            name: param_name,
+            name: crate::atom::atom(&param_name),
             is_required,
             type_hint: parsed_type.clone(),
             native_type_hint: parsed_type,

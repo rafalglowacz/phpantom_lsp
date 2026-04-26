@@ -4,7 +4,9 @@
 //!
 //! - **Import class** — when the cursor is on an unresolved class name,
 //!   offer to add a `use` statement for matching classes found in the
-//!   class index, classmap, and stubs.
+//!   class index, classmap, and stubs.  Also offers a bulk "Import all
+//!   missing classes" action when two or more unresolved names exist in
+//!   the file, importing the best candidate for each in one step.
 //! - **Remove unused import** — when the cursor is on (or a diagnostic
 //!   overlaps with) an unused `use` statement, offer to remove it.
 //!   Also offers a bulk "Remove all unused imports" action.
@@ -71,6 +73,7 @@
 //! diagnostic from the cache and pushes updated diagnostics.
 
 mod change_visibility;
+mod convert_to_instance_variable;
 pub(crate) mod cursor_context;
 mod extract_constant;
 mod extract_function;
@@ -81,6 +84,7 @@ mod generate_property_hooks;
 pub(crate) mod implement_methods;
 mod import_class;
 mod inline_variable;
+mod mago;
 pub(crate) mod phpstan;
 mod promote_constructor_param;
 mod remove_unused_import;
@@ -170,6 +174,9 @@ impl Backend {
         // ── Import class ────────────────────────────────────────────────
         self.collect_import_class_actions(uri, content, params, &mut actions);
 
+        // ── Import all missing classes (bulk) ───────────────────────────
+        self.collect_import_all_classes_action(uri, content, params, &mut actions);
+
         // ── Remove unused imports ───────────────────────────────────────
         self.collect_remove_unused_import_actions(uri, content, params, &mut actions);
 
@@ -181,6 +188,9 @@ impl Backend {
 
         // ── PHPStan-specific quickfixes (deferred) ──────────────────────
         self.collect_phpstan_actions(uri, content, params, &mut actions);
+
+        // ── Mago quick-fix code actions ─────────────────────────────────
+        self.collect_mago_fix_actions(uri, content, params, &mut actions);
 
         // ── Change visibility ───────────────────────────────────────────
         self.collect_change_visibility_actions(uri, content, params, &mut actions);
@@ -209,8 +219,11 @@ impl Backend {
         // ── Extract function / method (deferred) ────────────────────────
         self.collect_extract_function_actions(uri, content, params, &mut actions);
 
-        // ── Inline variable (deferred) ──────────────────────────────────
+        // ── Inline variable (deferred) ──────────────────────────────
         self.collect_inline_variable_actions(uri, content, params, &mut actions);
+
+        // ── Convert to instance variable (deferred) ─────────────────
+        self.collect_convert_to_instance_variable_actions(uri, content, params, &mut actions);
 
         // ── Simplify with null coalescing / null-safe operator ──────────
         self.collect_simplify_null_actions(uri, content, params, &mut actions);
@@ -306,8 +319,13 @@ impl Backend {
             "refactor.extractVariable" | "refactor.extractVariableAll" => {
                 self.resolve_extract_variable(&data, &content)
             }
+            // ── Import all missing classes ───────────────────────────────
+            "source.importAllClasses" => self.resolve_import_all_classes(&data, &content),
             "refactor.extractFunction" => self.resolve_extract_function(&data, &content),
             "refactor.inlineVariable" => self.resolve_inline_variable(&data, &content),
+            "refactor.extractInstanceVariable" => {
+                self.resolve_convert_to_instance_variable(&data, &content)
+            }
             _ => None,
         };
 

@@ -342,8 +342,12 @@ fn parse_property_mismatch(message: &str) -> Option<PhpDocMismatch> {
     })
 }
 
-/// Extract `(phpdoc_type, native_type)` from the tail of a message
-/// starting after `"with type "`.
+/// Extract the PHPDoc and native type strings from the remainder of a
+/// PHPStan diagnostic message.
+///
+/// Returns raw strings rather than `PhpType` because the PHPDoc type is
+/// spliced back into docblock text during the fix edit, which requires the
+/// original string form.
 ///
 /// Handles both:
 /// - `{phpdoc} is incompatible with native type {native}.`

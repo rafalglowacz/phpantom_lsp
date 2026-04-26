@@ -23,83 +23,6 @@ PHPantom assigns diagnostic severity based on runtime consequences:
 
 ---
 
-## D4. Unused variable diagnostic
-
-**Impact: Medium · Effort: Medium**
-
-Flag variables that are assigned but never read. This is one of the
-most common issues in PHP codebases and catches dead code, typos in
-variable names, and forgotten refactoring leftovers.
-
-PHPantom already has an undefined-variable diagnostic
-(`undefined_variable` in `diagnostics/undefined_variables.rs`) that
-tracks variable definitions and reads through scope analysis. The
-unused-variable diagnostic is the dual: a variable that has a
-definition site but zero read sites within the same scope.
-
-**Severity:** Information (rendered as dimmed text). Assigned-but-
-unread variables are not bugs per se (the code still runs), but they
-are strong signals of dead code or typos. Information severity avoids
-alarming users while still making the issue visible.
-
-**Diagnostic code:** `unused_variable` (matches the planned CLI fix
-rule FX2).
-
-### Scope
-
-1. **Local variables in function/method bodies.** A variable assigned
-   inside a function or method body that is never read before the
-   scope ends. Parameters count as assignments; an unused parameter
-   in a non-abstract, non-interface method is flagged.
-2. **Foreach bindings.** `foreach ($items as $key => $value)` where
-   `$key` or `$value` is never read inside the loop body. Convention:
-   variables named `$_` or starting with `$_` are exempt (intentional
-   discard).
-3. **Catch variables.** `catch (Exception $e)` where `$e` is never
-   read. Same `$_` exemption applies.
-
-### Exclusions
-
-- Variables in the global scope (scripts, templates).
-- Variables passed by reference (`&$var`) to functions, since the
-  callee may use them as out-parameters.
-- Variables used inside closures or arrow functions that capture them
-  (explicit `use ($var)` or implicit capture).
-- Compact() calls that reference the variable by string name.
-- Variables used in string interpolation (`"Hello $name"`).
-- Variables whose RHS has side effects (method calls, function calls)
-  should still be flagged, but with a detail note that removing the
-  assignment would also remove the side effect.
-
-### PHPStan parallel
-
-PHPStan does not have a built-in unused-variable rule, but third-party
-rulesets (e.g. `phpstan-strict-rules`, `tomasvotruba/unused-public`)
-report similar issues. When D4 ships, the PHPStan quick-fix
-infrastructure should recognise our native `unused_variable` code so
-that:
-
-- The "Remove unused import" pattern can be extended to offer a
-  "Remove unused variable" quick-fix (same code action kind).
-- FX2 (`unused_variable` CLI fix rule) can consume our diagnostic
-  directly without needing PHPStan.
-
-### Implementation
-
-1. Extend the scope collector (`scope_collector/mod.rs`) to track
-   read sites per variable per frame (it already tracks definition
-   sites for the undefined-variable diagnostic).
-2. After processing a scope, iterate defined variables and flag any
-   that have zero reads and are not in the exclusion list.
-3. Emit diagnostics with `DiagnosticSeverity::HINT` and
-   `DiagnosticTag::UNNECESSARY` so editors render unused variables
-   as dimmed/faded text.
-4. Add a code action (in `code_actions/`) to remove the assignment
-   statement when the RHS is side-effect-free, or to prefix the
-   variable with `$_` to suppress the diagnostic.
-
----
-
 ## D3. Deprecated rendering — chain subject resolution
 
 **Impact: Low-Medium · Effort: Medium**
@@ -230,110 +153,6 @@ with `command`, `timeout`, and tool-specific options mirroring the
 
 ---
 
-## D11. Invalid class-like kind in context
-
-**Impact: Medium · Effort: Low**
-
-PHP accepts certain class-like names syntactically in positions where
-they are guaranteed to fail at runtime or be silently useless. These
-are not parse errors, so `php -l` does not catch them. PHPStan catches
-some of these (e.g. `new` on an abstract class) but not all. A
-dedicated diagnostic rule can flag them all consistently using the
-same context knowledge that the completion system already applies
-(the `ClassNameContext` enum and `TypeHint` variant).
-
-The rule table:
-
-| Position                   | What to flag                                  | Severity | Runtime behavior                          |
-| -------------------------- | --------------------------------------------- | -------- | ----------------------------------------- |
-| `new X`                    | Abstract class, interface, trait, enum        | Error    | Fatal error: Cannot instantiate           |
-| `throw new X`              | Non-Throwable class                           | Error    | Fatal error: Cannot throw                 |
-| `throw new X`              | Abstract class, interface, trait, enum        | Error    | Fatal error: Cannot instantiate           |
-| `$x instanceof X`          | Trait                                         | Warning  | Always evaluates to `false`               |
-| `catch (X $e)`             | Trait                                         | Warning  | Never catches anything                    |
-| `catch (X $e)`             | Non-Throwable class or interface              | Error    | Never catches, uncaught exception crashes |
-| `class A extends X`        | Final class                                   | Error    | Fatal error: Cannot extend final class    |
-| `class A implements X`     | Class, trait, enum                            | Error    | Fatal error: Not an interface             |
-| `interface A extends X`    | Class, trait, enum                            | Error    | Fatal error: Not an interface             |
-| `class A { use X; }`       | Class, interface, enum                        | Error    | Fatal error: Not a trait                  |
-| `function f(X $p)`, `): X` | Trait                                         | Warning  | Type check always fails                   |
-| `public X $prop`           | Trait                                         | Warning  | Type check always fails                   |
-| `@param X`, `@return X`    | Trait                                         | Hint     | Documents unsatisfiable constraint        |
-| `@throws X`                | Non-Throwable class or interface, trait, enum | Hint     | Documents impossible throw                |
-
-**Why Warning for traits in type positions (not Error).** PHP does not
-reject the code at parse time or class loading time. The fatal
-`TypeError` only occurs at the specific call site when a value actually
-reaches the type check. Code paths that are never executed with a
-mismatched value will run without error. This is different from `class
-extends final` which crashes unconditionally when the class is loaded.
-
-**Why Hint for PHPDoc.** PHPDoc has no runtime enforcement at all. A
-trait in `@param` is useless documentation but does not crash anything.
-This aligns with the severity philosophy: hints are for code quality
-issues that static analysis enthusiasts care about.
-
-**Implementation:**
-
-1. During AST extraction (or as a post-parse diagnostic pass), walk
-   class declarations and check `extends`, `implements`, and `use`
-   references against loaded `ClassInfo` entries. If the referenced
-   class is loaded and its kind does not match the position, emit
-   a diagnostic.
-
-2. For `new X`, `throw new X`, `instanceof X`, and `catch (X)`, scan
-   expression nodes in method bodies. Resolve `X` to a `ClassInfo`
-   (if loaded) and check kind/modifier compatibility.
-
-3. For native type hints, scan parameter types, return types, and
-   property types. Resolve each class-like reference and check for
-   trait kind.
-
-4. For PHPDoc types, scan `@param`, `@return`, `@var`, and `@throws`
-   tags. Resolve each class-like reference. Flag traits in type
-   positions and non-Throwable types in `@throws`.
-
-5. Only flag references where the target class is loaded (in
-   `ast_map` or stubs). Unknown classes should not be flagged here
-   (that is D4's job). This avoids false positives from unloaded
-   classmap entries where the kind is unknown.
-
-**Relationship to completion filtering.** The completion context
-detector (`ClassNameContext` enum in `class_completion.rs`) and this
-diagnostic rule use the same underlying knowledge (which kinds are
-valid in which positions). The completion system already prevents the
-user from inserting a wrong kind; this diagnostic catches wrong kinds
-that are already in the code. Both should share the same rule table
-to stay in sync.
-
----
-
-## D12. Mago linter integration (optional diagnostics)
-
-**Impact: Medium · Effort: Medium**
-
-PHPantom already depends on several mago crates (`mago-syntax`,
-`mago-docblock`, `mago-names`, `mago-formatter`, `mago-span`). The
-`mago-linter` crate provides ~159 lint rules covering redundancy,
-best practices, clarity, consistency, correctness, and deprecation.
-Integrating it as an optional diagnostics provider would give users
-"PHPStan-lite" diagnostics without requiring PHPStan to be installed.
-
-**Integration approach:** call `Linter::lint()` on the parsed AST
-(already available), convert `IssueCollection` to LSP `Diagnostic`s,
-convert `TextEdit` fixes to LSP `CodeAction`s. The linter is AST-only
-(no type inference), so it is fast.
-
-Offer as opt-in via `.phpantom.toml` configuration. Default to
-disabled so it does not conflict with users who already run PHPStan
-or Psalm. Mark with `source: "mago"` to distinguish from PHPantom's
-own diagnostics.
-
-**Notable rules:** `no-redundant-method-override`,
-`str-contains`/`str-starts-with` modernization,
-`prefer-arrow-function`, `constant-condition`, `no-self-assignment`,
-`explicit-nullable-param`, `valid-docblock`.
-
 ## D13. Unify diagnostic subject resolution with completion/hover
 
 `unknown_members.rs` has two secondary resolvers that run their own
@@ -372,114 +191,93 @@ resolution. This eliminates the secondary resolvers entirely.
 
 ---
 
-## D14. PHPCS diagnostic proxy
+## D14. Tighten argument type mismatch diagnostic (Phase 2)
 
-**Impact: Low · Effort: Medium**
+**Impact: High · Effort: Medium**
 
-Proxy PHP_CodeSniffer (PHPCS) diagnostics into the editor, following
-the same pattern as the existing PHPStan proxy. PHPCS reports coding
-standard violations (PSR-12, PSR-1, custom sniffs) and is widely used
-in PHP projects for enforcing style and detecting common mistakes.
+`is_type_compatible` in `src/diagnostics/type_errors.rs` silences
+several cases that are genuine bugs at runtime. Phase 1 was
+intentionally permissive to avoid false positives while the engine
+matured; Phase 2 tightens the remaining gaps. PHPStan and Psalm
+already flag most of these.
 
-### Implementation
+### 1. Nullable arg → non-nullable param (lines 264–271)
 
-1. Add a `[phpcs]` section to the config schema in `src/config.rs`
-   with `command` (default `"vendor/bin/phpcs"`), `timeout`,
-   `standard` (default: project's `phpcs.xml` or `phpcs.xml.dist`,
-   falling back to `PSR12`), and an `enabled` flag.
-2. Run PHPCS with `--report=json` on the current file and parse the
-   JSON output into LSP diagnostics. Each violation maps to a
-   diagnostic with the sniff name as the code (e.g.
-   `PSR12.Files.FileHeader.MissingPHPVersion`).
-3. Map PHPCS severity levels (`error` / `warning`) to LSP
-   `DiagnosticSeverity::Error` and `DiagnosticSeverity::Warning`.
-4. Mark fixable violations (PHPCS reports `fixable: true` per
-   violation) so that a companion code action can run `phpcbf` to
-   auto-fix them.
-5. Respect the same debounce and queueing logic used by the PHPStan
-   proxy to avoid overwhelming the tool on rapid edits.
-6. Support `phpcs:ignore` and `phpcs:disable` / `phpcs:enable`
-   suppression comments when diagnostic suppression intelligence
-   (D5) is implemented.
+Currently silenced with a MAYBE comment ("developer may have guarded
+against null"). This is the #1 source of runtime `TypeError` in
+PHP 8+. Both PHPStan and Psalm flag it. Should be reported at least
+as **Warning** severity, since the null path may be unguarded.
+
+### 2. `void` as argument (lines 94–96)
+
+Currently silenced conservatively. Passing the return value of a
+`void` function is always a bug — PHP 8 returns `null` but the call
+site clearly misunderstands the API. Should be **Error** severity.
+
+### 3. `int` → `string` type juggling (lines 313–322)
+
+Currently unconditionally accepted because we can't know the
+`strict_types` setting. Under `declare(strict_types=1)` this is a
+`TypeError`. Consider detecting the `declare` statement in the file
+and flagging when strict types are enabled. When the declare is
+absent or set to `0`, keep the current permissive behaviour.
+
+### 4. Union any-member-compatible threshold (lines 189–213)
+
+Currently: if ANY single member of an arg union is compatible with
+the param, the entire union passes. Combined with the other
+permissive rules above, this creates cascading permissiveness (e.g.
+`null|BadType` passes a `string` param because `null` is not
+checked, then `BadType` is the "any" member that gets skipped).
+Consider requiring all non-null members to be compatible, or at
+least flagging when a majority of members are incompatible.
+
+### 5. Reverse hierarchy acceptance (Direction 2)
+
+Currently: when the arg type is a *supertype* of the param type
+(e.g. `CarbonInterface` passed to `Carbon`), the diagnostic is
+silenced for all non-final classes because "the value *might* be
+the narrower type at runtime." This means the diagnostic can only
+catch type errors between completely unrelated classes, which
+severely limits its value. Passing `Animal` where `Dog` is expected
+is silently accepted.
+
+This is the single largest gap in the diagnostic. Tightening it
+requires control-flow analysis (instanceof guards, assert calls) to
+know whether the broader type was actually narrowed before the call
+site. Without CFA, the false positive rate would be high. Consider
+reporting at **Warning** severity with a message like "argument type
+`Animal` is broader than expected `Dog`; verify the value was
+narrowed before this call."
 
 ---
 
-## D15. Type error diagnostics
+## D15. Unused parameter diagnostic
 
-**Impact: Medium-High · Effort: High**
+**Impact: Low · Effort: Low**
 
-Report type mismatches that would cause runtime errors or indicate
-logical bugs: passing a value of the wrong type to a function,
-returning the wrong type from a function, or assigning an incompatible
-type to a typed property.
+Flag function and method parameters that are never read inside the
+body. This was intentionally excluded from D4 (unused variable
+diagnostic) because without suppression support (D5), false positives
+are unavoidable: callbacks, interface implementations, and framework
+conventions (e.g. Laravel event listeners) often require specific
+parameter signatures even when not all parameters are used.
 
-This is the bread-and-butter of static analysis tools like PHPStan
-(levels 5-9) and Psalm. PHPantom already resolves types for
-completion, hover, and variable inference. Surfacing type errors
-reuses that infrastructure to catch bugs without requiring an external
-tool.
+**Prerequisite:** D5 (diagnostic suppression intelligence) must ship
+first so users can silence false positives with `// @phpantom-ignore`
+or a configuration-level exclusion.
 
-### Severity
+### Scope
 
-- **Error** for mismatches that would cause a `TypeError` at runtime
-  (e.g. passing `string` to a parameter typed `int` with strict
-  types enabled, or returning `null` from a non-nullable return type).
-- **Warning** for mismatches that PHP would coerce silently in weak
-  mode but that are almost certainly bugs (e.g. passing an `array`
-  where `string` is expected).
+1. Function and method parameters (including closures and arrow
+   functions) that are never read inside their body.
+2. Constructor parameters that are not promoted and never read.
 
-### Scope (phased rollout)
+### Exclusions
 
-**Phase 1 — Argument type mismatches.** When calling a function or
-method whose parameter types are known (native hints or `@param`
-docblock), check each argument's resolved type against the declared
-parameter type. Flag clear mismatches (e.g. `string` passed to `int`,
-`null` passed to non-nullable). Skip `mixed`, unresolved types, and
-union types where any branch matches (to avoid false positives).
+- Parameters named `$_` or starting with `$_` (intentional discard).
+- Promoted constructor parameters (they are property assignments).
+- Parameters in abstract methods and interface method signatures
+  (no body to check).
 
-**Phase 2 — Return type mismatches.** When a function or method has a
-declared return type (native or `@return`), check the types of values
-in `return` statements against the declared type. Flag clear
-mismatches. This catches the common "forgot to return early" pattern
-where `null` falls through a non-nullable return type.
 
-**Phase 3 — Property type mismatches.** When assigning to a typed
-property (`public int $count`), check the RHS type against the
-declared property type. This catches assignment bugs that PHP would
-reject at runtime with a `TypeError`.
-
-### Design constraints
-
-- **Conservative.** Only flag mismatches where we are confident the
-  types are incompatible. When in doubt (unresolved types, `mixed`,
-  complex generics), do not flag. False positives are worse than
-  missed true positives for a feature that competes with PHPStan.
-- **Respect `strict_types`.** In files with `declare(strict_types=1)`,
-  coercions like `int` to `string` are errors. In files without it,
-  PHP's type juggling rules apply and only truly incompatible types
-  (e.g. `array` to `string`) should be flagged.
-- **Diagnostic code:** `type_error` with subcodes like
-  `type_error.argument`, `type_error.return`, `type_error.property`
-  for filtering and suppression.
-
-### Dependencies
-
-- Accurate type resolution for function/method parameters (already
-  available via completion and hover infrastructure).
-- `declare(strict_types=1)` detection (need to check file-level
-  declare statements).
-- Subtype checking utility (is type A assignable to type B?) — a
-  shared helper that would also benefit other diagnostics. The
-  existing `is_subtype_of` in the type hierarchy module covers class
-  hierarchies; scalar and union type compatibility needs to be added.
-
-### Quick-fix integration
-
-When a type mismatch is detected, offer code actions:
-
-- **Add type cast** (e.g. `(int)$value` when passing `string` to
-  `int` parameter).
-- **Add null check** when passing a nullable type to a non-nullable
-  parameter.
-- **Update docblock** when the declared `@param` or `@return` type is
-  too narrow for the actual usage.

@@ -20,6 +20,60 @@
 
 use tower_lsp::lsp_types::*;
 
+// ─── Shared helpers ─────────────────────────────────────────────────────────
+
+/// Check whether `cursor` (byte offset) sits inside a `[…]` or `{…}` pair
+/// that is nested within the call's argument span starting at `args_start`.
+///
+/// Scans forward from `args_start` to `cursor`, tracking bracket and brace
+/// depth while skipping string literals.  Returns `true` when the net depth
+/// is > 0, meaning the cursor is inside an array literal or braced
+/// expression — not at the top-level argument list of the call.
+pub fn cursor_inside_nested_bracket(content: &str, args_start: usize, cursor: usize) -> bool {
+    let bytes = content.as_bytes();
+    let end = cursor.min(bytes.len());
+    let mut i = args_start;
+    let mut bracket_depth: i32 = 0; // tracks [ ]
+    let mut brace_depth: i32 = 0; // tracks { }
+
+    while i < end {
+        match bytes[i] {
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth -= 1,
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth -= 1,
+            // Skip single-quoted strings
+            b'\'' => {
+                i += 1;
+                while i < end {
+                    if bytes[i] == b'\\' {
+                        i += 1; // skip escaped char
+                    } else if bytes[i] == b'\'' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            // Skip double-quoted strings
+            b'"' => {
+                i += 1;
+                while i < end {
+                    if bytes[i] == b'\\' {
+                        i += 1; // skip escaped char
+                    } else if bytes[i] == b'"' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    bracket_depth > 0 || brace_depth > 0
+}
+
 // ─── Context ────────────────────────────────────────────────────────────────
 
 /// Information about a named-argument completion context.

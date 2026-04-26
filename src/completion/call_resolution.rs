@@ -1,4 +1,16 @@
-/// Call expression and callable target resolution.
+//! Call expression and callable target resolution.
+//!
+//! ## Callable target cache
+//!
+//! During diagnostic passes, `resolve_instance_method_callable` is
+//! called for every call site in the file.  Many different chain
+//! expressions resolve to the same (class, method) pair — e.g.
+//! `$q->where(...)`, `$query->where(...)`, and
+//! `Product::query()->where(...)` all end up looking for `where` on
+//! `Builder<Product>`.  The per-file callable-target cache
+//! (`CALLABLE_TARGET_CACHE`) stores `Option<ResolvedCallableTarget>`
+//! keyed by `(class_fqn, method_name_lower)` so these redundant
+//! resolutions are free after the first hit.
 ///
 /// This module contains the logic for resolving call expressions (method
 /// calls, static calls, function calls, constructor calls) to their
@@ -10,7 +22,7 @@
 /// - [`Backend::resolve_callable_target`]: resolves a call expression
 ///   string to a [`ResolvedCallableTarget`] with label, parameters, and
 ///   return type (used by signature help and named-argument completion).
-/// - [`Backend::resolve_call_return_types_expr`]: resolves the return
+/// - [`Backend::resolve_call_return_types_expr_with_hint`]: resolves the return
 ///   type of a structured [`SubjectExpr`] callee + argument text to
 ///   zero or more `ClassInfo` values (used by the completion chain).
 /// - [`Backend::resolve_method_return_types_with_args`]: resolves a
@@ -18,8 +30,9 @@
 ///   return types and template substitutions.
 /// - [`Backend::build_method_template_subs`]: builds a template
 ///   substitution map for method-level `@template` parameters from
-///   call-site argument text.
-use std::collections::HashMap;
+///   pre-split call-site argument texts.
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::Backend;
@@ -27,11 +40,15 @@ use crate::completion::variable::rhs_resolution::{TemplateBindingMode, classify_
 use crate::completion::variable::{ARRAY_ELEMENT_FUNCS, ARRAY_PRESERVING_FUNCS};
 use crate::docblock;
 use crate::php_type::PhpType;
+use crate::subject_expr::SubjectExpr;
+use crate::types::ClassLikeKind;
 use crate::types::*;
-use crate::util::{find_class_at_offset, position_to_offset};
+use crate::util::{
+    find_class_at_offset, is_self_or_static, position_to_offset, resolve_class_keyword,
+};
 
 use super::conditional_resolution::{
-    VarClassStringResolver, resolve_conditional_with_text_args,
+    TemplateContext, VarClassStringResolver, resolve_conditional_with_text_args,
     resolve_conditional_with_text_args_and_defaults, resolve_conditional_without_args,
     resolve_conditional_without_args_and_defaults, split_call_subject, split_text_args,
 };
@@ -87,7 +104,7 @@ pub(super) fn build_var_resolver<'a>(
                 ctx.class_loader,
             )
             .iter()
-            .map(|c| c.name.clone())
+            .map(|c| c.name.to_string())
             .collect()
         } else {
             vec![]
@@ -95,67 +112,414 @@ pub(super) fn build_var_resolver<'a>(
     }
 }
 
+// ─── Thread-local caches and body return inference ──────────────────────────
+
+/// Closure type for body return type inference.
+///
+/// Takes `(class_fqn, &MethodInfo)` and returns `Some(PhpType)` when the
+/// method body can be scanned for return statements.
+type BodyReturnInferrerFn = Box<dyn Fn(&str, &MethodInfo) -> Option<PhpType>>;
+
+thread_local! {
+    /// When `Some`, `resolve_instance_method_callable` caches results
+    /// by `"FQN::method_lower"`.  Activated by
+    /// [`with_callable_target_cache`], cleared on guard drop.
+    static CALLABLE_TARGET_CACHE: RefCell<Option<HashMap<String, Option<ResolvedCallableTarget>>>> =
+        const { RefCell::new(None) };
+
+    /// When `Some`, methods without a declared return type can have
+    /// their return type inferred by scanning the method body.
+    ///
+    /// The closure takes `(class_fqn, &MethodInfo)` and returns
+    /// `Some(PhpType)` when inference succeeds.  Set up by
+    /// [`with_body_return_inferrer`] at request entry points that
+    /// have access to `Backend`.
+    static BODY_RETURN_INFERRER: RefCell<Option<BodyReturnInferrerFn>> =
+        const { RefCell::new(None) };
+
+    /// Re-entry guard for body return inference.  Tracks
+    /// `"FQN::method"` keys currently being inferred to prevent
+    /// infinite recursion when a method body references another
+    /// method that also lacks a return type.
+    static BODY_INFER_VISITED: RefCell<HashSet<String>> =
+        RefCell::new(HashSet::new());
+
+    /// Current nesting depth of body return inference.  Caps the
+    /// chain length so that A→B→C→D… doesn't trigger unbounded
+    /// sequential body scans.  Each scan runs `resolve_variable_types`
+    /// (forward walker + full resolution), so even non-recursive
+    /// chains are expensive.
+    static BODY_INFER_DEPTH: Cell<u8> = const { Cell::new(0) };
+}
+
+/// RAII guard that clears the callable target cache on drop.
+pub(crate) struct CallableTargetCacheGuard {
+    owns: bool,
+}
+
+impl Drop for CallableTargetCacheGuard {
+    fn drop(&mut self) {
+        if self.owns {
+            CALLABLE_TARGET_CACHE.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        }
+    }
+}
+
+/// Activate the thread-local callable target cache.
+///
+/// While the returned guard is alive, `resolve_instance_method_callable`
+/// caches callable target resolutions by `"FQN::method_lower"` so
+/// that the same method on the same class is resolved at most once per
+/// diagnostic pass, regardless of how many different chain expressions
+/// lead to it.
+pub(crate) fn with_callable_target_cache() -> CallableTargetCacheGuard {
+    let already_active = CALLABLE_TARGET_CACHE.with(|cell| cell.borrow().is_some());
+    if already_active {
+        return CallableTargetCacheGuard { owns: false };
+    }
+    CALLABLE_TARGET_CACHE.with(|cell| {
+        *cell.borrow_mut() = Some(HashMap::new());
+    });
+    CallableTargetCacheGuard { owns: true }
+}
+
+// ── Body return type inference ──────────────────────────────────────────────
+
+/// RAII guard that clears [`BODY_RETURN_INFERRER`] on drop.
+pub(crate) struct BodyReturnInferrerGuard {
+    owns: bool,
+}
+
+impl Drop for BodyReturnInferrerGuard {
+    fn drop(&mut self) {
+        if self.owns {
+            BODY_RETURN_INFERRER.with(|cell| {
+                *cell.borrow_mut() = None;
+            });
+        }
+    }
+}
+
+/// Activate body return type inference for the current thread.
+///
+/// The provided closure is called when `resolve_method_return_types_with_args`
+/// encounters a real (non-virtual, non-stub) method that has no declared
+/// return type and no `@return` docblock.  It receives the owning class's
+/// FQN and the `MethodInfo`, and should return `Some(PhpType)` when the
+/// method body can be scanned for return statements.
+///
+/// Returns an RAII guard that clears the inferrer on drop.
+pub(crate) fn with_body_return_inferrer(inferrer: BodyReturnInferrerFn) -> BodyReturnInferrerGuard {
+    let already_active = BODY_RETURN_INFERRER.with(|cell| cell.borrow().is_some());
+    if already_active {
+        return BodyReturnInferrerGuard { owns: false };
+    }
+    BODY_RETURN_INFERRER.with(|cell| {
+        *cell.borrow_mut() = Some(inferrer);
+    });
+    BodyReturnInferrerGuard { owns: true }
+}
+
+/// Try to infer a method's return type from its body using the
+/// thread-local [`BODY_RETURN_INFERRER`].
+///
+/// Returns `None` when no inferrer is active, when the method is
+/// already being inferred (re-entry), or when inference itself
+/// produces no result.
+/// Maximum nesting depth for body return inference chains.
+///
+/// A→B→C is 3 levels deep.  Real PHP code rarely has long chains of
+/// untyped methods calling each other, and each level runs a full
+/// forward-walk body scan, so keeping this low avoids expensive
+/// sequential scans on pathological code.
+const MAX_BODY_INFER_DEPTH: u8 = 3;
+
+pub(crate) fn try_infer_body_return_type(class_fqn: &str, method: &MethodInfo) -> Option<PhpType> {
+    // Depth cap: avoid long chains of sequential body scans.
+    let depth = BODY_INFER_DEPTH.with(|cell| cell.get());
+    if depth >= MAX_BODY_INFER_DEPTH {
+        return None;
+    }
+
+    // Build a re-entry key.
+    let key = format!("{}::{}", class_fqn, method.name);
+
+    // Check + insert into the visited set (re-entry guard).
+    let already_visiting = BODY_INFER_VISITED.with(|cell| {
+        let mut set = cell.borrow_mut();
+        !set.insert(key.clone())
+    });
+    if already_visiting {
+        return None;
+    }
+
+    BODY_INFER_DEPTH.with(|cell| cell.set(depth + 1));
+
+    let result = BODY_RETURN_INFERRER.with(|cell| {
+        let borrow = cell.borrow();
+        let inferrer = borrow.as_ref()?;
+        let inferred = inferrer(class_fqn, method);
+        // Filter out `mixed` and `void` — these are not useful as
+        // inferred return types for completion/hover.
+        inferred.filter(|t| !t.is_mixed() && !t.is_void())
+    });
+
+    // Restore depth and remove from visited set so the same method
+    // can be inferred again from a different call chain.
+    BODY_INFER_DEPTH.with(|cell| cell.set(depth));
+    BODY_INFER_VISITED.with(|cell| {
+        cell.borrow_mut().remove(&key);
+    });
+
+    result
+}
+
 impl Backend {
+    /// Build and activate the thread-local body return type inferrer.
+    ///
+    /// Returns an RAII guard that deactivates the inferrer on drop.
+    /// Call this at the start of completion, hover, and diagnostic
+    /// request handlers so that methods without declared return types
+    /// can have their return type inferred from the method body.
+    ///
+    /// Internally clones the `Backend` (all fields are `Arc`-wrapped,
+    /// so this is cheap) and delegates to
+    /// [`Backend::infer_return_type_for_function`] which has the full
+    /// resolution infrastructure (use maps, namespace resolution,
+    /// function loader, class loader with stubs/classmap/PSR-4).
+    pub(crate) fn activate_body_return_inferrer(&self) -> BodyReturnInferrerGuard {
+        let backend = self.clone_for_diagnostic_worker();
+
+        let inferrer = move |class_fqn: &str, method: &MethodInfo| -> Option<PhpType> {
+            // Find the file URI for this class.
+            let file_uri = backend.class_index.read().get(class_fqn).cloned()?;
+
+            // Read the file content.
+            let content = backend.get_file_content(&file_uri)?;
+
+            // Convert method name_offset to a 0-based line number.
+            let offset = method.name_offset as usize;
+            if offset >= content.len() {
+                return None;
+            }
+            let func_line = content[..offset].matches('\n').count();
+
+            // Walk backwards from the method name to find the function
+            // keyword line (the declaration may start on an earlier line).
+            // infer_return_type_for_function expects the line of the
+            // `function` keyword.
+            let lines: Vec<&str> = content.lines().collect();
+            let mut decl_line = func_line;
+            for i in (0..=func_line).rev() {
+                let trimmed = lines.get(i).map(|l| l.trim()).unwrap_or("");
+                if trimmed.contains("function ")
+                    || trimmed.contains("function(")
+                    || trimmed.starts_with("function")
+                {
+                    decl_line = i;
+                    break;
+                }
+                if trimmed.ends_with('}') || trimmed.ends_with(';') {
+                    break;
+                }
+            }
+
+            let result = backend.infer_return_type_for_function(&file_uri, &content, decl_line)?;
+
+            // Prefer the effective type (richer, e.g. `list<string>`)
+            // over the native type (e.g. `array`).
+            Some(result.effective.unwrap_or(result.native))
+        };
+
+        with_body_return_inferrer(Box::new(inferrer))
+    }
+
     /// Resolve an instance method base expression + method name to a
     /// [`ResolvedCallableTarget`].
     ///
     /// Resolves `base` to owner classes, merges each via
-    /// `resolve_class_fully`, and returns the first match for
-    /// `method_name`.
+    /// `resolve_class_fully_with_generics`, and returns the first match
+    /// for `method_name`.
     fn resolve_instance_method_callable(
         base: &SubjectExpr,
         method_name: &str,
         rctx: &ResolutionCtx<'_>,
+        args_text: Option<&str>,
     ) -> Option<ResolvedCallableTarget> {
         let subject_text = base.to_subject_text();
-        let owner_classes: Vec<Arc<ClassInfo>> = if base.is_self_like() {
+        let resolved_types: Vec<ResolvedType> = if base.is_self_like() {
             rctx.current_class
-                .map(|c| Arc::new(c.clone()))
+                .map(|c| ResolvedType::from_class(c.clone()))
                 .into_iter()
                 .collect()
         } else {
-            ResolvedType::into_arced_classes(super::resolver::resolve_target_classes(
-                &subject_text,
-                crate::AccessKind::Arrow,
-                rctx,
-            ))
+            super::resolver::resolve_target_classes(&subject_text, crate::AccessKind::Arrow, rctx)
         };
 
-        for owner in &owner_classes {
+        for rt in &resolved_types {
+            let owner = match &rt.class_info {
+                Some(ci) => Arc::clone(ci),
+                None => continue,
+            };
+
+            // Extract generic type arguments from the resolved type
+            // string (e.g. `Collection<User>` → `[User]`) so we can
+            // substitute class-level template parameters in the
+            // method's parameter and return types.
+            let generic_args: Vec<PhpType> = match &rt.type_string {
+                PhpType::Generic(_, args) => args.clone(),
+                _ => {
+                    // When the resolved type has no generic annotation
+                    // but the class declares template parameters (e.g.
+                    // `$errors = new Collection()` without `<string>`),
+                    // fill in default type args from declared upper
+                    // bounds or `mixed`.  This follows PHPStan's
+                    // `resolveToBounds()` semantics and prevents raw
+                    // template names like `TValue` from leaking into
+                    // method parameter and return types.
+                    if !owner.template_params.is_empty() {
+                        crate::inheritance::default_type_args(&owner)
+                    } else {
+                        vec![]
+                    }
+                }
+            };
+
+            // ── Callable target cache check ─────────────────────────
+            // When args_text is None (argument_count diagnostics),
+            // the callable target depends only on the resolved class
+            // and method name, not on the specific chain expression.
+            // Cache by "FQN::method_lower" so that `$q->where(...)`,
+            // `$query->where(...)`, and `Product::query()->where(...)`
+            // all share the result.
+            //
+            // When args_text is Some (type_error diagnostics with
+            // method-level template substitution), the result depends
+            // on the call-site arguments and cannot be cached this way.
+            let method_lower = method_name.to_ascii_lowercase();
+            let generic_arg_strings: Vec<String> =
+                generic_args.iter().map(|a| a.to_string()).collect();
+            let callable_cache_key = if args_text.is_none() {
+                let fqn = owner.fqn();
+                let key_str = if generic_arg_strings.is_empty() {
+                    format!("{}::{}", fqn, method_lower)
+                } else {
+                    format!(
+                        "{}<{}>::{}",
+                        fqn,
+                        generic_arg_strings.join(","),
+                        method_lower
+                    )
+                };
+                Some(key_str)
+            } else {
+                None
+            };
+
+            if let Some(ref key) = callable_cache_key {
+                let cached = CALLABLE_TARGET_CACHE.with(|cell| {
+                    let borrow = cell.borrow();
+                    borrow.as_ref().and_then(|map| map.get(key).cloned())
+                });
+                match cached {
+                    Some(Some(target)) => return Some(target),
+                    Some(None) => continue,
+                    None => {}
+                }
+            }
+
             // Always use a fully-resolved class so that inherited
             // docblock types (return types, parameter types,
             // descriptions) are visible in signature help.  The
             // candidate from `resolve_target_classes` may not have
             // gone through `resolve_class_fully` (e.g. bare `new X`
             // instantiation without generics).
-            let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
-                owner,
+            //
+            // Use the fused resolve+substitute helper so that the
+            // result of `apply_generic_args` is cached under
+            // `(FQN, generic_args)`.  For Eloquent Builder<Model>
+            // chains where the same generic class appears at dozens
+            // of call sites, this avoids re-cloning and
+            // re-substituting hundreds of virtual members each time.
+            let effective = crate::virtual_members::resolve_class_fully_with_generics(
+                &owner,
                 rctx.class_loader,
                 rctx.resolved_class_cache,
+                &generic_arg_strings,
+                &generic_args,
             );
-            if let Some(m) = merged
-                .methods
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(method_name))
-            {
-                return Some(ResolvedCallableTarget {
-                    parameters: m.parameters.clone(),
-                    return_type: m.return_type.clone(),
-                });
+
+            if let Some(m) = effective.get_method_ci(&method_lower) {
+                let mut result_method = m.clone();
+
+                // Apply method-level template substitutions when
+                // call-site argument text is available.
+                if let Some(at) = args_text {
+                    let split_args = crate::completion::types::conditional::split_text_args(at);
+                    let method_subs = Self::build_method_template_subs(
+                        &effective,
+                        method_name,
+                        &split_args,
+                        rctx,
+                    );
+                    if !method_subs.is_empty() {
+                        crate::inheritance::apply_substitution_to_method(
+                            &mut result_method,
+                            &method_subs,
+                        );
+                    }
+                }
+
+                let target = ResolvedCallableTarget {
+                    parameters: result_method.parameters.clone(),
+                    return_type: result_method.return_type.clone(),
+                };
+
+                // Store positive result in the callable target cache.
+                if let Some(ref key) = callable_cache_key {
+                    CALLABLE_TARGET_CACHE.with(|cell| {
+                        let mut borrow = cell.borrow_mut();
+                        if let Some(ref mut map) = *borrow {
+                            map.insert(key.clone(), Some(target.clone()));
+                        }
+                    });
+                }
+
+                return Some(target);
             }
 
-            // Fall back to the candidate directly — it may contain
-            // model-specific members (e.g. Eloquent scope methods
-            // injected onto Builder<Model>) that the FQN-keyed
-            // cache does not have.
-            if let Some(m) = owner
-                .methods
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(method_name))
-            {
-                return Some(ResolvedCallableTarget {
+            // Fall back to __call / __callStatic — the candidate
+            // directly may contain model-specific members (e.g.
+            // Eloquent scope methods injected onto Builder<Model>)
+            // that the FQN-keyed cache does not have.
+            if let Some(m) = owner.get_method_ci(method_name) {
+                let target = ResolvedCallableTarget {
                     parameters: m.parameters.clone(),
                     return_type: m.return_type.clone(),
+                };
+
+                // Store __call fallback in the callable target cache.
+                if let Some(ref key) = callable_cache_key {
+                    CALLABLE_TARGET_CACHE.with(|cell| {
+                        let mut borrow = cell.borrow_mut();
+                        if let Some(ref mut map) = *borrow {
+                            map.insert(key.clone(), Some(target.clone()));
+                        }
+                    });
+                }
+
+                return Some(target);
+            }
+
+            // Store negative result (method not found) in the cache.
+            if let Some(ref key) = callable_cache_key {
+                CALLABLE_TARGET_CACHE.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    if let Some(ref mut map) = *borrow {
+                        map.insert(key.clone(), None);
+                    }
                 });
             }
         }
@@ -171,20 +535,48 @@ impl Backend {
         class: &str,
         method_name: &str,
         rctx: &ResolutionCtx<'_>,
+        args_text: Option<&str>,
     ) -> Option<ResolvedCallableTarget> {
         let owner = super::resolver::resolve_static_owner_class(class, rctx)?;
-        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
-            &owner,
-            rctx.class_loader,
-            rctx.resolved_class_cache,
-        );
-        let m = merged
-            .methods
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(method_name))?;
+
+        // When the class has template params but no generic annotation
+        // (e.g. `RunningBonus::collect(...)` where RunningBonus extends
+        // Data without `@extends` generics), substitute class-level
+        // template params with their declared upper bounds or `mixed`.
+        let merged = if !owner.template_params.is_empty() {
+            let default_args = crate::inheritance::default_type_args(&owner);
+            let base = crate::virtual_members::resolve_class_fully_maybe_cached(
+                &owner,
+                rctx.class_loader,
+                rctx.resolved_class_cache,
+            );
+            Arc::new(crate::inheritance::apply_generic_args(&base, &default_args))
+        } else {
+            crate::virtual_members::resolve_class_fully_maybe_cached(
+                &owner,
+                rctx.class_loader,
+                rctx.resolved_class_cache,
+            )
+        };
+
+        let m = merged.get_method_ci(method_name)?;
+
+        let mut result_method = m.clone();
+
+        // Apply method-level template substitutions when call-site
+        // argument text is available.
+        if let Some(at) = args_text {
+            let split_args = crate::completion::types::conditional::split_text_args(at);
+            let method_subs =
+                Self::build_method_template_subs(&merged, method_name, &split_args, rctx);
+            if !method_subs.is_empty() {
+                crate::inheritance::apply_substitution_to_method(&mut result_method, &method_subs);
+            }
+        }
+
         Some(ResolvedCallableTarget {
-            parameters: m.parameters.clone(),
-            return_type: m.return_type.clone(),
+            parameters: result_method.parameters.clone(),
+            return_type: result_method.return_type.clone(),
         })
     }
 
@@ -196,41 +588,107 @@ impl Backend {
         }
     }
 
+    /// Like [`Self::function_to_callable`] but resolves function-level
+    /// `@template` parameters from call-site argument text before
+    /// building the callable target.  Without this, functions like
+    /// `throw_unless($cond)` would report `expects TValue` instead of
+    /// the concrete type.
+    fn function_to_callable_with_subs(
+        func: &FunctionInfo,
+        args_text: Option<&str>,
+        rctx: &ResolutionCtx<'_>,
+    ) -> ResolvedCallableTarget {
+        if let Some(at) = args_text
+            && !func.template_params.is_empty()
+        {
+            let split_args: Vec<String> =
+                crate::completion::types::conditional::split_text_args(at)
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            let subs = crate::completion::variable::rhs_resolution::build_function_template_subs(
+                func,
+                &split_args,
+                rctx,
+            );
+            if !subs.is_empty() {
+                let parameters: Vec<_> = func
+                    .parameters
+                    .iter()
+                    .map(|p| {
+                        let mut param = p.clone();
+                        if let Some(ref mut hint) = param.type_hint {
+                            *hint = hint.substitute(&subs);
+                        }
+                        param
+                    })
+                    .collect();
+                return ResolvedCallableTarget {
+                    parameters,
+                    return_type: func.return_type.clone(),
+                };
+            }
+        }
+        Self::function_to_callable(func)
+    }
+
     /// Resolve class name keywords (`self`, `static`, `parent`) to actual
     /// class names in the context of the current class.
     fn resolve_class_name_keyword(class_name: &str, current_class: Option<&ClassInfo>) -> String {
-        match class_name {
-            "self" | "static" => current_class
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| class_name.to_string()),
-            "parent" => current_class
-                .and_then(|c| c.parent_class.clone())
-                .unwrap_or_else(|| class_name.to_string()),
-            _ => class_name.to_string(),
-        }
+        resolve_class_keyword(class_name, current_class).unwrap_or_else(|| class_name.to_string())
     }
 
     /// Build a [`ResolvedCallableTarget`] for a constructor call.
     ///
     /// Loads and merges the class, then extracts `__construct` parameters.
+    /// When `args_text` is provided, class-level `@template` parameters are
+    /// resolved from the call-site argument types and substituted into the
+    /// constructor's parameter types.
+    ///
+    /// For example, given `/** @template T */ class Box { /** @param T $value */ … }`,
+    /// calling `new Box(new Gift())` resolves `T` → `Gift` and substitutes it
+    /// into the constructor parameters so that type-error diagnostics see
+    /// `Gift` instead of the raw `T`.
     fn resolve_constructor_callable(
         class_name: &str,
         class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
         cache: &crate::virtual_members::ResolvedClassCache,
+        args_text: Option<&str>,
+        rctx: &ResolutionCtx<'_>,
     ) -> Option<ResolvedCallableTarget> {
         let ci = class_loader(class_name)?;
         let merged = crate::virtual_members::resolve_class_fully_cached(&ci, class_loader, cache);
-        if let Some(ctor) = merged.methods.iter().find(|m| m.name == "__construct") {
-            Some(ResolvedCallableTarget {
-                parameters: ctor.parameters.clone(),
-                return_type: ctor.return_type.clone(),
-            })
-        } else {
-            Some(ResolvedCallableTarget {
-                parameters: vec![],
-                return_type: None,
-            })
+        let ctor = match merged.get_method("__construct") {
+            Some(c) => c.clone(),
+            None => {
+                return Some(ResolvedCallableTarget {
+                    parameters: vec![],
+                    return_type: None,
+                });
+            }
+        };
+
+        // Apply class-level template substitutions from the call-site
+        // argument types when the constructor has template bindings.
+        if let Some(at) = args_text
+            && !ctor.template_bindings.is_empty()
+        {
+            let split_args = crate::completion::types::conditional::split_text_args(at);
+            let subs = Self::build_method_template_subs(&merged, "__construct", &split_args, rctx);
+            if !subs.is_empty() {
+                let mut result_ctor = ctor;
+                crate::inheritance::apply_substitution_to_method(&mut result_ctor, &subs);
+                return Some(ResolvedCallableTarget {
+                    parameters: result_ctor.parameters.clone(),
+                    return_type: result_ctor.return_type.clone(),
+                });
+            }
         }
+
+        Some(ResolvedCallableTarget {
+            parameters: ctor.parameters.clone(),
+            return_type: ctor.return_type.clone(),
+        })
     }
 
     // ── Main callable target resolution ─────────────────────────────────
@@ -258,6 +716,24 @@ impl Backend {
         position: Position,
         file_ctx: &FileContext,
     ) -> Option<ResolvedCallableTarget> {
+        self.resolve_callable_target_with_args(expr, content, position, file_ctx, None)
+    }
+
+    /// Like [`resolve_callable_target`](Self::resolve_callable_target)
+    /// but accepts optional raw argument text for method-level template
+    /// substitution.
+    ///
+    /// When `call_args_text` is `Some("$user, 42")`, method-level
+    /// `@template` parameters are resolved from the call-site argument
+    /// types and substituted into the parameter types before returning.
+    pub(crate) fn resolve_callable_target_with_args(
+        &self,
+        expr: &str,
+        content: &str,
+        position: Position,
+        file_ctx: &FileContext,
+        call_args_text: Option<&str>,
+    ) -> Option<ResolvedCallableTarget> {
         let class_loader = self.class_loader(file_ctx);
         let function_loader_cl = self.function_loader(file_ctx);
         let cursor_offset = position_to_offset(content, position);
@@ -271,17 +747,24 @@ impl Backend {
             class_loader: &class_loader,
             resolved_class_cache: Some(&self.resolved_class_cache),
             function_loader: Some(&function_loader_cl),
+            scope_var_resolver: None,
         };
 
         let parsed = SubjectExpr::parse(expr);
 
         // Unwrap `CallExpr` wrapper so downstream arms match the inner
-        // callee directly.  The `args_text` is unused here (it matters
-        // for return-type resolution, not for callable target lookup).
-        let effective = match &parsed {
-            SubjectExpr::CallExpr { callee, .. } => callee.as_ref(),
-            other => other,
+        // callee directly.  Capture `args_text` from the parsed
+        // expression; prefer the caller-supplied `call_args_text` when
+        // available (it comes from the source content and is more
+        // accurate for method-level template substitution).
+        let (effective, args_text_from_parse) = match &parsed {
+            SubjectExpr::CallExpr { callee, args_text } => {
+                (callee.as_ref(), Some(args_text.as_str()))
+            }
+            other => (other, None),
         };
+
+        let effective_args_text = call_args_text.or(args_text_from_parse);
 
         match effective {
             // ── Constructor: `new ClassName` or `new ClassName()` ────
@@ -292,24 +775,30 @@ impl Backend {
                     &resolved_class_name,
                     &class_loader,
                     &self.resolved_class_cache,
+                    effective_args_text,
+                    &rctx,
                 )
             }
 
             // ── Instance method call: `$subject->method(…)` ─────────
             SubjectExpr::MethodCall { base, method } => {
-                Self::resolve_instance_method_callable(base, method, &rctx)
+                Self::resolve_instance_method_callable(base, method, &rctx, effective_args_text)
             }
 
             // ── Static method call: `Class::method(…)` ──────────────
             SubjectExpr::StaticMethodCall { class, method } => {
-                Self::resolve_static_method_callable(class, method, &rctx)
+                Self::resolve_static_method_callable(class, method, &rctx, effective_args_text)
             }
 
             // ── Standalone function call: `functionName(…)` ─────────
             SubjectExpr::FunctionCall(name) => {
                 let func =
                     self.resolve_function_name(name, &file_ctx.use_map, &file_ctx.namespace)?;
-                Some(Self::function_to_callable(&func))
+                Some(Self::function_to_callable_with_subs(
+                    &func,
+                    effective_args_text,
+                    &rctx,
+                ))
             }
 
             // ── Variable used as a callable target: `$fn(…)` ────────
@@ -317,7 +806,13 @@ impl Backend {
             SubjectExpr::Variable(var_name) => {
                 let callable_target =
                     Self::extract_callable_target_from_variable(var_name, content, cursor_offset)?;
-                self.resolve_callable_target(&callable_target, content, position, file_ctx)
+                self.resolve_callable_target_with_args(
+                    &callable_target,
+                    content,
+                    position,
+                    file_ctx,
+                    call_args_text,
+                )
             }
 
             // ── Bare class name used as a function name ─────────────
@@ -328,7 +823,11 @@ impl Backend {
             SubjectExpr::ClassName(name) => {
                 let func =
                     self.resolve_function_name(name, &file_ctx.use_map, &file_ctx.namespace)?;
-                Some(Self::function_to_callable(&func))
+                Some(Self::function_to_callable_with_subs(
+                    &func,
+                    effective_args_text,
+                    &rctx,
+                ))
             }
 
             // ── PropertyChain used as a callable target ──────────────
@@ -337,14 +836,14 @@ impl Backend {
             // `SubjectExpr::parse` produces as `PropertyChain`.  Treat
             // the trailing property as a method name.
             SubjectExpr::PropertyChain { base, property } => {
-                Self::resolve_instance_method_callable(base, property, &rctx)
+                Self::resolve_instance_method_callable(base, property, &rctx, effective_args_text)
             }
 
             // ── StaticAccess used as a callable target ──────────────
             // Same situation: `"ClassName::method"` without `()` parses
             // as `StaticAccess` rather than `StaticMethodCall`.
             SubjectExpr::StaticAccess { class, member } => {
-                Self::resolve_static_method_callable(class, member, &rctx)
+                Self::resolve_static_method_callable(class, member, &rctx, effective_args_text)
             }
 
             // ── Anything else doesn't resolve to a callable ─────────
@@ -362,10 +861,18 @@ impl Backend {
     /// [`SubjectExpr::StaticMethodCall`], [`SubjectExpr::FunctionCall`],
     /// [`SubjectExpr::Variable`], or [`SubjectExpr::NewExpr`].
     /// Any other variant falls through to `resolve_target_classes_expr`.
-    pub(crate) fn resolve_call_return_types_expr(
+    ///
+    /// Resolves the return type of a structured [`SubjectExpr`] callee +
+    /// argument text.  Optionally captures the raw return type hint
+    /// (with template substitutions applied) into `return_type_hint_out`
+    /// when provided.  This preserves generic
+    /// type parameters (e.g. `HasMany<Translation, Tag>`) that would
+    /// otherwise be lost when converting to `Vec<Arc<ClassInfo>>`.
+    pub(crate) fn resolve_call_return_types_expr_with_hint(
         callee: &SubjectExpr,
         text_args: &str,
         ctx: &ResolutionCtx<'_>,
+        mut return_type_hint_out: Option<&mut Option<PhpType>>,
     ) -> Vec<Arc<ClassInfo>> {
         match callee {
             // ── Instance method call: base->method(…) ───────────────
@@ -377,10 +884,43 @@ impl Backend {
                     super::resolver::resolve_target_classes_expr(base, AccessKind::Arrow, ctx),
                 );
 
+                // Capture the raw return type hint while we iterate
+                // the owner classes below.  We grab it from the first
+                // owner that has a matching method — before the return
+                // type gets flattened into ClassInfo.
+                let mut hint_captured = false;
                 let mut results = Vec::new();
+
                 for owner in &lhs_classes {
+                    let split_args = split_text_args(text_args);
+                    let arg_refs = split_args.to_vec();
                     let template_subs =
-                        Self::build_method_template_subs(owner, method_name, text_args, ctx);
+                        Self::build_method_template_subs(owner, method_name, &arg_refs, ctx);
+
+                    // Capture the return type hint from the first owner
+                    // that has the method.  Apply template substitutions
+                    // so that generic return types like `T` are resolved
+                    // to their concrete types (e.g. `ASTClass`).  Without
+                    // this, callers that use the hint for downstream
+                    // template binding would see unsubstituted params.
+                    if !hint_captured && let Some(ref mut hint_out) = return_type_hint_out {
+                        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                            owner,
+                            ctx.class_loader,
+                            ctx.resolved_class_cache,
+                        );
+                        if let Some(m) = merged.get_method_ci(method_name) {
+                            if let Some(ref ret) = m.return_type {
+                                let substituted = if !template_subs.is_empty() {
+                                    ret.substitute(&template_subs)
+                                } else {
+                                    ret.clone()
+                                };
+                                **hint_out = Some(substituted);
+                            }
+                            hint_captured = true;
+                        }
+                    }
                     let var_resolver = build_var_resolver(ctx);
                     let mr_ctx = MethodReturnCtx {
                         all_classes: ctx.all_classes,
@@ -419,8 +959,26 @@ impl Backend {
                 };
 
                 if let Some(ref owner) = owner_class {
+                    // Capture return type hint for static method calls.
+                    // The resolve_class_fully call is cached, so this
+                    // doesn't duplicate work.
+                    if let Some(ref mut hint_out) = return_type_hint_out {
+                        let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                            owner,
+                            ctx.class_loader,
+                            ctx.resolved_class_cache,
+                        );
+                        if let Some(m) = merged.get_method_ci(method_name)
+                            && let Some(ref ret) = m.return_type
+                        {
+                            **hint_out = Some(ret.clone());
+                        }
+                    }
+
+                    let split_args = split_text_args(text_args);
+                    let arg_refs = split_args.to_vec();
                     let template_subs =
-                        Self::build_method_template_subs(owner, method_name, text_args, ctx);
+                        Self::build_method_template_subs(owner, method_name, &arg_refs, ctx);
                     let var_resolver = build_var_resolver(ctx);
                     let mr_ctx = MethodReturnCtx {
                         all_classes: ctx.all_classes,
@@ -469,10 +1027,7 @@ impl Backend {
                                 owner_name,
                                 ctx.all_classes,
                                 ctx.class_loader,
-                            )
-                            .into_iter()
-                            .map(Arc::new)
-                            .collect();
+                            );
                         if !classes.is_empty() {
                             return classes;
                         }
@@ -485,6 +1040,7 @@ impl Backend {
                 {
                     if let Some(ref cond) = func_info.conditional_return {
                         let var_resolver = build_var_resolver(ctx);
+                        let tpl = TemplateContext::with_params(&func_info.template_params);
                         let resolved_type = if !text_args.is_empty() {
                             resolve_conditional_with_text_args(
                                 cond,
@@ -492,6 +1048,8 @@ impl Backend {
                                 text_args,
                                 Some(&var_resolver),
                                 ctx.current_class.map(|c| c.name.as_str()),
+                                ctx.class_loader,
+                                &tpl,
                             )
                         } else {
                             resolve_conditional_without_args(cond, &func_info.parameters)
@@ -503,10 +1061,7 @@ impl Backend {
                                     "",
                                     ctx.all_classes,
                                     ctx.class_loader,
-                                )
-                                .into_iter()
-                                .map(Arc::new)
-                                .collect();
+                                );
                             if !classes.is_empty() {
                                 return classes;
                             }
@@ -519,13 +1074,19 @@ impl Backend {
                     // Delegates to `build_function_template_subs` which
                     // handles Direct, ArrayElement, and GenericWrapper
                     // binding modes (e.g. `@param array<TKey, TValue>`).
-                    if !func_info.template_params.is_empty()
-                        && !func_info.template_bindings.is_empty()
-                        && func_info.return_type.is_some()
-                        && !text_args.is_empty()
-                    {
+                    if !func_info.template_params.is_empty() && func_info.return_type.is_some() {
+                        let split_args: Vec<String> = if text_args.is_empty() {
+                            vec![]
+                        } else {
+                            split_text_args(text_args)
+                                .into_iter()
+                                .map(|s| s.to_string())
+                                .collect()
+                        };
                         let subs = super::variable::rhs_resolution::build_function_template_subs(
-                            &func_info, text_args, ctx,
+                            &func_info,
+                            &split_args,
+                            ctx,
                         );
 
                         if !subs.is_empty()
@@ -538,10 +1099,7 @@ impl Backend {
                                     "",
                                     ctx.all_classes,
                                     ctx.class_loader,
-                                )
-                                .into_iter()
-                                .map(Arc::new)
-                                .collect();
+                                );
                             if !classes.is_empty() {
                                 return classes;
                             }
@@ -549,15 +1107,16 @@ impl Backend {
                     }
 
                     if let Some(ref ret) = func_info.return_type {
+                        // Capture the function's return type hint.
+                        if let Some(ref mut hint_out) = return_type_hint_out {
+                            **hint_out = Some(ret.clone());
+                        }
                         return super::type_resolution::type_hint_to_classes_typed(
                             ret,
                             "",
                             ctx.all_classes,
                             ctx.class_loader,
-                        )
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect();
+                        );
                     }
                 }
 
@@ -582,10 +1141,7 @@ impl Backend {
                             "",
                             ctx.all_classes,
                             ctx.class_loader,
-                        )
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect();
+                        );
                     if !classes.is_empty() {
                         return classes;
                     }
@@ -605,10 +1161,7 @@ impl Backend {
                             "",
                             ctx.all_classes,
                             ctx.class_loader,
-                        )
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect();
+                        );
                     if !classes.is_empty() {
                         return classes;
                     }
@@ -624,10 +1177,7 @@ impl Backend {
                             "",
                             ctx.all_classes,
                             ctx.class_loader,
-                        )
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect();
+                        );
                     if !classes.is_empty() {
                         return classes;
                     }
@@ -640,7 +1190,7 @@ impl Backend {
                     super::resolver::resolve_target_classes(var_name, AccessKind::Arrow, ctx),
                 );
                 for owner in &var_classes {
-                    if let Some(invoke) = owner.methods.iter().find(|m| m.name == "__invoke")
+                    if let Some(invoke) = owner.get_method("__invoke")
                         && let Some(ref ret) = invoke.return_type
                     {
                         let classes: Vec<Arc<ClassInfo>> =
@@ -649,10 +1199,7 @@ impl Backend {
                                 "",
                                 ctx.all_classes,
                                 ctx.class_loader,
-                            )
-                            .into_iter()
-                            .map(Arc::new)
-                            .collect();
+                            );
                         if !classes.is_empty() {
                             return classes;
                         }
@@ -685,7 +1232,7 @@ impl Backend {
                 // the call returns __invoke()'s return type, not the
                 // object itself.  This handles `($this->formatter)()`.
                 for owner in &callee_classes {
-                    if let Some(invoke) = owner.methods.iter().find(|m| m.name == "__invoke")
+                    if let Some(invoke) = owner.get_method("__invoke")
                         && let Some(ref ret) = invoke.return_type
                     {
                         let classes: Vec<Arc<ClassInfo>> =
@@ -694,10 +1241,7 @@ impl Backend {
                                 "",
                                 ctx.all_classes,
                                 ctx.class_loader,
-                            )
-                            .into_iter()
-                            .map(Arc::new)
-                            .collect();
+                            );
                         if !classes.is_empty() {
                             return classes;
                         }
@@ -732,6 +1276,16 @@ impl Backend {
         let resolve_method = |method: &MethodInfo| -> Vec<Arc<ClassInfo>> {
             // Try conditional return type first (PHPStan syntax)
             if let Some(ref cond) = method.conditional_return {
+                let tpl = TemplateContext {
+                    defaults: Some(
+                        &class_info
+                            .template_param_defaults
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.clone()))
+                            .collect::<HashMap<String, PhpType>>(),
+                    ),
+                    params: &method.template_params,
+                };
                 let resolved_type = if !text_args.is_empty() {
                     resolve_conditional_with_text_args_and_defaults(
                         cond,
@@ -739,13 +1293,14 @@ impl Backend {
                         text_args,
                         var_resolver,
                         mr_ctx.calling_class_name,
-                        Some(&class_info.template_param_defaults),
+                        mr_ctx.class_loader,
+                        &tpl,
                     )
                 } else {
                     resolve_conditional_without_args_and_defaults(
                         cond,
                         &method.parameters,
-                        Some(&class_info.template_param_defaults),
+                        tpl.defaults,
                     )
                 };
                 if let Some(ref parsed) = resolved_type {
@@ -763,10 +1318,7 @@ impl Backend {
                             &class_info.fqn(),
                             all_classes,
                             class_loader,
-                        )
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect();
+                        );
                     if !classes.is_empty() {
                         return classes;
                     }
@@ -788,10 +1340,7 @@ impl Backend {
                             &class_info.fqn(),
                             all_classes,
                             class_loader,
-                        )
-                        .into_iter()
-                        .map(Arc::new)
-                        .collect();
+                        );
                     if !classes.is_empty() {
                         return classes;
                     }
@@ -818,11 +1367,23 @@ impl Backend {
                     &class_info.fqn(),
                     all_classes,
                     class_loader,
-                )
-                .into_iter()
-                .map(Arc::new)
-                .collect();
+                );
             }
+            // Try body return type inference as a last resort.
+            // Only for real (non-virtual, non-stub) methods that genuinely
+            // lack a return type declaration and docblock @return tag.
+            if method.name_offset != 0
+                && !method.is_virtual
+                && let Some(inferred) = try_infer_body_return_type(&class_info.fqn(), method)
+            {
+                return super::type_resolution::type_hint_to_classes_typed(
+                    &inferred,
+                    &class_info.fqn(),
+                    all_classes,
+                    class_loader,
+                );
+            }
+
             vec![]
         };
 
@@ -836,7 +1397,7 @@ impl Backend {
         };
 
         // First check the class itself
-        if let Some(method) = class_info.methods.iter().find(|m| m.name == method_name) {
+        if let Some(method) = class_info.get_method(method_name) {
             let result = resolve_method(method);
             if !result.is_empty() {
                 return result;
@@ -856,12 +1417,9 @@ impl Backend {
 
         // Look up the magic method once; used for both validation and
         // fallback below.
-        let magic_method = merged
-            .methods
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case(magic_name));
+        let magic_method = merged.get_method_ci(magic_name);
 
-        if let Some(method) = merged.methods.iter().find(|m| m.name == method_name) {
+        if let Some(method) = merged.get_method(method_name) {
             if method.is_virtual {
                 // ── Virtual method (from @method, @mixin, etc.) ─────
                 // At runtime these are dispatched through __call /
@@ -992,7 +1550,7 @@ fn is_valid_virtual_narrowing(
     // class at runtime.  The virtual type must be the owner class itself
     // or a subclass of it.
     if native_type.is_self_like() {
-        return is_type_subclass_of(virtual_type, &owner_class.name, all_classes, class_loader);
+        return is_type_subclass_of(virtual_type, &owner_class.fqn(), all_classes, class_loader);
     }
 
     // Both are concrete types.  For scalar-to-scalar, delegate to the
@@ -1051,54 +1609,53 @@ impl Backend {
     /// Build a template substitution map for a method-level `@template` call.
     ///
     /// Finds the method on the class (or inherited), checks for template
-    /// params and bindings, resolves argument types from `text_args` using
-    /// the call resolution context, and returns a `HashMap` mapping template
-    /// parameter names to their resolved concrete types.
+    /// params and bindings, resolves argument types from the pre-split
+    /// `arg_texts` slice using the call resolution context, and returns a
+    /// `HashMap` mapping template parameter names to their resolved
+    /// concrete types.
+    ///
+    /// Callers with an AST `ArgumentList` should extract per-argument text
+    /// via [`extract_arg_texts_from_ast`] and convert to `&[&str]`.
+    /// Callers with only raw text should use [`split_text_args`] first.
     ///
     /// Returns an empty map if the method has no template params, no
     /// bindings, or if argument types cannot be resolved.
     pub(super) fn build_method_template_subs(
         class_info: &ClassInfo,
         method_name: &str,
-        text_args: &str,
+        arg_texts: &[&str],
         ctx: &ResolutionCtx<'_>,
     ) -> HashMap<String, PhpType> {
         // Find the method — first on the class directly, then via inheritance.
-        let method = class_info
-            .methods
-            .iter()
-            .find(|m| m.name == method_name)
-            .cloned()
-            .or_else(|| {
-                let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
-                    class_info,
-                    ctx.class_loader,
-                    ctx.resolved_class_cache,
-                );
-                merged
-                    .methods
-                    .iter()
-                    .find(|m| m.name == method_name)
-                    .cloned()
-            });
+        let method = class_info.get_method(method_name).cloned().or_else(|| {
+            let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                class_info,
+                ctx.class_loader,
+                ctx.resolved_class_cache,
+            );
+            merged.get_method(method_name).cloned()
+        });
 
         let method = match method {
-            Some(m) if !m.template_params.is_empty() && !m.template_bindings.is_empty() => m,
+            Some(m) if !m.template_params.is_empty() => m,
             _ => return HashMap::new(),
         };
 
-        let args = split_text_args(text_args);
         let mut subs = HashMap::new();
 
         for (tpl_name, param_name) in &method.template_bindings {
             // Find the parameter index for this binding.
-            let param_idx = match method.parameters.iter().position(|p| p.name == *param_name) {
+            let param_idx = match method
+                .parameters
+                .iter()
+                .position(|p| p.name == param_name.as_str())
+            {
                 Some(idx) => idx,
                 None => continue,
             };
 
             // Get the corresponding argument text.
-            let arg_text = match args.get(param_idx) {
+            let arg_text = match arg_texts.get(param_idx) {
                 Some(text) => text.trim(),
                 None => {
                     // No argument was provided at the call site.  If the
@@ -1111,8 +1668,9 @@ impl Backend {
                     // should become `null` when no default is passed.
                     if let Some(param) = method.parameters.get(param_idx)
                         && param.default_value.as_deref().is_some_and(|d| d == "null")
+                        && !subs.contains_key(tpl_name.as_str())
                     {
-                        subs.insert(tpl_name.clone(), PhpType::null());
+                        subs.insert(tpl_name.to_string(), PhpType::null());
                     }
                     continue;
                 }
@@ -1128,9 +1686,209 @@ impl Backend {
             let binding_mode = classify_template_binding(tpl_name, param_hint);
 
             match binding_mode {
-                TemplateBindingMode::Direct | TemplateBindingMode::GenericWrapper(..) => {
+                TemplateBindingMode::Direct => {
                     if let Some(resolved_type) = Self::resolve_arg_text_to_type(arg_text, ctx) {
-                        subs.insert(tpl_name.clone(), resolved_type);
+                        subs.insert(tpl_name.to_string(), resolved_type);
+                    }
+                }
+                TemplateBindingMode::GenericWrapper(ref wrapper_name, tpl_position) => {
+                    // For array-like wrappers (`array<T>`, `list<T>`, etc.)
+                    // resolve the argument to its array type and extract the
+                    // positional generic argument.
+                    //
+                    // `classify_template_binding` assigns positions by index
+                    // in the generic args list: `array<T>` → position 0,
+                    // `array<TKey, TValue>` → positions 0 and 1.  For
+                    // single-param `array<T>`, T is semantically the
+                    // *value* type even though it sits at index 0.  We
+                    // detect this by checking the param hint's generic
+                    // args count: if there's only one arg, position 0
+                    // maps to the value type; otherwise position 0 is the
+                    // key type and position 1 is the value type.
+                    if crate::completion::variable::rhs_resolution::is_array_like_wrapper(
+                        wrapper_name,
+                    ) {
+                        // Array literal: `[1, 2, 3]` — resolve individual
+                        // elements to infer the element type.
+                        // `resolve_arg_text_to_type("[1, 2, 3]")` returns
+                        // bare `array` (no generics), so we must unwrap the
+                        // literal and resolve the first element directly.
+                        if arg_text.starts_with('[') && arg_text.ends_with(']') {
+                            let inner = arg_text[1..arg_text.len() - 1].trim();
+                            if !inner.is_empty() {
+                                let elems =
+                                    crate::completion::types::conditional::split_text_args(inner);
+                                if let Some(elem) = elems.first()
+                                    && let Some(resolved_elem) =
+                                        Self::resolve_arg_text_to_type(elem.trim(), ctx)
+                                {
+                                    subs.insert(tpl_name.to_string(), resolved_elem);
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Variable or expression argument: resolve to a
+                        // typed value and extract the positional generic
+                        // argument (key or value type).
+                        if let Some(resolved_type) = Self::resolve_arg_text_to_type(arg_text, ctx) {
+                            let generic_arg_count = param_hint
+                                .and_then(|h| match h {
+                                    crate::php_type::PhpType::Generic(_, args) => Some(args.len()),
+                                    _ => None,
+                                })
+                                .unwrap_or(1);
+
+                            let concrete = if generic_arg_count <= 1 {
+                                // Single-param: `array<T>`, `list<T>` — T is the value/element type.
+                                resolved_type.extract_value_type(false).cloned()
+                            } else {
+                                match tpl_position {
+                                    0 => resolved_type.extract_key_type(false).cloned(),
+                                    1 => resolved_type.extract_value_type(false).cloned(),
+                                    _ => None,
+                                }
+                            };
+                            if let Some(concrete) = concrete {
+                                subs.insert(tpl_name.to_string(), concrete);
+                            } else {
+                                subs.insert(tpl_name.to_string(), resolved_type);
+                            }
+                        }
+                        continue;
+                    }
+
+                    if let Some(resolved_type) = Self::resolve_arg_text_to_type(arg_text, ctx) {
+                        // Special handling for class-string<T> to avoid double-wrapping
+                        if wrapper_name == "class-string"
+                            && tpl_position == 0
+                            && let Some(inner) = resolved_type.unwrap_class_string_inner()
+                        {
+                            subs.insert(tpl_name.to_string(), inner.clone());
+                            continue;
+                        }
+
+                        // For non-array-like generic wrappers (e.g.
+                        // `Iterator<T>`, `Traversable<T>`), try to
+                        // extract the positional generic arg through
+                        // the class hierarchy.  When the argument type
+                        // is a class that implements/extends the wrapper
+                        // interface with concrete generic args, use
+                        // those args instead of the raw class name.
+                        //
+                        // 1. If the resolved type is itself Generic with
+                        //    a matching wrapper name, extract directly.
+                        // 2. Otherwise resolve the type to a class and
+                        //    check implements_generics / extends_generics
+                        //    for the wrapper interface.
+                        let extracted = (|| -> Option<PhpType> {
+                            // Direct match: resolved type is already
+                            // `Wrapper<..., ConcreteArg, ...>`.
+                            if let PhpType::Generic(name, args) = &resolved_type {
+                                let short = crate::util::short_name(name);
+                                let wrapper_short = crate::util::short_name(wrapper_name);
+                                if short == wrapper_short {
+                                    // When the param hint has fewer
+                                    // generic args than the resolved
+                                    // type (e.g. `Iterator<T>` vs
+                                    // `Iterator<int, ASTClass>`), the
+                                    // single param-hint arg represents
+                                    // the value/last type.
+                                    let param_generic_count = param_hint
+                                        .and_then(|h| match h {
+                                            PhpType::Generic(_, a) => Some(a.len()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or(1);
+                                    if param_generic_count == 1 && args.len() > 1 {
+                                        return args.last().cloned();
+                                    }
+                                    return args.get(tpl_position).cloned();
+                                }
+                            }
+
+                            // Hierarchy lookup: resolve the type to a
+                            // class and search its implements_generics
+                            // and extends_generics for the wrapper.
+                            let base_name = resolved_type.base_name()?;
+                            let cls = (ctx.class_loader)(base_name)?;
+                            let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+                                &cls,
+                                ctx.class_loader,
+                                ctx.resolved_class_cache,
+                            );
+                            let wrapper_short = crate::util::short_name(wrapper_name);
+
+                            // Build a substitution map from the class's
+                            // template params to the concrete generic
+                            // args from the resolved type.  E.g. when
+                            // the resolved type is
+                            // `ASTArtifactList<ASTClass>` and the class
+                            // declares `@template T of ASTArtifact`,
+                            // this maps `T → ASTClass`.  Without this,
+                            // the `@implements Iterator<int|string, T>`
+                            // would return the raw `T` instead of the
+                            // concrete `ASTClass`.
+                            let class_tpl_subs: HashMap<String, PhpType> =
+                                if let PhpType::Generic(_, concrete_args) = &resolved_type {
+                                    merged
+                                        .template_params
+                                        .iter()
+                                        .zip(concrete_args.iter())
+                                        .map(|(name, ty)| (name.to_string(), ty.clone()))
+                                        .collect()
+                                } else {
+                                    HashMap::new()
+                                };
+
+                            // Search implements_generics first, then
+                            // extends_generics.
+                            for (iface_name, args) in merged
+                                .implements_generics
+                                .iter()
+                                .chain(merged.extends_generics.iter())
+                            {
+                                let iface_short = crate::util::short_name(iface_name);
+                                if iface_short != wrapper_short {
+                                    continue;
+                                }
+                                if args.is_empty() {
+                                    continue;
+                                }
+
+                                // Apply class-level template subs so
+                                // that e.g. `Iterator<int|string, T>`
+                                // becomes `Iterator<int|string, ASTClass>`.
+                                let args: Vec<PhpType> = if !class_tpl_subs.is_empty() {
+                                    args.iter().map(|a| a.substitute(&class_tpl_subs)).collect()
+                                } else {
+                                    args.clone()
+                                };
+
+                                let param_generic_count = param_hint
+                                    .and_then(|h| match h {
+                                        PhpType::Generic(_, a) => Some(a.len()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or(1);
+                                // When the @param hint has a single
+                                // generic arg but the @implements
+                                // clause has multiple, the single arg
+                                // represents the value (last) type.
+                                if param_generic_count == 1 && args.len() > 1 {
+                                    return args.last().cloned();
+                                }
+                                return args.get(tpl_position).cloned();
+                            }
+
+                            None
+                        })();
+
+                        if let Some(concrete) = extracted {
+                            subs.insert(tpl_name.to_string(), concrete);
+                        } else {
+                            subs.insert(tpl_name.to_string(), resolved_type);
+                        }
                     }
                 }
                 TemplateBindingMode::CallableReturnType => {
@@ -1139,7 +1897,7 @@ impl Backend {
                     if let Some(ret_type) =
                         super::source::helpers::extract_closure_return_type_from_text(arg_text)
                     {
-                        subs.insert(tpl_name.clone(), ret_type);
+                        subs.insert(tpl_name.to_string(), ret_type);
                     }
                 }
                 TemplateBindingMode::CallableParamType(position) => {
@@ -1150,15 +1908,63 @@ impl Backend {
                             arg_text, position,
                         )
                     {
-                        subs.insert(tpl_name.clone(), param_type);
+                        subs.insert(tpl_name.to_string(), param_type);
                     }
                 }
                 TemplateBindingMode::ArrayElement => {
+                    // `@param T[] $items` or `@param array<T> $items` —
+                    // resolve individual array elements from array literals.
+                    // For `[1, 2, 3]`, extract the first element `1` and
+                    // resolve it to `int` so that `T = int`.
+                    if arg_text.starts_with('[') && arg_text.ends_with(']') {
+                        let inner = arg_text[1..arg_text.len() - 1].trim();
+                        if !inner.is_empty() {
+                            let first_elem =
+                                crate::completion::types::conditional::split_text_args(inner);
+                            if let Some(elem) = first_elem.first()
+                                && let Some(resolved_type) =
+                                    Self::resolve_arg_text_to_type(elem.trim(), ctx)
+                            {
+                                subs.insert(tpl_name.to_string(), resolved_type);
+                            }
+                        }
+                    } else if let Some(resolved_type) =
+                        Self::resolve_arg_text_to_type(arg_text, ctx)
+                    {
+                        // Fallback: treat as direct if not an array literal.
+                        subs.insert(tpl_name.to_string(), resolved_type);
+                    }
+                }
+                TemplateBindingMode::ClassStringInner => {
                     if let Some(resolved_type) = Self::resolve_arg_text_to_type(arg_text, ctx) {
-                        subs.insert(tpl_name.clone(), resolved_type);
+                        // Unwrap `class-string<X>` → `X` so that the
+                        // substitution doesn't double-wrap.
+                        let unwrapped = match resolved_type {
+                            PhpType::ClassString(Some(inner)) => *inner,
+                            _ => resolved_type,
+                        };
+                        subs.insert(tpl_name.to_string(), unwrapped);
                     }
                 }
             }
+        }
+
+        // ── Fill in unbound method-level template params ────────
+        // Any template parameter that was not bound from call-site
+        // arguments is replaced with its declared upper bound
+        // (`@template T of Foo` → `Foo`) or `mixed`.  This follows
+        // PHPStan's `resolveToBounds()` semantics and prevents raw
+        // template names like `TReduceReturnType` from leaking into
+        // parameter and return types.
+        for tpl_name in &method.template_params {
+            let tpl_key = tpl_name.to_string();
+            subs.entry(tpl_key).or_insert_with(|| {
+                method
+                    .template_param_bounds
+                    .get(tpl_name)
+                    .cloned()
+                    .unwrap_or_else(PhpType::mixed)
+            });
         }
 
         subs
@@ -1172,11 +1978,24 @@ impl Backend {
     /// - `$this` / `self` / `static` → current class name
     /// - `$this->prop` → property type
     /// - `$var` → variable type via assignment scanning
+    /// - `"hello"` / `'world'` → `string`
+    /// - `42` / `-1` → `int`
+    /// - `3.14` → `float`
+    /// - `true` / `false` → `bool`
+    /// - `null` → `null`
+    /// - `[…]` → `array`
+    /// - `EnumClass::Case` → `EnumClass`
+    /// - `ClassName::CONSTANT` → constant's declared type
     pub(crate) fn resolve_arg_text_to_type(
         arg_text: &str,
         ctx: &ResolutionCtx<'_>,
     ) -> Option<PhpType> {
         let trimmed = arg_text.trim();
+
+        // ── Literal values ──────────────────────────────────────
+        if let Some(ty) = resolve_literal_type(trimmed) {
+            return Some(ty);
+        }
 
         // ClassName::class → ClassName
         if let Some(name) = trimmed.strip_suffix("::class")
@@ -1185,52 +2004,274 @@ impl Backend {
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
         {
-            return Some(PhpType::Named(name.to_string()));
+            let resolved_name = if let Some(cls) = (ctx.class_loader)(name) {
+                cls.fqn().to_string()
+            } else {
+                name.to_string()
+            };
+            return Some(PhpType::Named(resolved_name));
+        }
+
+        // When the expression contains a `->` chain (e.g.
+        // `Country::DK->value`, `new Decimal($x)->toFixed(2)`),
+        // skip the static-access and new-expression shortcuts —
+        // they would match the prefix and ignore the chain.
+        // Let `resolve_expression_to_type` handle the full chain.
+        let has_arrow_chain = trimmed.contains("->");
+
+        // ClassName::Member — enum cases and class constants.
+        // Enum cases resolve to the enum type; class constants
+        // resolve to the constant's declared type hint.
+        if !has_arrow_chain && let Some(ty) = resolve_static_access_type(trimmed, ctx) {
+            return Some(ty);
         }
 
         // new ClassName(…) → ClassName
-        if let Some(class_name) = super::source::helpers::extract_new_expression_class(trimmed) {
-            return Some(PhpType::Named(class_name));
+        if !has_arrow_chain
+            && let Some(class_name) = super::source::helpers::extract_new_expression_class(trimmed)
+        {
+            let resolved_name = if let Some(cls) = (ctx.class_loader)(&class_name) {
+                cls.fqn().to_string()
+            } else {
+                class_name
+            };
+            return Some(PhpType::Named(resolved_name));
         }
 
         // $this / self / static → current class
-        if trimmed == "$this" || trimmed == "self" || trimmed == "static" {
-            return ctx.current_class.map(|c| PhpType::Named(c.name.clone()));
+        if is_self_or_static(trimmed) {
+            return ctx
+                .current_class
+                .map(|c| PhpType::Named(c.name.to_string()));
         }
 
-        // $this->prop → property type
-        if let Some(prop) = trimmed
-            .strip_prefix("$this->")
-            .or_else(|| trimmed.strip_prefix("$this?->"))
-            && prop.chars().all(|c| c.is_alphanumeric() || c == '_')
-            && let Some(owner) = ctx.current_class
-        {
-            let types = super::type_resolution::resolve_property_types(
-                prop,
-                owner,
-                ctx.all_classes,
-                ctx.class_loader,
-            );
-            if let Some(first) = types.first() {
-                return Some(PhpType::Named(first.name.clone()));
-            }
-        }
-
-        // $var → resolve variable type
-        if trimmed.starts_with('$') {
-            let classes = super::resolver::resolve_target_classes(
-                trimmed,
-                crate::types::AccessKind::Arrow,
-                ctx,
-            );
-            if let Some(first) = classes.first() {
-                return Some(first.type_string.clone());
-            }
+        // General expression fallback: parse the argument text as a
+        // SubjectExpr and try to resolve it to a type.  This handles
+        // $var, $var->prop, $this->prop, $var->method(), method
+        // chains, and any other expression pattern.
+        if let Some(ty) = resolve_expression_to_type(trimmed, ctx) {
+            return Some(ty);
         }
 
         None
     }
+}
 
+/// Resolve an arbitrary expression to a [`PhpType`].
+///
+/// Unlike [`super::resolver::resolve_target_classes`] (which returns
+/// class-bearing `ResolvedType` values and drops scalars), this function
+/// returns the *type* of the expression — including scalars like `string`,
+/// `int`, `bool`, etc.
+///
+/// Strategy:
+/// 1. Parse the expression with [`SubjectExpr::parse`].
+/// 2. For property chains (`$var->prop`), resolve the base to classes
+///    and look up the property's type hint directly.
+/// 3. For method calls (`$var->method()`), resolve the base and look
+///    up the method's return type.
+/// 4. For everything else, fall back to [`super::resolver::resolve_target_classes`]
+///    which handles variables, `$this`, `new …`, etc.
+fn resolve_expression_to_type(text: &str, ctx: &ResolutionCtx<'_>) -> Option<PhpType> {
+    let expr = SubjectExpr::parse(text);
+
+    match &expr {
+        // $var->prop or $this->prop — resolve base to classes, then
+        // look up the property's type hint (which preserves scalars).
+        SubjectExpr::PropertyChain { base, property } => {
+            let base_text = base.to_subject_text();
+            let base_classes = ResolvedType::into_arced_classes(
+                super::resolver::resolve_target_classes(&base_text, crate::AccessKind::Arrow, ctx),
+            );
+            for cls in &base_classes {
+                if let Some(hint) =
+                    crate::inheritance::resolve_property_type_hint(cls, property, ctx.class_loader)
+                {
+                    return Some(hint);
+                }
+            }
+            None
+        }
+
+        // $var->method() or $this->helper->getText() — resolve the
+        // full call expression to return-type classes first; if that
+        // yields nothing class-like, resolve the raw return type
+        // (which preserves scalars).
+        SubjectExpr::CallExpr { callee, args_text } => {
+            // Try class-bearing resolution first (handles non-scalar returns).
+            // Use the _with_hint variant to capture the raw return type
+            // (which preserves generic parameters like `ASTArtifactList<ASTClass>`).
+            // Without this, generic args are lost and downstream template
+            // substitution resolves to unsubstituted template params.
+            let mut return_hint: Option<PhpType> = None;
+            let classes = Backend::resolve_call_return_types_expr_with_hint(
+                callee,
+                args_text,
+                ctx,
+                Some(&mut return_hint),
+            );
+            if let Some(first) = classes.first() {
+                // Prefer the return type hint (preserves generics) over
+                // the bare class FQN.  Fall back to FQN when no hint
+                // was captured or when the hint is a raw template name.
+                if let Some(ref hint) = return_hint
+                    && !hint.is_untyped()
+                    && !hint.is_mixed()
+                {
+                    return Some(hint.clone());
+                }
+                return Some(PhpType::Named(first.fqn().to_string()));
+            }
+
+            // Fall back to raw return type for scalar returns.
+            if let SubjectExpr::MethodCall { base, method } = callee.as_ref() {
+                let base_text = base.to_subject_text();
+                let base_classes =
+                    ResolvedType::into_arced_classes(super::resolver::resolve_target_classes(
+                        &base_text,
+                        crate::AccessKind::Arrow,
+                        ctx,
+                    ));
+                for cls in &base_classes {
+                    if let Some(rt) = crate::inheritance::resolve_method_return_type(
+                        cls,
+                        method,
+                        ctx.class_loader,
+                    ) {
+                        return Some(rt);
+                    }
+                }
+            }
+            if let SubjectExpr::StaticMethodCall { class, method } = callee.as_ref()
+                && let Some(owner) = super::resolver::resolve_static_owner_class(class, ctx)
+                && let Some(rt) =
+                    crate::inheritance::resolve_method_return_type(&owner, method, ctx.class_loader)
+            {
+                return Some(rt);
+            }
+            None
+        }
+
+        // Everything else ($var, $this, ClassName, new X, etc.) —
+        // use the standard resolver which returns class-bearing types.
+        _ => {
+            let resolved =
+                super::resolver::resolve_target_classes(text, crate::types::AccessKind::Arrow, ctx);
+            if let Some(first) = resolved.first() {
+                return Some(first.type_string.clone());
+            }
+            None
+        }
+    }
+}
+
+/// Resolve a `ClassName::Member` expression to a type.
+///
+/// Handles enum cases (`MyEnum::Case` → `MyEnum`) and class constants
+/// (`Foo::BAR` → the constant's type hint, or the class itself as
+/// fallback for untyped constants).
+fn resolve_static_access_type(text: &str, ctx: &ResolutionCtx<'_>) -> Option<PhpType> {
+    let (class_part, _member) = text.split_once("::")?;
+
+    // Only accept identifier-like class names (no `$var::`, no whitespace).
+    if class_part.is_empty()
+        || class_part.starts_with('$')
+        || !class_part
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '\\')
+    {
+        return None;
+    }
+
+    // Resolve `self` / `static` / `parent` to the actual class name.
+    let class_name = if is_self_or_static(class_part) {
+        ctx.current_class?.name.to_string()
+    } else if let Some(resolved) = resolve_class_keyword(class_part, ctx.current_class) {
+        resolved
+    } else {
+        class_part.to_string()
+    };
+
+    let cls = (ctx.class_loader)(&class_name)?;
+
+    // Enums: any `EnumName::Case` resolves to the enum type itself.
+    if cls.kind == ClassLikeKind::Enum {
+        return Some(PhpType::Named(cls.fqn().to_string()));
+    }
+
+    // Class constants: look up the constant and use its type hint
+    // when available.  Fall back to the owning class type (which is
+    // conservative but avoids leaving the raw template param name).
+    let merged = crate::virtual_members::resolve_class_fully_maybe_cached(
+        &cls,
+        ctx.class_loader,
+        ctx.resolved_class_cache,
+    );
+    if let Some(constant) = merged.constants.iter().find(|c| c.name == _member)
+        && let Some(ref hint) = constant.type_hint
+    {
+        return Some(hint.clone());
+    }
+
+    // Unknown member or untyped constant — we can't determine the
+    // type, so return None and let the caller skip the diagnostic.
+    None
+}
+
+/// Resolve a literal expression to its PHP type.
+///
+/// Returns `Some(PhpType)` for string literals (`"…"`, `'…'`), integer
+/// literals (`42`, `-1`), float literals (`3.14`), boolean literals
+/// (`true`, `false`), `null`, and array literals (`[…]`).
+fn resolve_literal_type(text: &str) -> Option<PhpType> {
+    // String literals: "…" or '…'
+    if (text.starts_with('"') && text.ends_with('"'))
+        || (text.starts_with('\'') && text.ends_with('\''))
+    {
+        return Some(PhpType::Named("string".to_string()));
+    }
+
+    // null
+    if text.eq_ignore_ascii_case("null") {
+        return Some(PhpType::null());
+    }
+
+    // Boolean literals
+    if text.eq_ignore_ascii_case("true") || text.eq_ignore_ascii_case("false") {
+        return Some(PhpType::Named("bool".to_string()));
+    }
+
+    // Array literals: [...] or array(...)
+    if (text.starts_with('[') && text.ends_with(']'))
+        || (text.starts_with("array(") && text.ends_with(')'))
+    {
+        return Some(PhpType::Named("array".to_string()));
+    }
+
+    // Numeric literals — try int first, then float.
+    // Strip an optional leading minus for negative literals.
+    let numeric = text.strip_prefix('-').unwrap_or(text);
+    if !numeric.is_empty()
+        && numeric.bytes().all(|b| b.is_ascii_digit() || b == b'_')
+        && numeric.bytes().any(|b| b.is_ascii_digit())
+    {
+        return Some(PhpType::Named("int".to_string()));
+    }
+    if !numeric.is_empty()
+        && numeric
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'.' || b == b'_')
+        && numeric.bytes().filter(|&b| b == b'.').count() == 1
+        && numeric.bytes().any(|b| b.is_ascii_digit())
+    {
+        return Some(PhpType::Named("float".to_string()));
+    }
+
+    None
+}
+
+/// Like [`resolve_instance_method_callable`](Self::resolve_instance_method_callable)
+impl Backend {
     /// Extract the first argument from a comma-separated argument text,
     /// respecting nested parentheses, brackets, and braces.
     fn extract_first_arg_text(args_text: &str) -> Option<String> {
@@ -1310,49 +2351,42 @@ impl Backend {
         if arg_text.ends_with(')')
             && let Some((call_body, _args)) = split_call_subject(arg_text)
         {
-            // Instance method chain: `expr->method()`
-            if let Some(pos) = call_body.rfind("->") {
-                // Strip trailing `?` from LHS when the operator was `?->`
-                let lhs = call_body[..pos]
-                    .strip_suffix('?')
-                    .unwrap_or(&call_body[..pos]);
-                let method_name = &call_body[pos + 2..];
-
-                let lhs_classes = ResolvedType::into_arced_classes(
-                    super::resolver::resolve_target_classes(lhs, AccessKind::Arrow, ctx),
-                );
-                for cls in &lhs_classes {
-                    if let Some(rt) = crate::inheritance::resolve_method_return_type(
-                        cls,
-                        method_name,
-                        class_loader,
-                    ) {
+            match SubjectExpr::parse_callee(call_body) {
+                SubjectExpr::MethodCall { base, method } => {
+                    let base_text = base.to_subject_text();
+                    let lhs_classes = ResolvedType::into_arced_classes(
+                        super::resolver::resolve_target_classes(&base_text, AccessKind::Arrow, ctx),
+                    );
+                    for cls in &lhs_classes {
+                        if let Some(rt) = crate::inheritance::resolve_method_return_type(
+                            cls,
+                            &method,
+                            class_loader,
+                        ) {
+                            return Some(rt);
+                        }
+                    }
+                }
+                SubjectExpr::StaticMethodCall { class, method } => {
+                    let owner = if let Some(resolved) = resolve_class_keyword(&class, current_class)
+                    {
+                        class_loader(&resolved).map(Arc::unwrap_or_clone)
+                    } else {
+                        find_class_by_name(all_classes, &class)
+                            .map(|arc| ClassInfo::clone(arc))
+                            .or_else(|| class_loader(&class).map(Arc::unwrap_or_clone))
+                    };
+                    if let Some(ref cls) = owner
+                        && let Some(rt) = crate::inheritance::resolve_method_return_type(
+                            cls,
+                            &method,
+                            class_loader,
+                        )
+                    {
                         return Some(rt);
                     }
                 }
-            }
-
-            // Static call: `ClassName::method()`
-            if let Some(pos) = call_body.rfind("::") {
-                let class_part = &call_body[..pos];
-                let method_name = &call_body[pos + 2..];
-
-                let owner = if class_part == "self" || class_part == "static" {
-                    current_class.cloned()
-                } else {
-                    find_class_by_name(all_classes, class_part)
-                        .map(|arc| ClassInfo::clone(arc))
-                        .or_else(|| class_loader(class_part).map(Arc::unwrap_or_clone))
-                };
-                if let Some(ref cls) = owner
-                    && let Some(rt) = crate::inheritance::resolve_method_return_type(
-                        cls,
-                        method_name,
-                        class_loader,
-                    )
-                {
-                    return Some(rt);
-                }
+                _ => {}
             }
         }
 

@@ -1334,6 +1334,12 @@ impl Backend {
             return None;
         }
 
+        // If preceded by `<?`, this is the PHP open tag (`<?php`), not
+        // a class/function name — suppress completion entirely.
+        if i >= 2 && chars[i - 2] == '<' && chars[i - 1] == '?' {
+            return None;
+        }
+
         let partial: String = chars[i..col].iter().collect();
         if partial.is_empty() {
             return None;
@@ -1414,10 +1420,7 @@ impl Backend {
     /// class cannot be found or has no constructor.
     fn ctor_params_for(&self, class_name: &str) -> Option<Vec<ParameterInfo>> {
         let cls = self.load_stub_class(class_name)?;
-        let ctor = cls
-            .methods
-            .iter()
-            .find(|m| m.name.eq_ignore_ascii_case("__construct"))?;
+        let ctor = cls.get_method_ci("__construct")?;
         Some(ctor.parameters.clone())
     }
 
@@ -1663,9 +1666,7 @@ impl Backend {
                             // Source 2 has ClassInfo — check __construct
                             // for richer `new` / attribute snippets.
                             let ctor_params: Option<Vec<ParameterInfo>> = if needs_ctor {
-                                cls.methods
-                                    .iter()
-                                    .find(|m| m.name.eq_ignore_ascii_case("__construct"))
+                                cls.get_method_ci("__construct")
                                     .map(|m| m.parameters.clone())
                             } else {
                                 None

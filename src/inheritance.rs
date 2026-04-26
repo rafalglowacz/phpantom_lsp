@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use crate::atom::{Atom, AtomSet, atom};
+use std::collections::HashMap;
 /// Base class inheritance resolution.
 ///
 /// This module handles merging members from parent classes and traits
@@ -50,7 +51,7 @@ impl std::ops::Deref for ClassRef<'_> {
 /// argument-count limit.
 pub(crate) struct TraitContext<'a> {
     /// Generic type arguments for `@use Trait<Type>` declarations.
-    pub use_generics: &'a [(String, Vec<PhpType>)],
+    pub use_generics: &'a [(Atom, Vec<PhpType>)],
     /// `insteadof` precedence declarations.
     pub precedences: &'a [TraitPrecedence],
     /// `as` alias declarations.
@@ -64,20 +65,20 @@ pub(crate) struct TraitContext<'a> {
 /// instead of scanning the full member vectors.
 pub(crate) struct MergeDedup {
     /// Method names already merged.
-    pub methods: HashSet<String>,
+    pub methods: AtomSet,
     /// Property names already merged.
-    pub properties: HashSet<String>,
+    pub properties: AtomSet,
     /// Constant names already merged.
-    pub constants: HashSet<String>,
+    pub constants: AtomSet,
 }
 
 impl MergeDedup {
     /// Build from the members already present on a `ClassInfo`.
     fn from_class(class: &ClassInfo) -> Self {
         Self {
-            methods: class.methods.iter().map(|m| m.name.clone()).collect(),
-            properties: class.properties.iter().map(|p| p.name.clone()).collect(),
-            constants: class.constants.iter().map(|c| c.name.clone()).collect(),
+            methods: class.methods.iter().map(|m| m.name).collect(),
+            properties: class.properties.iter().map(|p| p.name).collect(),
+            constants: class.constants.iter().map(|c| c.name).collect(),
         }
     }
 }
@@ -185,8 +186,23 @@ pub(crate) fn enrich_method_from_ancestor(existing: &mut MethodInfo, ancestor: &
         existing.type_assertions = ancestor.type_assertions.clone();
     }
 
-    // ── Parameters (by position) ────────────────────────────────
-    enrich_parameters_from_ancestor(&mut existing.parameters, &ancestor.parameters);
+    // ── Parameters ──────────────────────────────────────────────
+    // For constructors, use **name-based** matching instead of
+    // positional.  PHP constructors don't follow Liskov substitution
+    // — a child constructor can have a completely different signature
+    // (different parameter count, order, types).  Positional
+    // enrichment would incorrectly map ancestor param types onto
+    // unrelated child params (e.g. Exception's `$code` type `int`
+    // onto a child's `$message` param at position 1).
+    //
+    // This follows PHPStan's `PhpDocInheritanceResolver`: for
+    // `__construct` the positional parameter name list falls back to
+    // the child's own names, so only same-named parameters inherit.
+    if existing.name == "__construct" {
+        enrich_constructor_parameters_by_name(&mut existing.parameters, &ancestor.parameters);
+    } else {
+        enrich_parameters_from_ancestor(&mut existing.parameters, &ancestor.parameters);
+    }
 
     // ── Descriptions ────────────────────────────────────────────
     if existing.description.is_none() && ancestor.description.is_some() {
@@ -208,16 +224,66 @@ fn enrich_parameters_from_ancestor(
     ancestor_params: &[ParameterInfo],
 ) {
     for (existing_param, ancestor_param) in existing_params.iter_mut().zip(ancestor_params) {
-        // Type hint enrichment
-        if lacks_docblock_override(&existing_param.type_hint, &existing_param.native_type_hint)
-            && ancestor_param.type_hint.is_some()
+        enrich_single_parameter(existing_param, ancestor_param);
+    }
+}
+
+/// Enrich constructor parameters from ancestor parameters, matched by name.
+///
+/// Unlike regular methods (which follow Liskov substitution and can
+/// safely use positional matching), constructors can have completely
+/// different signatures.  Only parameters with the **same name** in
+/// both the child and ancestor are enriched.
+fn enrich_constructor_parameters_by_name(
+    existing_params: &mut [ParameterInfo],
+    ancestor_params: &[ParameterInfo],
+) {
+    for existing_param in existing_params.iter_mut() {
+        if let Some(ancestor_param) = ancestor_params
+            .iter()
+            .find(|ap| ap.name == existing_param.name)
         {
-            existing_param.type_hint = ancestor_param.type_hint.clone();
+            enrich_single_parameter(existing_param, ancestor_param);
         }
-        // Description enrichment
-        if existing_param.description.is_none() && ancestor_param.description.is_some() {
-            existing_param.description = ancestor_param.description.clone();
-        }
+    }
+}
+
+/// Enrich a single child parameter from an ancestor parameter.
+///
+/// Copies the ancestor's `type_hint` when the child lacks a docblock
+/// override, the ancestor has a richer type, **and** the child's
+/// native type is not a specific concrete type.
+///
+/// PHP allows contravariant parameter types: a concrete class may
+/// declare `?int` where the interface says `int`, or Carbon's
+/// `setTimezone(DateTimeZone|string|int)` may widen DateTime's
+/// `setTimezone(DateTimeZone)`.  In those cases the child's native
+/// type is an intentional widening and must not be narrowed.
+///
+/// However, when the child's native type is a placeholder like
+/// `object` or `mixed` (common in `@implements`/`@extends` generic
+/// patterns where the interface declares `object $entity` and the
+/// `@implements` tag substitutes the template to a concrete type),
+/// the ancestor's enriched type should flow through.
+fn enrich_single_parameter(existing_param: &mut ParameterInfo, ancestor_param: &ParameterInfo) {
+    // Type hint enrichment — the child must lack a docblock override
+    // AND the ancestor must have a richer type (docblock that goes
+    // beyond its native hint).  Additionally, skip enrichment when
+    // the child has a specific native type (not `object`/`mixed`)
+    // because the child's declaration is intentional and may be
+    // wider than the ancestor's (contravariant parameters).
+    let child_has_specific_native = existing_param.native_type_hint.as_ref().is_some_and(|nt| {
+        !nt.is_object() && !nt.is_mixed() && !nt.is_array_like() && !nt.is_iterable()
+    });
+    if !child_has_specific_native
+        && lacks_docblock_override(&existing_param.type_hint, &existing_param.native_type_hint)
+        && ancestor_has_richer_type(&ancestor_param.type_hint, &ancestor_param.native_type_hint)
+    {
+        existing_param.type_hint = ancestor_param.type_hint.clone();
+    }
+    // Description enrichment
+    if existing_param.description.is_none() && ancestor_param.description.is_some() {
+        existing_param.description = ancestor_param.description.clone();
     }
 }
 
@@ -341,15 +407,12 @@ pub(crate) fn resolve_class_with_inheritance(
             && !parent.template_params.is_empty()
             && is_factory_class(parent_name)
         {
-            let factory_fqn = match &current.file_namespace {
-                Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, current.name),
-                _ => current.name.clone(),
-            };
+            let factory_fqn = current.fqn();
             if let Some(model_fqn) = factory_to_model_fqn(&factory_fqn)
                 && class_loader(&model_fqn).is_some()
             {
                 for param in &parent.template_params {
-                    level_subs.insert(param.clone(), PhpType::Named(model_fqn.clone()));
+                    level_subs.insert(param.to_string(), PhpType::Named(model_fqn.clone()));
                 }
             }
         }
@@ -367,7 +430,7 @@ pub(crate) fn resolve_class_with_inheritance(
         //
         // would pass the raw `TKey`/`TValue` template params to the
         // trait instead of the concrete `int`/`DeliveryOption` types.
-        let substituted_use_generics: Vec<(String, Vec<PhpType>)> = if level_subs.is_empty() {
+        let substituted_use_generics: Vec<(Atom, Vec<PhpType>)> = if level_subs.is_empty() {
             parent.use_generics.clone()
         } else {
             parent
@@ -376,7 +439,7 @@ pub(crate) fn resolve_class_with_inheritance(
                 .map(|(name, args)| {
                     let substituted_args: Vec<PhpType> =
                         args.iter().map(|arg| arg.substitute(&level_subs)).collect();
-                    (name.clone(), substituted_args)
+                    (*name, substituted_args)
                 })
                 .collect()
         };
@@ -402,23 +465,29 @@ pub(crate) fn resolve_class_with_inheritance(
             if method.visibility == Visibility::Private {
                 continue;
             }
-            let mut ancestor_method = method.clone();
-            if !level_subs.is_empty() {
-                apply_substitution_to_method(&mut ancestor_method, &level_subs);
-            }
-            if !dedup.methods.insert(method.name.clone()) {
+            if !dedup.methods.insert(method.name) {
                 // Child already has this method — enrich it from parent.
+                let mut ancestor_method = (**method).clone();
+                if !level_subs.is_empty() {
+                    apply_substitution_to_method(&mut ancestor_method, &level_subs);
+                }
                 if let Some(existing) = merged
                     .methods
                     .make_mut()
                     .iter_mut()
                     .find(|m| m.name == method.name)
                 {
-                    enrich_method_from_ancestor(existing, &ancestor_method);
+                    enrich_method_from_ancestor(Arc::make_mut(existing), &ancestor_method);
                 }
                 continue;
             }
-            merged.methods.push(ancestor_method);
+            if level_subs.is_empty() {
+                merged.methods.push(Arc::clone(method));
+            } else {
+                let mut ancestor_method = (**method).clone();
+                apply_substitution_to_method(&mut ancestor_method, &level_subs);
+                merged.methods.push(Arc::new(ancestor_method));
+            }
         }
 
         // Merge parent properties — same enrichment logic.
@@ -430,7 +499,7 @@ pub(crate) fn resolve_class_with_inheritance(
             if !level_subs.is_empty() {
                 apply_substitution_to_property(&mut ancestor_property, &level_subs);
             }
-            if !dedup.properties.insert(property.name.clone()) {
+            if !dedup.properties.insert(property.name) {
                 // Child already has this property — enrich it from parent.
                 if let Some(existing) = merged
                     .properties
@@ -450,7 +519,7 @@ pub(crate) fn resolve_class_with_inheritance(
             if constant.visibility == Visibility::Private {
                 continue;
             }
-            if !dedup.constants.insert(constant.name.clone()) {
+            if !dedup.constants.insert(constant.name) {
                 continue;
             }
             merged.constants.push(constant.clone());
@@ -483,7 +552,16 @@ pub(crate) fn resolve_method_return_type(
     method_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
-    let merged = crate::virtual_members::resolve_class_fully(class, class_loader);
+    // Try the class directly first — it may already be fully resolved
+    // with generic substitutions applied.  Falling through to the cache
+    // would return the un-substituted base class (keyed by bare FQN),
+    // losing template parameter substitutions like TModel → Product.
+    if let Some(m) = class.get_method(method_name) {
+        return m.return_type.clone();
+    }
+    let cache = crate::virtual_members::active_resolved_class_cache();
+    let merged =
+        crate::virtual_members::resolve_class_fully_maybe_cached(class, class_loader, cache);
     merged
         .methods
         .iter()
@@ -507,7 +585,14 @@ pub(crate) fn resolve_property_type_hint(
     prop_name: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<PhpType> {
-    let merged = crate::virtual_members::resolve_class_fully(class, class_loader);
+    // Try the class directly first — it may already have the property
+    // with generic substitutions applied.
+    if let Some(p) = class.properties.iter().find(|p| p.name == prop_name) {
+        return p.type_hint.clone();
+    }
+    let cache = crate::virtual_members::active_resolved_class_cache();
+    let merged =
+        crate::virtual_members::resolve_class_fully_maybe_cached(class, class_loader, cache);
     merged
         .properties
         .iter()
@@ -534,7 +619,7 @@ pub(crate) fn resolve_property_type_hint(
 /// template parameter types replaced with the concrete types.
 fn merge_traits_into(
     merged: &mut ClassInfo,
-    trait_names: &[String],
+    trait_names: &[Atom],
     ctx: &TraitContext<'_>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     depth: u32,
@@ -567,14 +652,11 @@ fn merge_traits_into(
             && is_has_factory_trait(trait_name)
             && extends_eloquent_model(merged, class_loader)
         {
-            let model_fqn = match &merged.file_namespace {
-                Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, merged.name),
-                _ => merged.name.clone(),
-            };
+            let model_fqn = merged.fqn();
             let factory_fqn = model_to_factory_fqn(&model_fqn);
             if class_loader(&factory_fqn).is_some() {
                 for param in &trait_info.template_params {
-                    trait_subs.insert(param.clone(), PhpType::Named(factory_fqn.clone()));
+                    trait_subs.insert(param.to_string(), PhpType::Named(factory_fqn.clone()));
                 }
             }
         }
@@ -636,10 +718,10 @@ fn merge_traits_into(
                 if method.visibility == Visibility::Private {
                     continue;
                 }
-                if !dedup.methods.insert(method.name.clone()) {
+                if !dedup.methods.insert(method.name) {
                     continue;
                 }
-                merged.methods.push(method.clone());
+                merged.methods.push(Arc::clone(method));
             }
 
             // Merge parent properties
@@ -647,7 +729,7 @@ fn merge_traits_into(
                 if property.visibility == Visibility::Private {
                     continue;
                 }
-                if !dedup.properties.insert(property.name.clone()) {
+                if !dedup.properties.insert(property.name) {
                     continue;
                 }
                 merged.properties.push(property.clone());
@@ -658,7 +740,7 @@ fn merge_traits_into(
                 if constant.visibility == Visibility::Private {
                     continue;
                 }
-                if !dedup.constants.insert(constant.name.clone()) {
+                if !dedup.constants.insert(constant.name) {
                     continue;
                 }
                 merged.constants.push(constant.clone());
@@ -677,19 +759,18 @@ fn merge_traits_into(
             // TraitB's methods, `method` should be skipped.
             let excluded = ctx.precedences.iter().any(|p| {
                 p.method_name == method.name
-                    && p.insteadof.iter().any(|excluded_trait| {
-                        excluded_trait == trait_name
-                            || short_name(excluded_trait) == short_name(trait_name)
-                    })
+                    && p.insteadof
+                        .iter()
+                        .any(|excluded_trait| excluded_trait == trait_name)
             });
             if excluded {
                 continue;
             }
 
-            if !dedup.methods.insert(method.name.clone()) {
+            if !dedup.methods.insert(method.name) {
                 continue;
             }
-            let mut method = method.clone();
+            let mut method = (**method).clone();
 
             // Apply visibility-only `as` changes (no alias name).
             // For example, `TraitA::method as protected` changes the
@@ -700,10 +781,7 @@ fn merge_traits_into(
                     && let Some(vis) = alias.visibility
                 {
                     // Check trait name matches (if specified)
-                    let name_matches = alias
-                        .trait_name
-                        .as_ref()
-                        .is_none_or(|t| t == trait_name || short_name(t) == short_name(trait_name));
+                    let name_matches = alias.trait_name.as_ref().is_none_or(|t| t == trait_name);
                     if name_matches {
                         method.visibility = vis;
                     }
@@ -713,12 +791,12 @@ fn merge_traits_into(
             if !trait_subs.is_empty() {
                 apply_substitution_to_method(&mut method, &trait_subs);
             }
-            merged.methods.push(method);
+            merged.methods.push(Arc::new(method));
         }
 
         // Merge trait properties — apply substitution.
         for property in &trait_info.properties {
-            if !dedup.properties.insert(property.name.clone()) {
+            if !dedup.properties.insert(property.name) {
                 continue;
             }
             let mut property = property.clone();
@@ -730,7 +808,7 @@ fn merge_traits_into(
 
         // Merge trait constants
         for constant in &trait_info.constants {
-            if !dedup.constants.insert(constant.name.clone()) {
+            if !dedup.constants.insert(constant.name) {
                 continue;
             }
             merged.constants.push(constant.clone());
@@ -747,10 +825,7 @@ fn merge_traits_into(
             };
 
             // Check trait name matches (if specified).
-            let name_matches = alias
-                .trait_name
-                .as_ref()
-                .is_none_or(|t| t == trait_name || short_name(t) == short_name(trait_name));
+            let name_matches = alias.trait_name.as_ref().is_none_or(|t| t == trait_name);
             if !name_matches {
                 continue;
             }
@@ -766,19 +841,20 @@ fn merge_traits_into(
             };
 
             // Skip if an alias with this name already exists.
-            if !dedup.methods.insert(alias_name.clone()) {
+            let alias_atom = atom(alias_name);
+            if !dedup.methods.insert(alias_atom) {
                 continue;
             }
 
-            let mut aliased = source_method.clone();
-            aliased.name = alias_name.clone();
+            let mut aliased = (**source_method).clone();
+            aliased.name = alias_atom;
             if let Some(vis) = alias.visibility {
                 aliased.visibility = vis;
             }
             if !trait_subs.is_empty() {
                 apply_substitution_to_method(&mut aliased, &trait_subs);
             }
-            merged.methods.push(aliased);
+            merged.methods.push(Arc::new(aliased));
         }
     }
 }
@@ -809,7 +885,7 @@ fn is_factory_class(class_name: &str) -> bool {
 fn build_trait_substitution_map(
     trait_name: &str,
     trait_info: &ClassInfo,
-    use_generics: &[(String, Vec<PhpType>)],
+    use_generics: &[(Atom, Vec<PhpType>)],
 ) -> HashMap<String, PhpType> {
     if trait_info.template_params.is_empty() || use_generics.is_empty() {
         return HashMap::new();
@@ -834,7 +910,7 @@ fn build_trait_substitution_map(
     let mut map = HashMap::new();
     for (i, param_name) in trait_info.template_params.iter().enumerate() {
         if let Some(arg) = type_args.get(i) {
-            map.insert(param_name.clone(), arg.clone());
+            map.insert(param_name.to_string(), arg.clone());
         }
     }
     map
@@ -907,7 +983,7 @@ fn build_substitution_map(
             } else {
                 arg.substitute(active_subs)
             };
-            map.insert(param_name.clone(), resolved);
+            map.insert(param_name.to_string(), resolved);
         }
     }
 
@@ -1044,14 +1120,57 @@ pub(crate) fn build_generic_subs(
     let mut subs = HashMap::new();
     for (i, param_name) in class.template_params.iter().enumerate() {
         if i < offset {
+            // Skipped (right-aligned) params: fall back to their
+            // declared upper bound or `mixed` so the raw template
+            // name never leaks into downstream consumers.
+            let fallback = class
+                .template_param_bounds
+                .get(param_name)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed);
+            subs.insert(param_name.to_string(), fallback);
             continue;
         }
         if let Some(arg) = type_args.get(i - offset) {
-            subs.insert(param_name.clone(), arg.clone());
+            subs.insert(param_name.to_string(), arg.clone());
+        } else {
+            // Unbound param (more template params than type args and
+            // right-alignment didn't apply): use upper bound or `mixed`.
+            let fallback = class
+                .template_param_bounds
+                .get(param_name)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed);
+            subs.insert(param_name.to_string(), fallback);
         }
     }
 
     subs
+}
+
+/// Build default type arguments for a class whose template parameters
+/// have no concrete bindings (e.g. `new Collection()` without a generic
+/// annotation).
+///
+/// Each template parameter is mapped to its declared upper bound
+/// (`@template T of Foo` → `Foo`) or `mixed` when no bound exists.
+/// The returned vector is ordered to match `class.template_params`.
+///
+/// This follows PHPStan's `resolveToBounds()` semantics: unbound
+/// template parameters are erased to their bounds so that downstream
+/// consumers never see raw template names like `TValue`.
+pub(crate) fn default_type_args(class: &ClassInfo) -> Vec<PhpType> {
+    class
+        .template_params
+        .iter()
+        .map(|p| {
+            class
+                .template_param_bounds
+                .get(p)
+                .cloned()
+                .unwrap_or_else(PhpType::mixed)
+        })
+        .collect()
 }
 
 /// Apply explicit generic type arguments to a class's members.
@@ -1079,7 +1198,7 @@ pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[PhpType]) -> Cl
 
     let mut result = class.clone();
     for method in result.methods.make_mut() {
-        apply_substitution_to_method(method, &subs);
+        apply_substitution_to_method(Arc::make_mut(method), &subs);
     }
     for property in result.properties.make_mut() {
         apply_substitution_to_property(property, &subs);
@@ -1120,7 +1239,7 @@ fn is_key_like_bound(bound: &PhpType) -> bool {
 /// Each entry is `(ClassName, [TypeArg1, TypeArg2, …])`.  Only the type
 /// arguments are substituted; the class name is left unchanged.
 fn apply_substitution_to_generics(
-    generics: &mut [(String, Vec<PhpType>)],
+    generics: &mut [(Atom, Vec<PhpType>)],
     subs: &HashMap<String, PhpType>,
 ) {
     for (_class_name, type_args) in generics.iter_mut() {

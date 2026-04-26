@@ -19,6 +19,8 @@ pub(crate) mod error_format;
 mod functions;
 mod use_statements;
 
+use crate::atom::atom;
+
 use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
@@ -254,7 +256,7 @@ pub(crate) fn extract_language_level_type(
     attribute_lists: &Sequence<'_, attribute::AttributeList<'_>>,
     ctx: &DocblockCtx<'_>,
     php_version: PhpVersion,
-) -> Option<String> {
+) -> Option<PhpType> {
     for attr_list in attribute_lists.iter() {
         for attr in attr_list.attributes.iter() {
             if !ctx.is_language_level_type_aware_attr(attr.name.last_segment()) {
@@ -289,14 +291,21 @@ pub(crate) fn extract_language_level_type(
             }
 
             if let Some((_, type_str)) = best {
-                let s = type_str.to_string();
                 // Empty string means "no type" (untyped in older PHP).
-                return if s.is_empty() { None } else { Some(s) };
+                return if type_str.is_empty() {
+                    None
+                } else {
+                    Some(PhpType::parse(type_str))
+                };
             }
 
             // No version matched — use the default.
             if let Some(ref d) = default_type {
-                return if d.is_empty() { None } else { Some(d.clone()) };
+                return if d.is_empty() {
+                    None
+                } else {
+                    Some(PhpType::parse(d))
+                };
             }
 
             // Attribute present but couldn't parse — return None to keep
@@ -314,7 +323,7 @@ pub(crate) fn extract_language_level_type_for_param(
     param: &function_like::parameter::FunctionLikeParameter<'_>,
     ctx: &DocblockCtx<'_>,
     php_version: PhpVersion,
-) -> Option<String> {
+) -> Option<PhpType> {
     extract_language_level_type(&param.attribute_lists, ctx, php_version)
 }
 
@@ -904,7 +913,7 @@ pub(crate) fn extract_parameters(
             }
         })
         .map(|param| {
-            let name = param.variable.name.to_string();
+            let name = atom(param.variable.name);
             let is_variadic = param.ellipsis.is_some();
             let is_reference = param.ampersand.is_some();
             let has_default = param.default_value.is_some();
@@ -917,9 +926,9 @@ pub(crate) fn extract_parameters(
             // with the version-appropriate type string.
             let type_hint = if let Some(ver) = php_version
                 && let Some(ctx) = doc_ctx
-                && let Some(override_type) = extract_language_level_type_for_param(param, ctx, ver)
             {
-                Some(PhpType::parse(&override_type))
+                extract_language_level_type_for_param(param, ctx, ver)
+                    .or_else(|| native_type_hint.clone())
             } else {
                 native_type_hint.clone()
             };
@@ -981,9 +990,9 @@ pub(crate) fn extract_property_info(property: &Property) -> Vec<PropertyInfo> {
             // Strip the leading `$` for property names since PHP access
             // syntax is `$this->name` not `$this->$name`.
             let name = if let Some(stripped) = raw_name.strip_prefix('$') {
-                stripped.to_string()
+                atom(stripped)
             } else {
-                raw_name
+                atom(&raw_name)
             };
 
             PropertyInfo {

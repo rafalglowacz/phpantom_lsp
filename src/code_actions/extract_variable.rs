@@ -392,19 +392,24 @@ fn find_last_member_access(expr: &str) -> Option<String> {
             b')' => depth_paren -= 1,
             b'[' => depth_bracket += 1,
             b']' => depth_bracket -= 1,
-            b'-' if depth_paren == 0 && depth_bracket == 0 => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                    last_arrow_end = Some(i + 2);
-                    i += 2;
-                    continue;
-                }
+            b'-' if depth_paren == 0
+                && depth_bracket == 0
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b'>' =>
+            {
+                last_arrow_end = Some(i + 2);
+                i += 2;
+                continue;
             }
-            b'?' if depth_paren == 0 && depth_bracket == 0 => {
-                if i + 2 < bytes.len() && bytes[i + 1] == b'-' && bytes[i + 2] == b'>' {
-                    last_arrow_end = Some(i + 3);
-                    i += 3;
-                    continue;
-                }
+            b'?' if depth_paren == 0
+                && depth_bracket == 0
+                && i + 2 < bytes.len()
+                && bytes[i + 1] == b'-'
+                && bytes[i + 2] == b'>' =>
+            {
+                last_arrow_end = Some(i + 3);
+                i += 3;
+                continue;
             }
             _ => {}
         }
@@ -453,10 +458,12 @@ fn find_top_level_double_colon(expr: &str) -> Option<usize> {
             b')' => depth_paren -= 1,
             b'[' => depth_bracket += 1,
             b']' => depth_bracket -= 1,
-            b':' if depth_paren == 0 && depth_bracket == 0 => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b':' {
-                    return Some(i);
-                }
+            b':' if depth_paren == 0
+                && depth_bracket == 0
+                && i + 1 < bytes.len()
+                && bytes[i + 1] == b':' =>
+            {
+                return Some(i);
             }
             _ => {}
         }
