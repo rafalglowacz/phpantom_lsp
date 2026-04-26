@@ -522,6 +522,7 @@ impl Backend {
                 is_method_call,
                 ..
             } => {
+                let meta_guard = self.phpstorm_meta.read();
                 let rctx = ResolutionCtx {
                     current_class,
                     all_classes: &ctx.classes,
@@ -530,6 +531,7 @@ impl Backend {
                     class_loader: &class_loader,
                     resolved_class_cache: Some(&self.resolved_class_cache),
                     function_loader: Some(&function_loader),
+                    phpstorm_meta: Some(&meta_guard),
                     scope_var_resolver: None,
                 };
 
@@ -952,6 +954,8 @@ impl Backend {
             constant_loader: Some(&constant_loader),
         };
 
+        let meta_guard = self.phpstorm_meta.read();
+
         // Use the dummy class approach same as completion for top-level code
         let dummy_class;
         let effective_class = match current_class {
@@ -973,6 +977,7 @@ impl Backend {
             &ctx.classes,
             &class_loader,
             loaders,
+            Some(&meta_guard),
         ) {
             // When the type is a template parameter, show its variance
             // and bound (e.g. "**template-covariant** `TNode` of `AstNode`")
@@ -1000,6 +1005,7 @@ impl Backend {
             cursor_offset,
             &class_loader,
             loaders,
+            Some(&meta_guard),
         );
 
         if resolved.is_empty() {

@@ -71,6 +71,7 @@ impl Backend {
         let class_loader = self.class_loader_with(&local_classes, &file_use_map, &file_namespace);
         let function_loader = self.function_loader_with(&file_use_map, &file_namespace);
         let cache = &self.resolved_class_cache;
+        let meta_guard = self.phpstorm_meta.read();
 
         // ── Walk every symbol span ──────────────────────────────────────
         for span in &symbol_map.spans {
@@ -165,6 +166,7 @@ impl Backend {
                                     class_loader: &class_loader,
                                     resolved_class_cache: Some(cache),
                                     function_loader: Some(&function_loader),
+                                    phpstorm_meta: Some(&meta_guard),
                                     scope_var_resolver: None,
                                 };
 

@@ -114,6 +114,7 @@ pub(crate) fn resolve_variable_types(
     cursor_offset: u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Vec<ResolvedType> {
     // ── Diagnostic scope cache fast path ─────────────────────────
     // When the diagnostic scope cache is active (populated by
@@ -151,6 +152,7 @@ pub(crate) fn resolve_variable_types(
             enclosing_return_type: None,
             top_level_scope: None,
             branch_aware: false,
+            phpstorm_meta,
             match_arm_narrowing: HashMap::new(),
 
             scope_var_resolver: None,
@@ -176,6 +178,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
     cursor_offset: u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Vec<ResolvedType> {
     resolve_variable_types(
         var_name,
@@ -185,6 +188,7 @@ pub(crate) fn resolve_variable_types_branch_aware(
         cursor_offset,
         class_loader,
         loaders,
+        phpstorm_meta,
     )
 }
 
@@ -215,6 +219,7 @@ pub(in crate::completion) fn resolve_variable_in_statements<'b>(
             resolved_class_cache: ctx.resolved_class_cache,
             enclosing_return_type: None,
             top_level_scope: None,
+            phpstorm_meta: ctx.phpstorm_meta,
         };
         let mut tl_scope = super::forward_walk::ScopeState::new();
         super::forward_walk::walk_top_level_for_globals(
@@ -247,6 +252,7 @@ pub(in crate::completion) fn resolve_variable_in_statements<'b>(
             enclosing_return_type: ctx.enclosing_return_type.clone(),
             top_level_scope,
             branch_aware: ctx.branch_aware,
+            phpstorm_meta: ctx.phpstorm_meta,
             match_arm_narrowing: ctx.match_arm_narrowing.clone(),
             scope_var_resolver: ctx.scope_var_resolver,
         };
@@ -352,6 +358,7 @@ pub(in crate::completion) fn resolve_variable_in_statements<'b>(
             resolved_class_cache: ctx.resolved_class_cache,
             enclosing_return_type: None,
             top_level_scope: None,
+            phpstorm_meta: ctx.phpstorm_meta,
         };
         if let Some(fw_results) =
             super::forward_walk::resolve_in_top_level(ctx.var_name, stmts.iter().copied(), &fw_ctx)
@@ -619,6 +626,7 @@ fn try_resolve_in_function(
         resolved_class_cache: ctx.resolved_class_cache,
         enclosing_return_type: enclosing_ret,
         top_level_scope: ctx.top_level_scope.clone(),
+        phpstorm_meta: ctx.phpstorm_meta,
     };
     Some(
         super::forward_walk::resolve_in_function_body(ctx.var_name, func, &fw_ctx)
@@ -742,6 +750,7 @@ fn resolve_variable_in_members<'b>(
                         resolved_class_cache: ctx.resolved_class_cache,
                         enclosing_return_type: enclosing_ret,
                         top_level_scope: ctx.top_level_scope.clone(),
+                        phpstorm_meta: ctx.phpstorm_meta,
                     };
                     let method_name_str = method.name.value.to_string();
                     let is_static = method.modifiers.contains_static();
@@ -813,6 +822,7 @@ fn resolve_abstract_method_param(
             resolved_class_cache: ctx.resolved_class_cache,
             enclosing_return_type: None,
             top_level_scope: ctx.top_level_scope.clone(),
+            phpstorm_meta: ctx.phpstorm_meta,
         };
 
         return super::forward_walk::resolve_param_type(
@@ -1424,6 +1434,7 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
                 offset as u32,
                 ctx.class_loader,
                 Loaders::with_function(ctx.function_loader()),
+                ctx.phpstorm_meta,
             )
         };
         if !resolved.is_empty() {

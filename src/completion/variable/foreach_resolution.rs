@@ -37,10 +37,6 @@ pub(crate) fn resolve_expression_type<'b>(
     Some(ResolvedType::types_joined(&resolved))
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────
-
-// ─── Foreach Resolution ─────────────────────────────────────────────
-
 /// Known interface/class names whose generic parameters describe
 /// iteration types in PHP's `foreach`.
 const ITERABLE_IFACE_NAMES: &[&str] = &[

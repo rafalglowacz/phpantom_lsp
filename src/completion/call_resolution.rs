@@ -40,6 +40,7 @@ use crate::completion::variable::rhs_resolution::{TemplateBindingMode, classify_
 use crate::completion::variable::{ARRAY_ELEMENT_FUNCS, ARRAY_PRESERVING_FUNCS};
 use crate::docblock;
 use crate::php_type::PhpType;
+use crate::phpstorm_meta::{MapLookupKey, PhpStormMetaIndex, PhpStormOverrideDirective};
 use crate::subject_expr::SubjectExpr;
 use crate::types::ClassLikeKind;
 use crate::types::*;
@@ -83,6 +84,8 @@ pub(super) struct MethodReturnCtx<'a> {
     /// When `true`, the magic-method fallback checks `__callStatic`
     /// instead of `__call`.
     pub is_static: bool,
+    /// Call-site resolution context (for PhpStorm `.phpstorm.meta.php`).
+    pub resolution_ctx: Option<&'a ResolutionCtx<'a>>,
 }
 
 /// Build a [`VarClassStringResolver`] closure from a [`ResolutionCtx`].
@@ -739,6 +742,7 @@ impl Backend {
         let cursor_offset = position_to_offset(content, position);
         let current_class = find_class_at_offset(&file_ctx.classes, cursor_offset);
 
+        let meta_guard = self.phpstorm_meta.read();
         let rctx = ResolutionCtx {
             current_class,
             all_classes: &file_ctx.classes,
@@ -747,6 +751,7 @@ impl Backend {
             class_loader: &class_loader,
             resolved_class_cache: Some(&self.resolved_class_cache),
             function_loader: Some(&function_loader_cl),
+            phpstorm_meta: Some(&meta_guard),
             scope_var_resolver: None,
         };
 
@@ -930,6 +935,7 @@ impl Backend {
                         cache: ctx.resolved_class_cache,
                         calling_class_name: ctx.current_class.map(|c| c.name.as_str()),
                         is_static: false,
+                        resolution_ctx: Some(ctx),
                     };
                     results.extend(Self::resolve_method_return_types_with_args(
                         owner,
@@ -988,6 +994,7 @@ impl Backend {
                         cache: ctx.resolved_class_cache,
                         calling_class_name: ctx.current_class.map(|c| c.name.as_str()),
                         is_static: true,
+                        resolution_ctx: Some(ctx),
                     };
                     return Self::resolve_method_return_types_with_args(
                         owner,
@@ -1111,12 +1118,27 @@ impl Backend {
                         if let Some(ref mut hint_out) = return_type_hint_out {
                             **hint_out = Some(ret.clone());
                         }
-                        return super::type_resolution::type_hint_to_classes_typed(
+                        let classes = super::type_resolution::type_hint_to_classes_typed(
                             ret,
                             "",
                             ctx.all_classes,
                             ctx.class_loader,
                         );
+                        if !classes.is_empty() {
+                            return classes;
+                        }
+                    }
+
+                    if let Some(meta) = ctx.phpstorm_meta {
+                        if let Some(v) = Self::phpstorm_try_function_override(
+                            meta,
+                            &func_info,
+                            text_args,
+                            ctx,
+                        ) && !v.is_empty()
+                        {
+                            return v;
+                        }
                     }
                 }
 
@@ -1362,12 +1384,36 @@ impl Backend {
                 if ret.is_self_like() {
                     return vec![Arc::new(class_info.clone())];
                 }
-                return super::type_resolution::type_hint_to_classes_typed(
+                let classes = super::type_resolution::type_hint_to_classes_typed(
                     ret,
                     &class_info.fqn(),
                     all_classes,
                     class_loader,
                 );
+                if !classes.is_empty() {
+                    return classes;
+                }
+            }
+
+            // JetBrains PhpStorm `.phpstorm.meta.php` overrides when no
+            // concrete class list was produced above.
+            let lookup_key = if method.name == "__call" || method.name == "__callStatic" {
+                method.name.as_str()
+            } else {
+                method_name
+            };
+            if let Some(rctx) = mr_ctx.resolution_ctx
+                && let Some(meta) = rctx.phpstorm_meta
+                && let Some(v) = Self::phpstorm_try_method_override(
+                    meta,
+                    class_info,
+                    lookup_key,
+                    text_args,
+                    mr_ctx,
+                    rctx,
+                ) && !v.is_empty()
+            {
+                return v;
             }
             // Try body return type inference as a last resort.
             // Only for real (non-virtual, non-stub) methods that genuinely
@@ -1970,6 +2016,33 @@ impl Backend {
         subs
     }
 
+    /// Expand a bare class name using the current file's `use` map and namespace
+    /// (same idea as [`Backend::resolve_class_name`] but returns an FQN string).
+    fn expand_unqualified_class_name_via_file(short: &str, ctx: &ResolutionCtx<'_>) -> Option<String> {
+        crate::parser::with_parsed_program(ctx.content, "expand_unqualified_class_name_via_file", |program, _| {
+            let mut use_map = HashMap::new();
+            Backend::extract_use_statements_from_statements(program.statements.iter(), &mut use_map);
+            let file_ns = Backend::extract_namespace_from_statements(program.statements.iter());
+
+            if let Some(fqn) = use_map.get(short) {
+                return Some(crate::phpstorm_meta::normalize_fqn(fqn));
+            }
+            if let Some(c) = find_class_by_name(ctx.all_classes, short) {
+                return Some(c.fqn().to_string());
+            }
+            if let Some(ns) = file_ns {
+                let qualified = format!("{}\\{}", ns, short);
+                if (ctx.class_loader)(&qualified).is_some() {
+                    return Some(qualified);
+                }
+            }
+            if (ctx.class_loader)(short).is_some() {
+                return Some(short.to_string());
+            }
+            None
+        })
+    }
+
     /// Resolve an argument text string to a type name.
     ///
     /// Handles common patterns:
@@ -1997,7 +2070,7 @@ impl Backend {
             return Some(ty);
         }
 
-        // ClassName::class → ClassName
+        // ClassName::class → ClassName (expand `use` imports + namespace for bare names)
         if let Some(name) = trimmed.strip_suffix("::class")
             && !name.is_empty()
             && name
@@ -2006,6 +2079,9 @@ impl Backend {
         {
             let resolved_name = if let Some(cls) = (ctx.class_loader)(name) {
                 cls.fqn().to_string()
+            } else if !name.contains('\\') {
+                Self::expand_unqualified_class_name_via_file(name, ctx)
+                    .unwrap_or_else(|| name.to_string())
             } else {
                 name.to_string()
             };
@@ -2053,6 +2129,261 @@ impl Backend {
             return Some(ty);
         }
 
+        None
+    }
+
+    fn phpstorm_try_method_override(
+        meta: &PhpStormMetaIndex,
+        class_info: &ClassInfo,
+        lookup_method: &str,
+        text_args: &str,
+        mr_ctx: &MethodReturnCtx<'_>,
+        rctx: &ResolutionCtx<'_>,
+    ) -> Option<Vec<Arc<ClassInfo>>> {
+        let key = (
+            crate::phpstorm_meta::normalize_fqn(&class_info.fqn()),
+            lookup_method.to_string(),
+        );
+        let dir = meta.method_overrides.get(&key)?;
+        Some(Self::phpstorm_apply_directive(
+            dir,
+            text_args,
+            &class_info.name,
+            mr_ctx,
+            rctx,
+        ))
+    }
+
+    fn phpstorm_try_function_override(
+        meta: &PhpStormMetaIndex,
+        func: &FunctionInfo,
+        text_args: &str,
+        rctx: &ResolutionCtx<'_>,
+    ) -> Option<Vec<Arc<ClassInfo>>> {
+        let fqn = Self::function_info_fqn(func);
+        let dir = meta.function_overrides.get(&fqn)?;
+        let empty_subs: HashMap<String, PhpType> = HashMap::new();
+        let mr_ctx = MethodReturnCtx {
+            all_classes: rctx.all_classes,
+            class_loader: rctx.class_loader,
+            template_subs: &empty_subs,
+            var_resolver: None,
+            cache: rctx.resolved_class_cache,
+            calling_class_name: rctx.current_class.map(|c| c.name.as_str()),
+            is_static: false,
+            resolution_ctx: Some(rctx),
+        };
+        Some(Self::phpstorm_apply_directive(
+            dir,
+            text_args,
+            "",
+            &mr_ctx,
+            rctx,
+        ))
+    }
+
+    fn function_info_fqn(func: &FunctionInfo) -> String {
+        let base = match &func.namespace {
+            Some(ns) => format!("{}\\{}", ns, func.name),
+            None => func.name.to_string(),
+        };
+        crate::phpstorm_meta::normalize_fqn(&base)
+    }
+
+    fn phpstorm_apply_directive(
+        dir: &PhpStormOverrideDirective,
+        text_args: &str,
+        owner_class: &str,
+        mr_ctx: &MethodReturnCtx<'_>,
+        rctx: &ResolutionCtx<'_>,
+    ) -> Vec<Arc<ClassInfo>> {
+        match dir {
+            PhpStormOverrideDirective::Type { arg_index } => {
+                let args = split_text_args(text_args);
+                let Some(arg) = args.get(*arg_index).map(|s| s.trim()) else {
+                    return vec![];
+                };
+                let Some(ty) = Self::resolve_arg_text_to_type(arg, rctx) else {
+                    return vec![];
+                };
+                super::type_resolution::type_hint_to_classes_typed(
+                    &ty,
+                    owner_class,
+                    mr_ctx.all_classes,
+                    mr_ctx.class_loader,
+                )
+            }
+            PhpStormOverrideDirective::ElementType { arg_index } => {
+                let args = split_text_args(text_args);
+                let Some(arg) = args.get(*arg_index).map(|s| s.trim()) else {
+                    return vec![];
+                };
+                // Single-element array literal: `[new Foo]` / `[new \Ns\Foo]`
+                let single_new_in_array = {
+                    let a = arg.trim();
+                    if a.starts_with('[')
+                        && a.ends_with(']')
+                        && !a[1..a.len() - 1].contains(',')
+                    {
+                        let inner = a[1..a.len() - 1].trim();
+                        crate::subject_expr::parse_new_expression_class(inner)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(ref ty) = single_new_in_array {
+                    let parsed = PhpType::parse(ty);
+                    return super::type_resolution::type_hint_to_classes_typed(
+                        &parsed,
+                        owner_class,
+                        mr_ctx.all_classes,
+                        mr_ctx.class_loader,
+                    );
+                }
+                let Some(ty) = Self::resolve_arg_text_to_type(arg, rctx) else {
+                    return vec![];
+                };
+                let Some(el) = ty
+                    .extract_value_type(true)
+                    .or_else(|| ty.extract_value_type(false))
+                else {
+                    return vec![];
+                };
+                super::type_resolution::type_hint_to_classes_typed(
+                    el,
+                    owner_class,
+                    mr_ctx.all_classes,
+                    mr_ctx.class_loader,
+                )
+            }
+            PhpStormOverrideDirective::Map { entries } => Self::phpstorm_resolve_map_classes(
+                entries,
+                text_args,
+                rctx,
+                owner_class,
+                mr_ctx.all_classes,
+                mr_ctx.class_loader,
+            ),
+        }
+    }
+
+    /// PhpStorm `map([...])` values may use `@` as a placeholder meaning "the type of the
+    /// call argument" (same idea as `type(0)` on `override(Class::make(0), …)`).
+    fn phpstorm_map_value_to_classes(
+        type_str: &str,
+        text_args: &str,
+        ctx: &ResolutionCtx<'_>,
+        owner_class: &str,
+        all_classes: &[Arc<ClassInfo>],
+        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    ) -> Vec<Arc<ClassInfo>> {
+        if type_str == "@" {
+            let args = split_text_args(text_args);
+            let Some(arg) = args.first().map(|s| s.trim()) else {
+                return vec![];
+            };
+            let Some(ty) = Self::resolve_arg_text_to_type(arg, ctx) else {
+                return vec![];
+            };
+            return super::type_resolution::type_hint_to_classes_typed(
+                &ty,
+                owner_class,
+                all_classes,
+                class_loader,
+            );
+        }
+        let parsed = PhpType::parse(type_str);
+        super::type_resolution::type_hint_to_classes_typed(
+            &parsed,
+            owner_class,
+            all_classes,
+            class_loader,
+        )
+    }
+
+    fn phpstorm_resolve_map_classes(
+        entries: &[(MapLookupKey, String)],
+        text_args: &str,
+        ctx: &ResolutionCtx<'_>,
+        owner_class: &str,
+        all_classes: &[Arc<ClassInfo>],
+        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    ) -> Vec<Arc<ClassInfo>> {
+        let args = split_text_args(text_args);
+        let arg0 = args.first().map(|s| s.trim()).unwrap_or("");
+        for (key, type_str) in entries {
+            if matches!(key, MapLookupKey::Default) {
+                continue;
+            }
+            if Self::phpstorm_map_key_matches(key, arg0, ctx) {
+                let v = Self::phpstorm_map_value_to_classes(
+                    type_str,
+                    text_args,
+                    ctx,
+                    owner_class,
+                    all_classes,
+                    class_loader,
+                );
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        for (key, type_str) in entries {
+            if matches!(key, MapLookupKey::Default) {
+                return Self::phpstorm_map_value_to_classes(
+                    type_str,
+                    text_args,
+                    ctx,
+                    owner_class,
+                    all_classes,
+                    class_loader,
+                );
+            }
+        }
+        vec![]
+    }
+
+    fn phpstorm_map_key_matches(key: &MapLookupKey, arg_text: &str, ctx: &ResolutionCtx<'_>) -> bool {
+        let t = arg_text.trim();
+        match key {
+            MapLookupKey::Default => false,
+            MapLookupKey::String(s) => {
+                let unq = Self::phpstorm_unquote_string(t);
+                unq.as_deref() == Some(s.as_str()) || t == s.as_str()
+            }
+            MapLookupKey::Int(i) => t.parse::<i64>().ok() == Some(*i),
+            MapLookupKey::ClassConst {
+                class_fqn,
+                constant,
+            } => {
+                if let Some(rest) = t.strip_suffix(constant.as_str())
+                    && rest.ends_with("::")
+                {
+                    let cls_part = rest[..rest.len() - 2].trim();
+                    if let Some(resolved) = Self::resolve_arg_text_to_type(cls_part, ctx)
+                        && let Some(class_name) = resolved.base_name()
+                    {
+                        return crate::phpstorm_meta::normalize_fqn(class_name)
+                            == crate::phpstorm_meta::normalize_fqn(class_fqn);
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn phpstorm_unquote_string(t: &str) -> Option<String> {
+        let t = t.trim();
+        if t.len() >= 2 {
+            let b = t.as_bytes();
+            if b[0] == b'\'' && b[t.len() - 1] == b'\'' {
+                return Some(t[1..t.len() - 1].to_string());
+            }
+            if b[0] == b'"' && b[t.len() - 1] == b'"' {
+                return Some(t[1..t.len() - 1].to_string());
+            }
+        }
         None
     }
 }
@@ -2340,6 +2671,7 @@ impl Backend {
                 ctx.cursor_offset,
                 class_loader,
                 Loaders::with_function(ctx.function_loader),
+                ctx.phpstorm_meta,
             );
             if !resolved.is_empty() {
                 return Some(ResolvedType::types_joined(&resolved));

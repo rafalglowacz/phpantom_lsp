@@ -263,6 +263,10 @@ async fn main() {
                 .with_writer(std::io::stderr)
                 .init();
 
+            tracing::info!(
+                "PHPantom LSP started. Logs go to stderr; indexing runs after initialize/initialized."
+            );
+
             if let Some(addr_str) = cli.tcp {
                 // TCP transport: accept a single connection and serve the LSP over it.
                 let addr = parse_tcp_address(&addr_str);

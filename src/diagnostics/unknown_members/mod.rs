@@ -406,6 +406,7 @@ impl Backend {
             let outcome = subject_cache
                 .entry(cache_key)
                 .or_insert_with(|| {
+                    let meta_guard = self.phpstorm_meta.read();
                     let rctx = ResolutionCtx {
                         current_class,
                         all_classes: &local_classes,
@@ -414,6 +415,7 @@ impl Backend {
                         class_loader: &class_loader,
                         resolved_class_cache: Some(resolved_cache),
                         function_loader: Some(&function_loader),
+                        phpstorm_meta: Some(&meta_guard),
                         scope_var_resolver: None,
                     };
                     resolve_subject_outcome(subject_text, access_kind, &rctx)
@@ -548,6 +550,7 @@ impl Backend {
                     // member on the coarse type and never reach here.
                     let (result, diags) =
                         if result != MemberCheckResult::Ok && is_narrowable_variable {
+                            let meta_guard2 = self.phpstorm_meta.read();
                             let rctx = ResolutionCtx {
                                 current_class,
                                 all_classes: &local_classes,
@@ -556,6 +559,7 @@ impl Backend {
                                 class_loader: &class_loader,
                                 resolved_class_cache: Some(resolved_cache),
                                 function_loader: Some(&function_loader),
+                                phpstorm_meta: Some(&meta_guard2),
                                 scope_var_resolver: None,
                             };
                             let fresh = resolve_subject_outcome(subject_text, access_kind, &rctx);

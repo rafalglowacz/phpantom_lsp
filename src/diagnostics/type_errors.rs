@@ -1390,6 +1390,7 @@ impl Backend {
                         constant_loader: Some(&constant_loader_cl),
                     };
 
+                    let meta_guard = self.phpstorm_meta.read();
                     let var_ctx = VarResolutionCtx {
                         var_name: "",
                         top_level_scope: None,
@@ -1402,6 +1403,7 @@ impl Backend {
                         resolved_class_cache: Some(&self.resolved_class_cache),
                         enclosing_return_type: None,
                         branch_aware: true,
+                        phpstorm_meta: Some(&meta_guard),
                         match_arm_narrowing: HashMap::new(),
                         scope_var_resolver: None,
                     };

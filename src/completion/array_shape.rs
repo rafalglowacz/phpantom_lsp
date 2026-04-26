@@ -520,6 +520,7 @@ impl Backend {
 
         let current_class = find_class_at_offset(&file_ctx.classes, cursor_offset as u32);
         let class_loader = self.class_loader(file_ctx);
+        let meta_guard = self.phpstorm_meta.read();
 
         // 2. Unified variable resolver — handles array literals with
         //    incremental key assignments, push-style assignments, and
@@ -540,6 +541,7 @@ impl Backend {
             cursor_offset as u32,
             &class_loader,
             Loaders::default(),
+            Some(&meta_guard),
         );
         if resolved.is_empty() {
             None

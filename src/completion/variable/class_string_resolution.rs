@@ -53,6 +53,7 @@ pub(in crate::completion) fn resolve_class_string_targets(
                 enclosing_return_type: None,
                 top_level_scope: None,
                 branch_aware: false,
+                phpstorm_meta: None,
                 match_arm_narrowing: Default::default(),
                 scope_var_resolver: None,
             };

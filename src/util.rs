@@ -762,6 +762,8 @@ pub(crate) fn find_class_by_name<'a>(
     all_classes: &'a [Arc<ClassInfo>],
     name: &str,
 ) -> Option<&'a Arc<ClassInfo>> {
+    // Source text often uses a leading `\` for FQCNs; `file_namespace` does not.
+    let name = strip_fqn_prefix(name);
     let short = short_name(name);
 
     if name.contains('\\') {

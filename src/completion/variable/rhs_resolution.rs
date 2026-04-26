@@ -81,15 +81,29 @@ fn resolve_var_types(
         return vec![];
     }
 
-    super::resolution::resolve_variable_types(
-        var_name,
-        ctx.current_class,
-        ctx.all_classes,
-        ctx.content,
-        cursor_offset,
-        ctx.class_loader,
-        Loaders::with_function(ctx.function_loader()),
-    )
+    if ctx.branch_aware {
+        super::resolution::resolve_variable_types_branch_aware(
+            var_name,
+            ctx.current_class,
+            ctx.all_classes,
+            ctx.content,
+            cursor_offset,
+            ctx.class_loader,
+            Loaders::with_function(ctx.function_loader()),
+            ctx.phpstorm_meta,
+        )
+    } else {
+        super::resolution::resolve_variable_types(
+            var_name,
+            ctx.current_class,
+            ctx.all_classes,
+            ctx.content,
+            cursor_offset,
+            ctx.class_loader,
+            Loaders::with_function(ctx.function_loader()),
+            ctx.phpstorm_meta,
+        )
+    }
 }
 
 // ── Match-arm narrowing override ────────────────────────────────────
@@ -1571,6 +1585,7 @@ fn resolve_arg_variable_raw_type(
         rctx.cursor_offset,
         rctx.class_loader,
         Loaders::with_function(rctx.function_loader),
+        rctx.phpstorm_meta,
     );
     if resolved.is_empty() {
         None
@@ -2085,6 +2100,7 @@ fn resolve_rhs_method_call_inner<'b>(
             cache: ctx.resolved_class_cache,
             calling_class_name: Some(&ctx.current_class.name),
             is_static: false,
+            resolution_ctx: Some(&rctx),
         };
         // Recover the effective return type string from the method.
         // Look up the method on the (possibly merged) owner and apply
@@ -2135,25 +2151,35 @@ fn resolve_rhs_method_call_inner<'b>(
         );
         if !results.is_empty() {
             let classes: Vec<Arc<ClassInfo>> = results;
-            // When the method has a conditional return type, the
-            // resolved classes came from evaluating the conditional
-            // (e.g. `$type is class-string<T> ? T : mixed` resolved
-            // to the concrete class).  In that case, using the
-            // method's declared return type (typically `mixed`) as
-            // the type hint would be misleading.  Skip it so that
-            // `from_classes` uses the resolved class names instead.
+            // Skip the declared return type as hint when:
+            // 1. The method has a conditional return type (evaluated conditionally,
+            //    so the declared type like `mixed` would be misleading), or
+            // 2. The declared type is non-class (scalars, `mixed`, etc.) which
+            //    would shadow concrete types resolved via PhpStorm meta or
+            //    template substitution.
             let has_conditional = merged
                 .get_method(&method_name)
                 .is_some_and(|m| m.conditional_return.is_some());
-            let effective_hint = if has_conditional {
+            let informative_hint = if has_conditional {
                 None
             } else {
-                ret_type_string
+                ret_type_string.as_ref().and_then(|hint| {
+                    let resolves_to_class =
+                        !crate::completion::type_resolution::type_hint_to_classes_typed(
+                            hint,
+                            &owner.name,
+                            ctx.all_classes,
+                            ctx.class_loader,
+                        )
+                        .is_empty();
+                    if resolves_to_class { Some(hint.clone()) } else { None }
+                })
             };
-            return match effective_hint {
+            let result = match informative_hint {
                 Some(hint) => ResolvedType::from_classes_with_hint(classes, hint),
                 None => ResolvedType::from_classes(classes),
             };
+            return result;
         }
 
         // The method has a return type string but `type_hint_to_classes_typed`
@@ -2328,6 +2354,7 @@ fn resolve_rhs_static_call(
                 cache: ctx.resolved_class_cache,
                 calling_class_name: Some(&ctx.current_class.name),
                 is_static: true,
+                resolution_ctx: Some(&rctx),
             };
             // Recover the effective return type string from the method.
             // Look up the method on the (possibly merged) owner and apply

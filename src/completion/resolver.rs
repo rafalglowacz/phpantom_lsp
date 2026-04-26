@@ -169,6 +169,8 @@ pub(crate) struct ResolutionCtx<'a> {
     pub resolved_class_cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
     /// Cross-file function resolution callback (optional).
     pub function_loader: FunctionLoaderFn<'a>,
+    /// PhpStorm `.phpstorm.meta.php` overrides (optional).
+    pub phpstorm_meta: Option<&'a crate::phpstorm_meta::PhpStormMetaIndex>,
     /// Optional scope-based variable resolver carried from the forward
     /// walker.  When set, `resolve_variable_fallback` reads variable
     /// types from this closure (which reads the forward walker's
@@ -210,6 +212,8 @@ pub(crate) struct VarResolutionCtx<'a> {
     /// paths behave identically.  Kept for API compatibility with
     /// callers that set it to `true` (hover, diagnostics).
     pub branch_aware: bool,
+    /// PhpStorm `.phpstorm.meta.php` overrides (optional).
+    pub phpstorm_meta: Option<&'a crate::phpstorm_meta::PhpStormMetaIndex>,
     /// Match-arm instanceof narrowings: var name → narrowed types.
     /// Empty outside of match(true) arm bodies.
     pub match_arm_narrowing: HashMap<String, Vec<crate::types::ResolvedType>>,
@@ -239,6 +243,7 @@ impl<'a> VarResolutionCtx<'a> {
             class_loader: self.class_loader,
             function_loader: self.loaders.function_loader,
             resolved_class_cache: self.resolved_class_cache,
+            phpstorm_meta: self.phpstorm_meta,
             scope_var_resolver: self.scope_var_resolver,
         }
     }
@@ -272,6 +277,7 @@ impl<'a> VarResolutionCtx<'a> {
             enclosing_return_type: self.enclosing_return_type.clone(),
             top_level_scope: self.top_level_scope.clone(),
             branch_aware: self.branch_aware,
+            phpstorm_meta: self.phpstorm_meta,
             match_arm_narrowing: self.match_arm_narrowing.clone(),
             scope_var_resolver: self.scope_var_resolver,
         }
@@ -298,6 +304,7 @@ impl<'a> VarResolutionCtx<'a> {
             enclosing_return_type: self.enclosing_return_type.clone(),
             top_level_scope: self.top_level_scope.clone(),
             branch_aware: self.branch_aware,
+            phpstorm_meta: self.phpstorm_meta,
             match_arm_narrowing,
             scope_var_resolver: self.scope_var_resolver,
         }
@@ -757,6 +764,7 @@ fn resolve_target_classes_expr_inner_impl(
                         ctx.cursor_offset,
                         class_loader,
                         Loaders::with_function(ctx.function_loader),
+                        ctx.phpstorm_meta,
                     );
                     if resolved.is_empty() {
                         None
@@ -1040,6 +1048,7 @@ pub(crate) fn resolve_subject_outcome(
             ctx.all_classes,
             ctx.class_loader,
             Loaders::with_function(ctx.function_loader),
+            ctx.phpstorm_meta,
         )
         && let Some(unresolved) = check_unresolvable_class_name(&resolved_type, ctx.class_loader)
     {
@@ -1218,6 +1227,7 @@ fn resolve_variable_fallback(
                 ctx.cursor_offset,
                 class_loader,
                 Loaders::with_function(function_loader),
+                ctx.phpstorm_meta,
             )
         }
     } else {
@@ -1363,6 +1373,7 @@ fn apply_property_narrowing(
                 enclosing_return_type: None,
                 top_level_scope: None,
                 branch_aware: false,
+                phpstorm_meta: rctx.phpstorm_meta,
                 match_arm_narrowing: HashMap::new(),
                 scope_var_resolver: None,
             };

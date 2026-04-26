@@ -425,6 +425,7 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
                 cursor_offset,
                 class_loader,
                 Loaders::with_function(function_loader),
+                rctx.phpstorm_meta,
             );
             crate::types::ResolvedType::into_classes(resolved)
                 .into_iter()

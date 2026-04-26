@@ -557,6 +557,7 @@ fn resolve_subject_to_class(
             let function_loader = backend.function_loader_with(ctx.use_map, ctx.namespace);
             let class_loader =
                 backend.class_loader_with(ctx.local_classes, ctx.use_map, ctx.namespace);
+            let meta_guard = backend.phpstorm_meta.read();
 
             let results = ResolvedType::into_classes(
                 crate::completion::variable::resolution::resolve_variable_types(
@@ -567,6 +568,7 @@ fn resolve_subject_to_class(
                     access_offset,
                     &class_loader,
                     Loaders::with_function(Some(&function_loader)),
+                    Some(&meta_guard),
                 ),
             );
 

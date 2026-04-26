@@ -48,17 +48,21 @@ impl Backend {
         let function_loader = self.function_loader(&ctx);
 
         let resolved_types: Vec<PhpType> = match &symbol.kind {
-            SymbolKind::Variable { name } => resolve_variable_type_names(
-                name,
-                content,
-                offset,
-                current_class,
-                &ctx,
-                &class_loader,
-                &function_loader,
-            )
-            .into_iter()
-            .collect(),
+            SymbolKind::Variable { name } => {
+                let meta_guard = self.phpstorm_meta.read();
+                resolve_variable_type_names(
+                    name,
+                    content,
+                    offset,
+                    current_class,
+                    &ctx,
+                    &class_loader,
+                    &function_loader,
+                    Some(&meta_guard),
+                )
+                .into_iter()
+                .collect()
+            }
 
             SymbolKind::MemberAccess {
                 subject_text,
@@ -73,6 +77,7 @@ impl Backend {
                     AccessKind::Arrow
                 };
 
+                let meta_guard = self.phpstorm_meta.read();
                 let rctx = ResolutionCtx {
                     current_class,
                     all_classes: &ctx.classes,
@@ -83,6 +88,7 @@ impl Backend {
                     function_loader: Some(
                         &function_loader as &dyn Fn(&str) -> Option<FunctionInfo>,
                     ),
+                    phpstorm_meta: Some(&meta_guard),
                     scope_var_resolver: None,
                 };
 
@@ -272,6 +278,7 @@ fn resolve_variable_type_names(
     ctx: &FileContext,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: &dyn Fn(&str) -> Option<FunctionInfo>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Option<PhpType> {
     let var_name = format!("${}", name);
 
@@ -289,6 +296,7 @@ fn resolve_variable_type_names(
         &ctx.classes,
         class_loader,
         crate::completion::resolver::Loaders::with_function(Some(function_loader)),
+        phpstorm_meta,
     ) && !resolved_type.top_level_class_names().is_empty()
     {
         return Some(resolved_type);
@@ -313,6 +321,7 @@ fn resolve_variable_type_names(
             cursor_offset,
             class_loader,
             Loaders::with_function(Some(function_loader)),
+            phpstorm_meta,
         ),
     );
 

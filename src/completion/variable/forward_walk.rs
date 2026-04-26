@@ -1388,6 +1388,7 @@ pub(crate) fn build_diagnostic_scopes(
         class_loader,
         loaders,
         resolved_class_cache,
+        phpstorm_meta: None,
     };
 
     with_parsed_program(content, "build_diagnostic_scopes", |program, _content| {
@@ -1439,6 +1440,7 @@ fn walk_top_level_statements<'a, 'b: 'a>(
         resolved_class_cache: diag_ctx.resolved_class_cache,
         enclosing_return_type: None,
         top_level_scope: None,
+        phpstorm_meta: diag_ctx.phpstorm_meta,
     };
 
     let mut top_level_scope = ScopeState::new();
@@ -1551,6 +1553,7 @@ struct DiagnosticWalkCtx<'a> {
     class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'a>,
     resolved_class_cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
+    phpstorm_meta: Option<&'a crate::phpstorm_meta::PhpStormMetaIndex>,
 }
 
 /// Run the forward walker on a single function/method body and record
@@ -1579,6 +1582,7 @@ fn analyze_function_body<'b>(
         resolved_class_cache: diag_ctx.resolved_class_cache,
         enclosing_return_type: None,
         top_level_scope: None,
+        phpstorm_meta: diag_ctx.phpstorm_meta,
     };
 
     let mut scope = ScopeState::new();
@@ -1743,6 +1747,8 @@ pub(crate) struct ForwardWalkCtx<'a> {
     /// When a function body contains `global $x;`, the walker looks up
     /// `$x` in this map to seed the local scope with the top-level type.
     pub top_level_scope: Option<HashMap<String, Vec<ResolvedType>>>,
+    /// PhpStorm `.phpstorm.meta.php` overrides (optional).
+    pub phpstorm_meta: Option<&'a crate::phpstorm_meta::PhpStormMetaIndex>,
 }
 
 impl<'a> ForwardWalkCtx<'a> {
@@ -1763,6 +1769,7 @@ impl<'a> ForwardWalkCtx<'a> {
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type: self.enclosing_return_type.clone(),
             top_level_scope: self.top_level_scope.clone(),
+            phpstorm_meta: self.phpstorm_meta,
         }
     }
 
@@ -1792,6 +1799,7 @@ impl<'a> ForwardWalkCtx<'a> {
             enclosing_return_type: self.enclosing_return_type.clone(),
             top_level_scope: self.top_level_scope.clone(),
             branch_aware: false,
+            phpstorm_meta: self.phpstorm_meta,
             match_arm_narrowing: HashMap::new(),
             scope_var_resolver: Some(scope_resolver),
         }
@@ -3863,6 +3871,7 @@ fn process_destructuring_assignment<'b>(
             enclosing_return_type: ctx.enclosing_return_type.clone(),
             top_level_scope: ctx.top_level_scope.clone(),
             branch_aware: false,
+            phpstorm_meta: ctx.phpstorm_meta,
             match_arm_narrowing: HashMap::new(),
             scope_var_resolver: Some(&scope_resolver),
         };
@@ -4021,6 +4030,7 @@ fn process_pass_by_ref<'b>(
             enclosing_return_type: ctx.enclosing_return_type.clone(),
             top_level_scope: ctx.top_level_scope.clone(),
             branch_aware: false,
+            phpstorm_meta: ctx.phpstorm_meta,
             match_arm_narrowing: HashMap::new(),
             scope_var_resolver: Some(&scope_resolver),
         };
@@ -4400,6 +4410,7 @@ fn process_assert_narrowing<'b>(
             enclosing_return_type: ctx.enclosing_return_type.clone(),
             top_level_scope: ctx.top_level_scope.clone(),
             branch_aware: false,
+            phpstorm_meta: ctx.phpstorm_meta,
             match_arm_narrowing: HashMap::new(),
             scope_var_resolver: Some(&scope_resolver),
         };
@@ -6798,6 +6809,7 @@ fn build_var_ctx<'a>(
         enclosing_return_type: ctx.enclosing_return_type.clone(),
         top_level_scope: ctx.top_level_scope.clone(),
         branch_aware: false,
+        phpstorm_meta: ctx.phpstorm_meta,
         match_arm_narrowing: HashMap::new(),
         scope_var_resolver: Some(scope_resolver),
     }

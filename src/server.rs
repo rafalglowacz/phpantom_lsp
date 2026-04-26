@@ -383,6 +383,10 @@ impl LanguageServer for Backend {
         // Parse and update AST map, use map, and namespace map
         self.update_ast(&uri, &text);
 
+        if crate::phpstorm_meta::should_refresh_index_for_uri(&uri) {
+            crate::phpstorm_meta::refresh_index(self);
+        }
+
         // Schedule diagnostics asynchronously so that the first-open
         // response is not blocked by lazy stub parsing (which can take
         // tens of seconds when many class references trigger cache-miss
@@ -406,6 +410,10 @@ impl LanguageServer for Backend {
 
             // Re-parse and update AST map, use map, and namespace map
             let signature_changed = self.update_ast(&uri, &text);
+
+            if crate::phpstorm_meta::should_refresh_index_for_uri(&uri) {
+                crate::phpstorm_meta::refresh_index(self);
+            }
 
             // Schedule diagnostics in a background task with debouncing.
             // This returns immediately so that completion, hover, and
@@ -1234,6 +1242,8 @@ impl Backend {
 
         self.scan_autoload_files(root, &vendor_dir);
 
+        crate::phpstorm_meta::refresh_index(self);
+
         let symbol_count = symbol_count
             + self.autoload_function_index.read().len()
             + self.autoload_constant_index.read().len();
@@ -1392,6 +1402,8 @@ impl Backend {
             + self.autoload_function_index.read().len()
             + self.autoload_constant_index.read().len();
 
+        crate::phpstorm_meta::refresh_index(self);
+
         self.log(
             MessageType::INFO,
             format!(
@@ -1439,6 +1451,8 @@ impl Backend {
         let symbol_count = symbol_count
             + self.autoload_function_index.read().len()
             + self.autoload_constant_index.read().len();
+
+        crate::phpstorm_meta::refresh_index(self);
 
         self.log(
             MessageType::INFO,

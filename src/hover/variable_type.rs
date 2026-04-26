@@ -85,6 +85,7 @@ pub(crate) fn resolve_variable_type(
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
+    phpstorm_meta: Option<&crate::phpstorm_meta::PhpStormMetaIndex>,
 ) -> Option<PhpType> {
     // 1. Inline @var override: `/** @var Type $var */`
     //
@@ -172,6 +173,7 @@ pub(crate) fn resolve_variable_type(
         cursor_offset,
         class_loader,
         loaders,
+        phpstorm_meta,
     );
     if !resolved.is_empty() {
         let joined = ResolvedType::types_joined(&resolved);
@@ -996,6 +998,7 @@ fn resolve_expression_to_classes(
                 cursor_offset,
                 class_loader,
                 Loaders::default(),
+                None,
             ),
         );
         if !types.is_empty() {
@@ -1482,6 +1485,7 @@ fn infer_callable_param_types_for_call(
                     function_loader: None,
                     scope_var_resolver: None,
                     resolved_class_cache: None,
+                    phpstorm_meta: None,
                 };
                 let receiver_classes = ResolvedType::into_arced_classes(
                     crate::completion::resolver::resolve_target_classes(
@@ -1520,6 +1524,7 @@ fn infer_callable_param_types_for_call(
                     function_loader: None,
                     scope_var_resolver: None,
                     resolved_class_cache: None,
+                    phpstorm_meta: None,
                 };
                 let receiver_classes = ResolvedType::into_arced_classes(
                     crate::completion::resolver::resolve_target_classes(

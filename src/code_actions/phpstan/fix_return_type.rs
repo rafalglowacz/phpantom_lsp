@@ -538,6 +538,7 @@ pub(crate) fn infer_return_type(
                     expr_offset,
                     class_loader,
                     Loaders::with_function(function_loader),
+                    None,
                 );
                 let joined = ResolvedType::types_joined(&results);
                 if !joined.is_mixed() {
