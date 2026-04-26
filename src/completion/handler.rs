@@ -148,7 +148,7 @@ fn filter_current_file_classes(
             if let Some(ref ns) = ctx.namespace {
                 format!("{}\\{}", ns, cls.name)
             } else {
-                cls.name.clone()
+                cls.name.to_string()
             }
         })
         .collect();
@@ -269,6 +269,12 @@ impl Backend {
         let content = self.get_file_content(&uri);
 
         if let Some(content) = content {
+            // Activate the chain resolution cache so that shared chain
+            // prefixes are resolved once and reused within this completion
+            // request.  The guard is re-entrant safe.
+            let _chain_guard = super::resolver::with_chain_resolution_cache();
+            let _body_infer_guard = self.activate_body_return_inferrer();
+
             // Gather per-file context (classes, use-map, namespace) in one
             // call instead of three separate lock-and-unwrap blocks.
             let ctx = self.file_context(&uri);
@@ -922,6 +928,7 @@ impl Backend {
                         class_loader: &class_loader,
                         resolved_class_cache: Some(&self.resolved_class_cache),
                         function_loader: Some(&function_loader),
+                        scope_var_resolver: None,
                     };
                     let mut resolved = super::resolver::resolve_target_classes(
                         &target.subject,
@@ -953,6 +960,7 @@ impl Backend {
                                 class_loader: &class_loader,
                                 resolved_class_cache: Some(&self.resolved_class_cache),
                                 function_loader: Some(&function_loader),
+                                scope_var_resolver: None,
                             };
                             resolved = super::resolver::resolve_target_classes(
                                 &target.subject,
@@ -1176,11 +1184,7 @@ impl Backend {
             };
 
             // Add constructor snippet if available
-            if let Some(ctor) = current_class
-                .methods
-                .iter()
-                .find(|m| m.name == "__construct")
-            {
+            if let Some(ctor) = current_class.get_method("__construct") {
                 let snippet =
                     crate::completion::builder::build_callable_snippet(keyword, &ctor.parameters);
                 item.insert_text = Some(snippet);
@@ -1208,7 +1212,7 @@ impl Backend {
 
             // Try to load parent class and get its constructor
             if let Some(parent_cls) = self.find_or_load_class(parent_name) {
-                if let Some(ctor) = parent_cls.methods.iter().find(|m| m.name == "__construct") {
+                if let Some(ctor) = parent_cls.get_method("__construct") {
                     let snippet = crate::completion::builder::build_callable_snippet(
                         "parent",
                         &ctor.parameters,

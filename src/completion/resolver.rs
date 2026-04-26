@@ -51,10 +51,10 @@ use crate::virtual_members::resolve_class_fully_maybe_cached;
 // the first method call 5 times, etc. — O(depth²) total work.
 //
 // The chain cache stores `resolve_target_classes` results keyed by the
-// raw subject text string.  It is activated at the diagnostic loop level
-// (via [`with_chain_resolution_cache`]) and consulted by
-// `resolve_target_classes` before doing any work.  When the cache is not
-// active (completion, hover, etc.) the function behaves exactly as before.
+// raw subject text string.  It is activated per-request for all LSP
+// handlers (completion, hover, definition, diagnostics, etc.) via
+// [`with_chain_resolution_cache`] and consulted by
+// `resolve_target_classes` before doing any work.
 
 thread_local! {
     /// When `Some`, `resolve_target_classes` will consult and populate
@@ -109,6 +109,13 @@ pub(crate) type FunctionLoaderFn<'a> = Option<&'a dyn Fn(&str) -> Option<Functio
 /// when the constant was not found.
 pub(crate) type ConstantLoaderFn<'a> = Option<&'a dyn Fn(&str) -> Option<Option<String>>>;
 
+/// Type alias for the optional scope-based variable resolver from the
+/// forward walker.  When set on a [`VarResolutionCtx`], variable
+/// lookups read from the forward walker's in-progress `ScopeState`
+/// instead of re-entering `resolve_variable_types`.
+pub(crate) type ScopeVarResolverFn<'a> =
+    Option<&'a dyn Fn(&str) -> Vec<crate::types::ResolvedType>>;
+
 /// Bundles optional cross-file loader callbacks so they can be threaded
 /// through the resolution chain as a single argument instead of one
 /// parameter per loader.
@@ -162,6 +169,13 @@ pub(crate) struct ResolutionCtx<'a> {
     pub resolved_class_cache: Option<&'a crate::virtual_members::ResolvedClassCache>,
     /// Cross-file function resolution callback (optional).
     pub function_loader: FunctionLoaderFn<'a>,
+    /// Optional scope-based variable resolver carried from the forward
+    /// walker.  When set, `resolve_variable_fallback` reads variable
+    /// types from this closure (which reads the forward walker's
+    /// in-progress `ScopeState`) instead of calling
+    /// `resolve_variable_types` which would trigger a full method-body
+    /// re-walk.
+    pub scope_var_resolver: ScopeVarResolverFn<'a>,
 }
 
 /// Bundles the common parameters threaded through variable-type resolution.
@@ -186,16 +200,30 @@ pub(crate) struct VarResolutionCtx<'a> {
     /// if known.  Used inside generator bodies to reverse-infer variable
     /// types from `Generator<TKey, TValue, TSend, TReturn>`.
     pub enclosing_return_type: Option<PhpType>,
-    /// When `true`, if/else/elseif walking only considers the branch
-    /// that contains the cursor instead of unioning all branches.
-    /// This produces the single type visible at the cursor position,
-    /// which is what hover needs (e.g. only `Lamp` inside an if-branch,
-    /// not `Lamp|Faucet`).  Completion leaves this `false` so that all
-    /// possible types are offered.
+    /// Pre-computed top-level scope for resolving `global` variable imports.
+    /// When a function body contains `global $x;`, the walker looks up
+    /// `$x` in this map to seed the local scope with the top-level type.
+    pub top_level_scope: Option<HashMap<String, Vec<crate::types::ResolvedType>>>,
+    /// Legacy flag: historically selected branch-aware resolution for
+    /// hover vs union-all resolution for completion.  The forward
+    /// walker now inherently produces position-accurate types, so both
+    /// paths behave identically.  Kept for API compatibility with
+    /// callers that set it to `true` (hover, diagnostics).
     pub branch_aware: bool,
     /// Match-arm instanceof narrowings: var name → narrowed types.
     /// Empty outside of match(true) arm bodies.
     pub match_arm_narrowing: HashMap<String, Vec<crate::types::ResolvedType>>,
+    /// Optional scope-based variable resolver from the forward walker.
+    ///
+    /// When set, `resolve_var_types` in `rhs_resolution.rs` reads
+    /// variable types from this closure instead of re-entering
+    /// `resolve_variable_types`, which would trigger a redundant
+    /// forward walk of the method body.
+    ///
+    /// The closure takes a `$`-prefixed variable name and returns the
+    /// variable's types from the forward walker's in-progress
+    /// `ScopeState`.
+    pub scope_var_resolver: ScopeVarResolverFn<'a>,
 }
 
 impl<'a> VarResolutionCtx<'a> {
@@ -211,6 +239,7 @@ impl<'a> VarResolutionCtx<'a> {
             class_loader: self.class_loader,
             function_loader: self.loaders.function_loader,
             resolved_class_cache: self.resolved_class_cache,
+            scope_var_resolver: self.scope_var_resolver,
         }
     }
 
@@ -222,30 +251,6 @@ impl<'a> VarResolutionCtx<'a> {
     /// Convenience accessor for the constant loader.
     pub fn constant_loader(&self) -> ConstantLoaderFn<'a> {
         self.loaders.constant_loader
-    }
-
-    /// Clone this context with a different `enclosing_return_type`.
-    ///
-    /// All other fields are copied by reference.  This is useful when
-    /// descending into a nested function/method body whose `@return`
-    /// annotation differs from the outer scope.
-    pub(super) fn with_enclosing_return_type(
-        &self,
-        enclosing_return_type: Option<PhpType>,
-    ) -> VarResolutionCtx<'a> {
-        VarResolutionCtx {
-            var_name: self.var_name,
-            current_class: self.current_class,
-            all_classes: self.all_classes,
-            content: self.content,
-            cursor_offset: self.cursor_offset,
-            class_loader: self.class_loader,
-            loaders: self.loaders,
-            resolved_class_cache: self.resolved_class_cache,
-            enclosing_return_type,
-            branch_aware: self.branch_aware,
-            match_arm_narrowing: self.match_arm_narrowing.clone(),
-        }
     }
 
     /// Clone this context with a different `cursor_offset`.
@@ -265,8 +270,10 @@ impl<'a> VarResolutionCtx<'a> {
             loaders: self.loaders,
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type: self.enclosing_return_type.clone(),
+            top_level_scope: self.top_level_scope.clone(),
             branch_aware: self.branch_aware,
             match_arm_narrowing: self.match_arm_narrowing.clone(),
+            scope_var_resolver: self.scope_var_resolver,
         }
     }
 
@@ -289,8 +296,10 @@ impl<'a> VarResolutionCtx<'a> {
             loaders: self.loaders,
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type: self.enclosing_return_type.clone(),
+            top_level_scope: self.top_level_scope.clone(),
             branch_aware: self.branch_aware,
             match_arm_narrowing,
+            scope_var_resolver: self.scope_var_resolver,
         }
     }
 }
@@ -403,6 +412,33 @@ fn resolve_target_classes_expr_inner(
     access_kind: AccessKind,
     ctx: &ResolutionCtx<'_>,
 ) -> Vec<ResolvedType> {
+    thread_local! {
+        static RESOLVE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    let depth = RESOLVE_DEPTH.with(|d| {
+        let v = d.get() + 1;
+        d.set(v);
+        v
+    });
+    // Maximum nesting depth for `resolve_target_classes_expr_inner`.
+    // Breaks infinite recursion between subject resolution, call-return
+    // resolution, and variable resolution that can occur on files with
+    // deeply intertwined class hierarchies and virtual members.
+    const MAX_RESOLVE_TARGET_DEPTH: u32 = 60;
+    if depth > MAX_RESOLVE_TARGET_DEPTH {
+        RESOLVE_DEPTH.with(|d| d.set(depth - 1));
+        return vec![];
+    }
+    let result = resolve_target_classes_expr_inner_impl(expr, access_kind, ctx);
+    RESOLVE_DEPTH.with(|d| d.set(depth - 1));
+    result
+}
+
+fn resolve_target_classes_expr_inner_impl(
+    expr: &SubjectExpr,
+    access_kind: AccessKind,
+    ctx: &ResolutionCtx<'_>,
+) -> Vec<ResolvedType> {
     let current_class = ctx.current_class;
     let all_classes = ctx.all_classes;
     let class_loader = ctx.class_loader;
@@ -435,10 +471,10 @@ fn resolve_target_classes_expr_inner(
                 && let Some(ref parent_name) = cc.parent_class
             {
                 if let Some(cls) = find_class_by_name(all_classes, parent_name) {
-                    return vec![ResolvedType::from_class(cls.as_ref().clone())];
+                    return vec![ResolvedType::from_arc(Arc::clone(cls))];
                 }
                 return class_loader(parent_name)
-                    .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                    .map(ResolvedType::from_arc)
                     .into_iter()
                     .collect();
             }
@@ -503,7 +539,7 @@ fn resolve_target_classes_expr_inner(
                     );
                     ResolvedType::extend_unique(
                         &mut results,
-                        resolved.into_iter().map(ResolvedType::from_class).collect(),
+                        resolved.into_iter().map(ResolvedType::from_arc).collect(),
                     );
                 }
                 if !results.is_empty() {
@@ -513,17 +549,17 @@ fn resolve_target_classes_expr_inner(
 
             owner_classes
                 .into_iter()
-                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                .map(ResolvedType::from_arc)
                 .collect()
         }
 
         // ── Bare class name ─────────────────────────────────────
         SubjectExpr::ClassName(name) => {
             if let Some(cls) = find_class_by_name(all_classes, name) {
-                return vec![ResolvedType::from_class(cls.as_ref().clone())];
+                return vec![ResolvedType::from_arc(Arc::clone(cls))];
             }
             class_loader(name)
-                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                .map(ResolvedType::from_arc)
                 .into_iter()
                 .collect()
         }
@@ -531,10 +567,10 @@ fn resolve_target_classes_expr_inner(
         // ── `new ClassName` (without trailing call parens) ───────
         SubjectExpr::NewExpr { class_name } => {
             if let Some(cls) = find_class_by_name(all_classes, class_name) {
-                return vec![ResolvedType::from_class(cls.as_ref().clone())];
+                return vec![ResolvedType::from_arc(Arc::clone(cls))];
             }
             class_loader(class_name)
-                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                .map(ResolvedType::from_arc)
                 .into_iter()
                 .collect()
         }
@@ -548,22 +584,16 @@ fn resolve_target_classes_expr_inner(
                 ctx,
                 Some(&mut hint),
             );
-
             // Use the raw return type hint only when at least one
             // resolved class has template parameters — non-generic
             // classes don't benefit from it.
             if let Some(h) = hint
                 && classes.iter().any(|c| !c.template_params.is_empty())
             {
-                let class_vec: Vec<ClassInfo> =
-                    classes.into_iter().map(Arc::unwrap_or_clone).collect();
-                return ResolvedType::from_classes_with_hint(class_vec, h);
+                return ResolvedType::from_classes_with_hint(classes, h);
             }
 
-            classes
-                .into_iter()
-                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
-                .collect()
+            classes.into_iter().map(ResolvedType::from_arc).collect()
         }
 
         // ── Property chain ──────────────────────────────────────
@@ -577,10 +607,8 @@ fn resolve_target_classes_expr_inner(
                     all_classes,
                     class_loader,
                 );
-                ClassInfo::extend_unique_arc(
-                    &mut arc_results,
-                    resolved.into_iter().map(Arc::new).collect(),
-                );
+
+                ClassInfo::extend_unique_arc(&mut arc_results, resolved);
             }
 
             // ── Property-level narrowing ────────────────────────
@@ -615,7 +643,7 @@ fn resolve_target_classes_expr_inner(
 
             arc_results
                 .into_iter()
-                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                .map(ResolvedType::from_arc)
                 .collect()
         }
 
@@ -639,7 +667,7 @@ fn resolve_target_classes_expr_inner(
                             class_loader,
                         )
                     {
-                        return resolved.into_iter().map(ResolvedType::from_class).collect();
+                        return resolved.into_iter().map(ResolvedType::from_arc).collect();
                     }
                 }
                 // If raw-type approach didn't work, fall back to resolving
@@ -681,29 +709,63 @@ fn resolve_target_classes_expr_inner(
                 ctx.cursor_offset as usize,
                 &base_var,
             );
-            let ast_type: Option<PhpType> = {
-                let dummy_class;
-                let effective_class = match current_class {
-                    Some(cc) => cc,
-                    None => {
-                        dummy_class = ClassInfo::default();
-                        &dummy_class
+            // resolve_variable_types is designed for bare `$variable` names;
+            // property chains like `$this->query->joins` are handled by the
+            // property_raw_type strategy above.  Skip this strategy for
+            // non-variable expressions (chains, array access, comparisons,
+            // null coalescing, boolean expressions) to avoid polluting
+            // the scope cache with unsupported keys.
+            let is_bare_variable = !base_var.contains("->")
+                && !base_var.contains("::")
+                && !base_var.contains('[')
+                && !base_var.contains("===")
+                && !base_var.contains("&&")
+                && !base_var.contains("??")
+                && !base_var.contains("||");
+            let ast_type: Option<PhpType> = if is_bare_variable {
+                // When a scope_var_resolver is available (i.e. we are
+                // inside the forward walker), read the variable type
+                // from the in-progress ScopeState instead of calling
+                // resolve_variable_types which would re-enter the
+                // forward walker and cause stack overflow.
+                if let Some(scope_resolver) = ctx.scope_var_resolver {
+                    let prefixed = if base_var.starts_with('$') {
+                        base_var.clone()
+                    } else {
+                        format!("${}", base_var)
+                    };
+                    let from_scope = scope_resolver(&prefixed);
+                    if from_scope.is_empty() {
+                        None
+                    } else {
+                        Some(ResolvedType::types_joined(&from_scope))
                     }
-                };
-                let resolved = crate::completion::variable::resolution::resolve_variable_types(
-                    &base_var,
-                    effective_class,
-                    all_classes,
-                    ctx.content,
-                    ctx.cursor_offset,
-                    class_loader,
-                    Loaders::with_function(ctx.function_loader),
-                );
-                if resolved.is_empty() {
-                    None
                 } else {
-                    Some(ResolvedType::types_joined(&resolved))
+                    let dummy_class;
+                    let effective_class = match current_class {
+                        Some(cc) => cc,
+                        None => {
+                            dummy_class = ClassInfo::default();
+                            &dummy_class
+                        }
+                    };
+                    let resolved = crate::completion::variable::resolution::resolve_variable_types(
+                        &base_var,
+                        effective_class,
+                        all_classes,
+                        ctx.content,
+                        ctx.cursor_offset,
+                        class_loader,
+                        Loaders::with_function(ctx.function_loader),
+                    );
+                    if resolved.is_empty() {
+                        None
+                    } else {
+                        Some(ResolvedType::types_joined(&resolved))
+                    }
                 }
+            } else {
+                None
             };
 
             let candidates = property_raw_type
@@ -718,7 +780,7 @@ fn resolve_target_classes_expr_inner(
                 all_classes,
                 class_loader,
             ) {
-                return resolved.into_iter().map(ResolvedType::from_class).collect();
+                return resolved.into_iter().map(ResolvedType::from_arc).collect();
             }
             // Segment walk failed — the base type does not have
             // array-shape, generic, or iterable annotations that
@@ -739,10 +801,10 @@ fn resolve_target_classes_expr_inner(
         | SubjectExpr::FunctionCall(_) => {
             let text = expr.to_subject_text();
             if let Some(cls) = find_class_by_name(all_classes, &text) {
-                return vec![ResolvedType::from_class(cls.as_ref().clone())];
+                return vec![ResolvedType::from_arc(Arc::clone(cls))];
             }
             class_loader(&text)
-                .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
+                .map(ResolvedType::from_arc)
                 .into_iter()
                 .collect()
         }
@@ -775,10 +837,7 @@ fn resolve_call_raw_return_type(
                     ctx.class_loader,
                     ctx.resolved_class_cache,
                 );
-                let found = merged
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(method));
+                let found = merged.get_method_ci(method);
                 if let Some(m) = found {
                     if let Some(ref ret) = m.return_type {
                         return Some(ret.clone());
@@ -795,10 +854,7 @@ fn resolve_call_raw_return_type(
                 // without a return type.  Use __call's return type so
                 // that chains through dynamic calls (e.g. Builder
                 // where{Column}) preserve the type.
-                if let Some(m) = merged
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case("__call"))
+                if let Some(m) = merged.get_method_ci("__call")
                     && let Some(ref ret) = m.return_type
                 {
                     return Some(ret.clone());
@@ -814,10 +870,7 @@ fn resolve_call_raw_return_type(
                     ctx.class_loader,
                     ctx.resolved_class_cache,
                 );
-                let found = merged
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(method));
+                let found = merged.get_method_ci(method);
                 if let Some(m) = found {
                     if let Some(ref ret) = m.return_type {
                         return Some(ret.clone());
@@ -830,10 +883,7 @@ fn resolve_call_raw_return_type(
                 }
                 // __callStatic fallback: method not found, or virtual
                 // method without a return type.
-                if let Some(m) = merged
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case("__callStatic"))
+                if let Some(m) = merged.get_method_ci("__callStatic")
                     && let Some(ref ret) = m.return_type
                 {
                     return Some(ret.clone());
@@ -905,7 +955,6 @@ pub(crate) fn resolve_subject_outcome(
     ctx: &ResolutionCtx<'_>,
 ) -> SubjectOutcome {
     let resolved = resolve_target_classes(subject, access_kind, ctx);
-
     if !resolved.is_empty() {
         // ── Check for class-bearing entries ──────────────────────
         let arced: Vec<Arc<ClassInfo>> = ResolvedType::into_arced_classes(resolved.clone());
@@ -928,7 +977,7 @@ pub(crate) fn resolve_subject_outcome(
             .any(|rt| rt.type_string.is_named_ci("stdclass") || rt.type_string.is_object())
         {
             let synthetic = Arc::new(ClassInfo {
-                name: "stdClass".to_string(),
+                name: crate::atom::atom("stdClass"),
                 ..ClassInfo::default()
             });
             return SubjectOutcome::Resolved(vec![synthetic]);
@@ -1019,10 +1068,7 @@ fn resolve_call_scalar_return(
                     ctx.class_loader,
                     ctx.resolved_class_cache,
                 );
-                if let Some(m) = resolved
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(method))
+                if let Some(m) = resolved.get_method_ci(method)
                     && let Some(ref hint) = m.return_type
                     && hint.all_members_primitive_scalar()
                 {
@@ -1053,10 +1099,7 @@ fn resolve_call_scalar_return(
                     ctx.class_loader,
                     ctx.resolved_class_cache,
                 );
-                if let Some(m) = resolved
-                    .methods
-                    .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(method))
+                if let Some(m) = resolved.get_method_ci(method)
                     && let Some(ref hint) = m.return_type
                     && hint.all_members_primitive_scalar()
                 {
@@ -1140,15 +1183,46 @@ fn resolve_variable_fallback(
         }
     }
 
-    let resolved_types = super::variable::resolution::resolve_variable_types(
-        var_name,
-        effective_class,
-        all_classes,
-        ctx.content,
-        ctx.cursor_offset,
-        class_loader,
-        Loaders::with_function(function_loader),
-    );
+    // Guard: resolve_variable_types is designed for bare `$variable`
+    // names.  SubjectExpr::Variable can carry complex expressions
+    // (array access like `$arr['key']`, null coalescing, comparisons)
+    // that will never match a scope entry.  Skip them to avoid wasted
+    // backward scans and fallthrough noise.
+    let is_bare_variable = !var_name.contains("->")
+        && !var_name.contains("::")
+        && !var_name.contains('[')
+        && !var_name.contains("===")
+        && !var_name.contains("&&")
+        && !var_name.contains("??")
+        && !var_name.contains("||");
+    let resolved_types = if is_bare_variable {
+        // When a scope variable resolver is available (i.e. we are
+        // inside the forward walker's scope-building pass), read the
+        // variable's type directly from the in-progress ScopeState.
+        // This avoids calling resolve_variable_types which would
+        // trigger a full forward walk of the method body for every
+        // variable access — an O(N²) blowup on files with closures.
+        if let Some(scope_resolver) = ctx.scope_var_resolver {
+            let prefixed = if var_name.starts_with('$') {
+                var_name.to_string()
+            } else {
+                format!("${}", var_name)
+            };
+            scope_resolver(&prefixed)
+        } else {
+            super::variable::resolution::resolve_variable_types(
+                var_name,
+                effective_class,
+                all_classes,
+                ctx.content,
+                ctx.cursor_offset,
+                class_loader,
+                Loaders::with_function(function_loader),
+            )
+        }
+    } else {
+        vec![]
+    };
 
     // ── `class-string<T>` unwrapping for `$var::` access ────────
     // When the variable's type is `class-string<T>` (e.g. from a
@@ -1186,7 +1260,7 @@ fn resolve_variable_fallback(
                             for cls in resolved {
                                 ResolvedType::push_unique(
                                     &mut class_string_results,
-                                    ResolvedType::from_class(cls),
+                                    ResolvedType::from_arc(cls),
                                 );
                             }
                         }
@@ -1205,7 +1279,7 @@ fn resolve_variable_fallback(
                 for cls in resolved {
                     ResolvedType::push_unique(
                         &mut class_string_results,
-                        ResolvedType::from_class(cls),
+                        ResolvedType::from_arc(cls),
                     );
                 }
             }
@@ -1285,10 +1359,12 @@ fn apply_property_narrowing(
                 cursor_offset: rctx.cursor_offset,
                 class_loader: rctx.class_loader,
                 loaders: Loaders::with_function(rctx.function_loader),
-                resolved_class_cache: None,
+                resolved_class_cache: crate::virtual_members::active_resolved_class_cache(),
                 enclosing_return_type: None,
+                top_level_scope: None,
                 branch_aware: false,
                 match_arm_narrowing: HashMap::new(),
+                scope_var_resolver: None,
             };
             walk_property_narrowing_in_statements(program.statements.iter(), &ctx, &mut plain);
         },

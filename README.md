@@ -15,36 +15,36 @@ A fast, lightweight PHP language server written in Rust. Ready in seconds, uses 
 
 PHPantom focuses on deep type intelligence. Here's how it compares:
 
-|                                      | PHPantom | Intelephense | PHP Tools  | Phpactor    | PHPStorm    |
-| ------------------------------------ | -------- | ------------ | ---------- | ----------- | ----------- |
-| Common LSP features<sup>1</sup>      | ✅       | ✅           | ✅         | ✅          | ✅          |
-| Workspace symbols                    | 🚧       | ✅           | ✅         | ✅          | ✅          |
-| Semantic tokens                      | ✅       | ❌           | ✅         | ❌          | ✅          |
-| Linked editing                       | ✅       | ❌           | ✅         | ❌          | ✅          |
-| Extras<sup>2</sup>                   | ✅       | 💰           | 🚧         | 🚧          | ✅          |
-| **Diagnostics**                      |          |              |            |             |             |
-| PHPStan integration                  | ✅       | ❌           | ❌         | 🚧          | 🚧          |
-| Undefined variable                   | ✅       | 💰           | ✅         | ✅          | ✅          |
-| Type errors                          | ✅       | 💰           | ✅         | 🚧          | ✅          |
-| Unused variable                      | ❌       | ❌           | ✅         | ❌          | ✅          |
-| **Type Intelligence**                |          |              |            |             |             |
-| Generics / `@template`               | ✅       | 🚧           | ✅         | 🚧          | ✅          |
-| `@mixin` completion                  | ✅       | 💰           | ✅         | ✅          | 🚧          |
-| Array / object shapes                | ✅       | ✅           | ✅         | 🚧          | 🚧          |
-| PHPStan types                        | ✅       | ❌           | 🚧         | 🚧          | 🚧          |
-| Conditional return types             | ✅       | ❌           | ✅         | 🚧          | ❌          |
-| Closure parameter inference          | ✅       | 🚧           | 🚧         | 🚧          | ❌          |
-| Laravel Eloquent                     | ✅       | ❌           | 🚧         | ❌          | 🧩          |
-| **Refactoring**                      |          |              |            |             |             |
-| Rename                               | ✅       | 💰           | 💰         | ✅          | ✅          |
-| Common refactorings<sup>3</sup>      | ✅       | ❌           | 💰         | ✅          | ✅          |
-| Extract constant                     | ✅       | ❌           | ❌         | ✅          | ✅          |
-| Promote constructor parameter        | ✅       | ❌           | ❌         | ❌          | ✅          |
-| Simplify expressions                 | ✅       | ❌           | 💰         | ❌          | ✅          |
-| **Performance**                      |          |              |            |             |             |
-| Time to ready                        | < 1 s    | 1 min 25 s   | 3 min 17 s | 15 min 39 s | 19 min 38 s |
-| RAM usage                            | 59 MB    | 520 MB       | 3.9 GB     | 498 MB      | 2.0 GB      |
-| Disk cache                           | 0        | 45 MB        | 0          | 4.1 GB      | 551 MB      |
+|                                 | PHPantom | Intelephense | PHP Tools  | Phpactor    | PHPStorm    |
+| ------------------------------- | -------- | ------------ | ---------- | ----------- | ----------- |
+| Common LSP features<sup>1</sup> | ✅       | ✅           | ✅         | ✅          | ✅          |
+| Workspace symbols               | 🚧       | ✅           | ✅         | ✅          | ✅          |
+| Semantic tokens                 | ✅       | ❌           | ✅         | ❌          | ✅          |
+| Linked editing                  | ✅       | ❌           | ✅         | ❌          | ✅          |
+| Extras<sup>2</sup>              | ✅       | 💰           | 🚧         | 🚧          | ✅          |
+| **Diagnostics**                 |          |              |            |             |             |
+| PHPStan integration             | ✅       | ❌           | ❌         | 🚧          | 🚧          |
+| Undefined variable              | ✅       | 💰           | ✅         | ✅          | ✅          |
+| Type errors                     | ✅       | 💰           | ✅         | 🚧          | ✅          |
+| Unused variable                 | ✅       | ❌           | ✅         | ❌          | ✅          |
+| **Type Intelligence**           |          |              |            |             |             |
+| Generics / `@template`          | ✅       | 🚧           | ✅         | 🚧          | ✅          |
+| `@mixin` completion             | ✅       | 💰           | ✅         | ✅          | 🚧          |
+| Array / object shapes           | ✅       | ✅           | ✅         | 🚧          | 🚧          |
+| PHPStan types                   | ✅       | ❌           | 🚧         | 🚧          | 🚧          |
+| Conditional return types        | ✅       | ❌           | ✅         | 🚧          | ❌          |
+| Closure parameter inference     | ✅       | 🚧           | 🚧         | 🚧          | ❌          |
+| Laravel Eloquent                | ✅       | ❌           | 🚧         | ❌          | 🧩          |
+| **Refactoring**                 |          |              |            |             |             |
+| Rename                          | ✅       | 💰           | 💰         | ✅          | ✅          |
+| Common refactorings<sup>3</sup> | ✅       | ❌           | 💰         | ✅          | ✅          |
+| Extract constant                | ✅       | ❌           | ❌         | ✅          | ✅          |
+| Promote constructor parameter   | ✅       | ❌           | ❌         | ❌          | ✅          |
+| Simplify expressions            | ✅       | ❌           | 💰         | ❌          | ✅          |
+| **Performance**                 |          |              |            |             |             |
+| Time to ready                   | < 1 s    | 1 min 25 s   | 3 min 17 s | 15 min 39 s | 19 min 38 s |
+| RAM usage                       | 59 MB    | 520 MB       | 3.9 GB     | 498 MB      | 2.0 GB      |
+| Disk cache                      | 0        | 45 MB        | 0          | 4.1 GB      | 551 MB      |
 
 <sub>
 🚧 = partial support. 🧩 = requires plugin. 💰 = paid tier.<br>
@@ -94,7 +94,7 @@ PHPantom understands Composer projects out of the box, but works without setup o
 PHPantom stands on the shoulders of:
 
 - **[Mago](https://github.com/carthage-software/mago):** the PHP parser that powers all of PHPantom's AST analysis.
--  **[PHPStan](https://phpstan.org/) and [Psalm](https://psalm.dev/):** for their pioneering work in PHP static analysis and shaping the type ecosystem. PHPantom builds on PHPStan-informed type experience, with full support for `@phpstan-*` annotations.
+- **[PHPStan](https://phpstan.org/) and [Psalm](https://psalm.dev/):** for their pioneering work in PHP static analysis and shaping the type ecosystem. PHPantom builds on PHPStan-informed type experience, with full support for `@phpstan-*` annotations.
 - **[JetBrains phpstorm-stubs](https://github.com/JetBrains/phpstorm-stubs):** type information for the entire PHP standard library, embedded directly into the binary.
 - **[Phpactor](https://github.com/phpactor/phpactor):** the PHP language server whose comprehensive test suite and benchmark fixtures informed PHPantom's own test coverage. Many of PHPantom's type inference fixtures were adapted from Phpactor's reflection tests.
 

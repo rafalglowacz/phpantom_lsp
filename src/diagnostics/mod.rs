@@ -83,27 +83,45 @@
 //!   runs at a time, with the same debounce and pending-URI slot
 //!   design.
 //!
+//! - **Mago lint proxy diagnostics** — run `mago lint --reporting-format
+//!   json --stdin-input` and surface AST-level lint issues (style,
+//!   naming, code smells) as LSP diagnostics.  Auto-detected when
+//!   `mago.toml` exists at the workspace root and `vendor/bin/mago` or
+//!   `mago` on `$PATH` is available; configurable under `[mago]`.
+//!
+//!   Mago lint runs in its own **dedicated worker task**, following the
+//!   same pattern as the PHPCS worker.  Source: `"mago-lint"`.
+//!
+//! - **Mago analyze proxy diagnostics** — run `mago analyze
+//!   --reporting-format json --stdin-input` and surface type-aware
+//!   analysis issues (type mismatches, unreachable code, unused
+//!   definitions) as LSP diagnostics.  Same auto-detection as Mago lint.
+//!
+//!   Mago analyze runs in its own **dedicated worker task**, following
+//!   the same pattern as the PHPStan worker.  Source: `"mago-analyze"`.
+//!
 //! ## Publishing strategy
 //!
 //! Fast diagnostics are **always pushed** immediately via
 //! `textDocument/publishDiagnostics`, merged with cached slow,
-//! PHPStan, and PHPCS results so the editor never shows a gap.  This gives
-//! instant feedback (strikethrough, dimming) regardless of client
-//! capabilities.
+//! PHPStan, PHPCS, and Mago results so the editor never shows a gap.
+//! This gives instant feedback (strikethrough, dimming) regardless of
+//! client capabilities.
 //!
 //! Slow diagnostics are then computed by the background worker:
 //!
 //! - **Pull mode** — the worker caches the full result (fast + fresh
-//!   slow + cached PHPStan + cached PHPCS) and sends
+//!   slow + cached PHPStan + cached PHPCS + cached Mago) and sends
 //!   `workspace/diagnostic/refresh`.  The editor re-pulls and gets
 //!   the complete set.  No second push is needed.
 //!
 //! - **Push mode** (fallback) — the worker pushes the full result
-//!   (fast + fresh slow + cached PHPStan + cached PHPCS) via
-//!   `publishDiagnostics`, replacing the Phase 1 snapshot.
+//!   (fast + fresh slow + cached PHPStan + cached PHPCS + cached Mago)
+//!   via `publishDiagnostics`, replacing the Phase 1 snapshot.
 //!
-//! - **PHPStan / PHPCS workers** — each caches its results and triggers
-//!   a re-deliver (refresh in pull mode, full re-publish in push mode).
+//! - **PHPStan / PHPCS / Mago workers** — each caches its results and
+//!   triggers a re-deliver (refresh in pull mode, full re-publish in
+//!   push mode).
 //!
 //! Diagnostics are published **asynchronously** via [`Backend::schedule_diagnostics`].
 //! On every `did_change` event a version counter is bumped and the
@@ -128,6 +146,7 @@ pub(crate) mod unknown_functions;
 pub(crate) mod unknown_members;
 pub(crate) mod unresolved_member_access;
 mod unused_imports;
+pub(crate) mod unused_variables;
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -135,6 +154,7 @@ use std::sync::atomic::Ordering;
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
+use crate::mago;
 use crate::phpcs;
 use crate::phpstan;
 use crate::util::ranges_overlap;
@@ -161,12 +181,13 @@ impl Backend {
     ) {
         self.collect_syntax_error_diagnostics(uri_str, content, out);
         self.collect_unused_import_diagnostics(uri_str, content, out);
+        self.collect_unused_variable_diagnostics(uri_str, content, out);
     }
 
     /// Collect Phase 2 (slow) diagnostics: unknown class/member/function,
     /// argument count, implementation errors, deprecated usage.  These
     /// require type resolution and are expensive.
-    pub(crate) fn collect_slow_diagnostics(
+    pub fn collect_slow_diagnostics(
         &self,
         uri_str: &str,
         content: &str,
@@ -188,6 +209,34 @@ impl Backend {
         // `$query->where(...)`, and `Product::query()->where(...)`
         // call site in the file.
         let _callable_guard = crate::completion::call_resolution::with_callable_target_cache();
+        let _body_infer_guard = self.activate_body_return_inferrer();
+
+        // ── Phase 2: forward-walked diagnostic scope cache ──────
+        // Walk every function/method body in the file once with the
+        // forward walker, recording scope snapshots at each statement
+        // boundary.  All subsequent `resolve_variable_types` calls
+        // from diagnostic collectors hit the cache (O(log N) lookup)
+        // instead of doing a full backward scan per member-access
+        // span.  This eliminates the O(N × depth × file_size) cost
+        // that caused multi-minute analysis times on large files.
+        let _scope_guard = crate::completion::variable::forward_walk::with_diagnostic_scope_cache();
+        {
+            let file_ctx = self.file_context(uri_str);
+            let class_loader = self.class_loader(&file_ctx);
+            let function_loader_cl = self.function_loader(&file_ctx);
+            let constant_loader_cl = self.constant_loader();
+            let loaders = crate::completion::resolver::Loaders {
+                function_loader: Some(&function_loader_cl),
+                constant_loader: Some(&constant_loader_cl),
+            };
+            crate::completion::variable::forward_walk::build_diagnostic_scopes(
+                content,
+                &file_ctx.classes,
+                &class_loader,
+                loaders,
+                Some(&self.resolved_class_cache),
+            );
+        }
 
         self.collect_unknown_class_diagnostics(uri_str, content, out);
         self.collect_unknown_member_diagnostics(uri_str, content, out);
@@ -249,6 +298,18 @@ impl Backend {
             let cache = self.phpcs_last_diags.lock();
             if let Some(prev_phpcs) = cache.get(uri_str) {
                 merged.extend(prev_phpcs.iter().cloned());
+            }
+        }
+        {
+            let cache = self.mago_lint_last_diags.lock();
+            if let Some(prev) = cache.get(uri_str) {
+                merged.extend(prev.iter().cloned());
+            }
+        }
+        {
+            let cache = self.mago_analyze_last_diags.lock();
+            if let Some(prev) = cache.get(uri_str) {
+                merged.extend(prev.iter().cloned());
             }
         }
         deduplicate_diagnostics(&mut merged);
@@ -602,6 +663,14 @@ const PHPSTAN_DEBOUNCE_MS: u64 = 2_000;
 /// process, so we wait for the user to be idle.
 const PHPCS_DEBOUNCE_MS: u64 = 2_000;
 
+/// How long to wait after the last keystroke before running `mago lint`.
+/// Same debounce as PHPCS — Mago lint is fast (AST-level rules).
+const MAGO_LINT_DEBOUNCE_MS: u64 = 2_000;
+
+/// How long to wait after the last keystroke before running `mago analyze`.
+/// Same debounce as PHPStan — Mago analyze is slower (type-aware).
+const MAGO_ANALYZE_DEBOUNCE_MS: u64 = 2_000;
+
 impl Backend {
     /// Deliver diagnostics for a single file.
     ///
@@ -637,19 +706,24 @@ impl Backend {
         let pull_mode = self.supports_pull_diagnostics.load(Ordering::Acquire);
 
         // ── Phase 1: push fast diagnostics immediately ──────────────
-        // Merge fresh fast with cached slow + PHPStan so the editor
-        // never shows a gap where those diagnostics vanish then
-        // reappear.
+        // In push mode, merge fresh fast with cached slow + PHPStan so
+        // the editor never shows a gap where those diagnostics vanish
+        // then reappear.
         //
-        // Even in pull mode we push Phase 1 via publish_diagnostics so
-        // users see syntax errors and unused-import warnings instantly,
-        // without waiting for a pull round-trip. Phase 2 (slow) results
+        // In pull mode, push ONLY fast diagnostics.  Slow diagnostics
         // are delivered via pull after workspace/diagnostic/refresh.
-        // This is intentional — do not remove the push here.
+        // Merging cached slow here would duplicate them: the editor
+        // shows both the pushed set and the pulled set additively.
         let mut fast_diagnostics = Vec::new();
         self.collect_fast_diagnostics(uri_str, content, &mut fast_diagnostics);
 
-        let phase1 = self.merge_fast_with_cached(uri_str, &fast_diagnostics);
+        let phase1 = if pull_mode {
+            let mut p = fast_diagnostics.clone();
+            deduplicate_diagnostics(&mut p);
+            p
+        } else {
+            self.merge_fast_with_cached(uri_str, &fast_diagnostics)
+        };
 
         // Filter out any diagnostics that were eagerly suppressed by
         // a `codeAction/resolve` handler (e.g. unused-import removal).
@@ -680,7 +754,7 @@ impl Backend {
             cache.insert(uri_str.to_string(), slow_diagnostics.clone());
         }
 
-        // Build the full set: fast + fresh slow + cached PHPStan + cached PHPCS.
+        // Build the full set: fast + fresh slow + cached PHPStan + cached PHPCS + cached Mago.
         let mut full = fast_diagnostics;
         full.extend(slow_diagnostics);
         let phpstan_before: Vec<Diagnostic> = {
@@ -695,6 +769,18 @@ impl Backend {
             let cache = self.phpcs_last_diags.lock();
             if let Some(phpcs_diags) = cache.get(uri_str) {
                 full.extend(phpcs_diags.iter().cloned());
+            }
+        }
+        {
+            let cache = self.mago_lint_last_diags.lock();
+            if let Some(mago_diags) = cache.get(uri_str) {
+                full.extend(mago_diags.iter().cloned());
+            }
+        }
+        {
+            let cache = self.mago_analyze_last_diags.lock();
+            if let Some(mago_diags) = cache.get(uri_str) {
+                full.extend(mago_diags.iter().cloned());
             }
         }
         deduplicate_diagnostics(&mut full);
@@ -767,9 +853,11 @@ impl Backend {
         // Wake the worker (no-op if it is already awake).
         self.diag_notify.notify_one();
 
-        // Also schedule PHPStan and PHPCS runs for this file.
+        // Also schedule PHPStan, PHPCS, and Mago runs for this file.
         self.schedule_phpstan(uri.clone());
-        self.schedule_phpcs(uri);
+        self.schedule_phpcs(uri.clone());
+        self.schedule_mago_lint(uri.clone());
+        self.schedule_mago_analyze(uri);
     }
 
     /// Invalidate diagnostics for all open files after a cross-file change.
@@ -1242,13 +1330,292 @@ impl Backend {
         }
     }
 
+    // ── Mago lint worker ────────────────────────────────────────────
+
+    /// Schedule a Mago lint run for a single file.
+    ///
+    /// Only the most recent file is kept: if the user switches files or
+    /// types rapidly, earlier requests are superseded.
+    fn schedule_mago_lint(&self, uri: String) {
+        *self.mago_lint_pending_uri.lock() = Some(uri);
+        self.mago_lint_notify.notify_one();
+    }
+
+    /// Long-lived background task that runs `mago lint` on pending files.
+    ///
+    /// Spawned once during `initialized`.  This task is completely
+    /// independent: native diagnostics, PHPStan, PHPCS, and Mago
+    /// analyze are never blocked.
+    ///
+    /// At most one `mago lint` process runs at a time.  The worker
+    /// loop follows the same pattern as the PHPCS worker.
+    pub(crate) async fn mago_lint_worker(&self) {
+        loop {
+            if self.shutdown_flag.load(Ordering::Acquire) {
+                return;
+            }
+
+            // ── Step 1: wait for work ───────────────────────────────
+            self.mago_lint_notify.notified().await;
+
+            if self.shutdown_flag.load(Ordering::Acquire) {
+                return;
+            }
+
+            // Drain any extra stored permits.
+            let _ =
+                tokio::time::timeout(std::time::Duration::ZERO, self.mago_lint_notify.notified())
+                    .await;
+
+            // ── Step 2: debounce ────────────────────────────────────
+            loop {
+                let version_before = self.diag_version.load(Ordering::Acquire);
+                tokio::time::sleep(std::time::Duration::from_millis(MAGO_LINT_DEBOUNCE_MS)).await;
+                let version_after = self.diag_version.load(Ordering::Acquire);
+                if version_before == version_after {
+                    break;
+                }
+            }
+
+            // ── Step 3: snapshot the pending URI ────────────────────
+            let uri = {
+                let mut pending = self.mago_lint_pending_uri.lock();
+                pending.take()
+            };
+            let uri = match uri {
+                Some(u) => u,
+                None => continue,
+            };
+
+            let content = {
+                let files = self.open_files.read();
+                match files.get(&uri) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                }
+            };
+
+            // ── Step 4: resolve Mago binary ─────────────────────────
+            let config = self.config();
+            if config.mago.is_disabled() {
+                continue;
+            }
+
+            let workspace_root = self.workspace_root.read().clone();
+            let workspace_root = match workspace_root {
+                Some(root) => root,
+                None => continue,
+            };
+
+            // Mago requires mago.toml to operate.
+            if !mago::has_mago_config(&workspace_root) {
+                continue;
+            }
+
+            let file_path = match uri.parse::<Url>().ok().and_then(|u| u.to_file_path().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let bin_dir: Option<String> = crate::composer::read_composer_package(&workspace_root)
+                .map(|pkg| crate::composer::get_bin_dir(&pkg));
+
+            let resolved =
+                match mago::resolve_mago(Some(&workspace_root), &config.mago, bin_dir.as_deref()) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+            // ── Step 5: run mago lint (the slow part) ───────────────
+            let mago_config = config.mago.clone();
+            let shutdown_flag = Arc::clone(&self.shutdown_flag);
+            let mago_diags = {
+                let result = tokio::task::spawn_blocking(move || {
+                    mago::run_mago_lint(
+                        &resolved,
+                        &content,
+                        &file_path,
+                        &workspace_root,
+                        &mago_config,
+                        &shutdown_flag,
+                    )
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(diags)) => diags,
+                    Ok(Err(_e)) => continue,
+                    Err(_join_err) => continue,
+                }
+            };
+
+            // ── Step 6: cache results and re-publish ────────────────
+            let content = {
+                let files = self.open_files.read();
+                match files.get(&uri) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                }
+            };
+
+            {
+                let mut cache = self.mago_lint_last_diags.lock();
+                cache.insert(uri.clone(), mago_diags);
+            }
+
+            self.publish_diagnostics_for_file(&uri, &content).await;
+        }
+    }
+
+    // ── Mago analyze worker ─────────────────────────────────────────
+
+    /// Schedule a Mago analyze run for a single file.
+    ///
+    /// Only the most recent file is kept: if the user switches files or
+    /// types rapidly, earlier requests are superseded.
+    fn schedule_mago_analyze(&self, uri: String) {
+        *self.mago_analyze_pending_uri.lock() = Some(uri);
+        self.mago_analyze_notify.notify_one();
+    }
+
+    /// Long-lived background task that runs `mago analyze` on pending files.
+    ///
+    /// Spawned once during `initialized`.  This task is completely
+    /// independent: native diagnostics, PHPStan, PHPCS, and Mago lint
+    /// are never blocked.
+    ///
+    /// At most one `mago analyze` process runs at a time.  The worker
+    /// loop follows the same pattern as the PHPStan worker.
+    pub(crate) async fn mago_analyze_worker(&self) {
+        loop {
+            if self.shutdown_flag.load(Ordering::Acquire) {
+                return;
+            }
+
+            // ── Step 1: wait for work ───────────────────────────────
+            self.mago_analyze_notify.notified().await;
+
+            if self.shutdown_flag.load(Ordering::Acquire) {
+                return;
+            }
+
+            // Drain any extra stored permits.
+            let _ = tokio::time::timeout(
+                std::time::Duration::ZERO,
+                self.mago_analyze_notify.notified(),
+            )
+            .await;
+
+            // ── Step 2: debounce (longer — type-aware analysis) ─────
+            loop {
+                let version_before = self.diag_version.load(Ordering::Acquire);
+                tokio::time::sleep(std::time::Duration::from_millis(MAGO_ANALYZE_DEBOUNCE_MS))
+                    .await;
+                let version_after = self.diag_version.load(Ordering::Acquire);
+                if version_before == version_after {
+                    break;
+                }
+            }
+
+            // ── Step 3: snapshot the pending URI ────────────────────
+            let uri = {
+                let mut pending = self.mago_analyze_pending_uri.lock();
+                pending.take()
+            };
+            let uri = match uri {
+                Some(u) => u,
+                None => continue,
+            };
+
+            let content = {
+                let files = self.open_files.read();
+                match files.get(&uri) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                }
+            };
+
+            // ── Step 4: resolve Mago binary ─────────────────────────
+            let config = self.config();
+            if config.mago.is_disabled() {
+                continue;
+            }
+
+            let workspace_root = self.workspace_root.read().clone();
+            let workspace_root = match workspace_root {
+                Some(root) => root,
+                None => continue,
+            };
+
+            // Mago requires mago.toml to operate.
+            if !mago::has_mago_config(&workspace_root) {
+                continue;
+            }
+
+            let file_path = match uri.parse::<Url>().ok().and_then(|u| u.to_file_path().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let bin_dir: Option<String> = crate::composer::read_composer_package(&workspace_root)
+                .map(|pkg| crate::composer::get_bin_dir(&pkg));
+
+            let resolved =
+                match mago::resolve_mago(Some(&workspace_root), &config.mago, bin_dir.as_deref()) {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+            // ── Step 5: run mago analyze (the slow part) ────────────
+            let mago_config = config.mago.clone();
+            let shutdown_flag = Arc::clone(&self.shutdown_flag);
+            let mago_diags = {
+                let result = tokio::task::spawn_blocking(move || {
+                    mago::run_mago_analyze(
+                        &resolved,
+                        &content,
+                        &file_path,
+                        &workspace_root,
+                        &mago_config,
+                        &shutdown_flag,
+                    )
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(diags)) => diags,
+                    Ok(Err(_e)) => continue,
+                    Err(_join_err) => continue,
+                }
+            };
+
+            // ── Step 6: cache results and re-publish ────────────────
+            let content = {
+                let files = self.open_files.read();
+                match files.get(&uri) {
+                    Some(c) => c.clone(),
+                    None => continue,
+                }
+            };
+
+            {
+                let mut cache = self.mago_analyze_last_diags.lock();
+                cache.insert(uri.clone(), mago_diags);
+            }
+
+            self.publish_diagnostics_for_file(&uri, &content).await;
+        }
+    }
+
     /// Clear diagnostics for a file (e.g. on `did_close`).
     pub(crate) async fn clear_diagnostics_for_file(&self, uri_str: &str) {
         // Remove cached slow diagnostics so we don't leak memory.
         self.diag_last_slow.lock().remove(uri_str);
-        // Remove cached PHPStan and PHPCS diagnostics too.
+        // Remove cached PHPStan, PHPCS, and Mago diagnostics too.
         self.phpstan_last_diags.lock().remove(uri_str);
         self.phpcs_last_diags.lock().remove(uri_str);
+        self.mago_lint_last_diags.lock().remove(uri_str);
+        self.mago_analyze_last_diags.lock().remove(uri_str);
         // Remove pull-diagnostic caches.
         self.diag_result_ids.lock().remove(uri_str);
         self.diag_last_full.lock().remove(uri_str);

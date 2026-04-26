@@ -2807,6 +2807,89 @@ public function find(array $pens): void {
     );
 }
 
+/// `$valid = null; foreach (...) { if (...) { $valid = $item; break; } }`
+/// `if (!$valid) { return ...; } $valid->details` must not produce a
+/// scalar_member_access diagnostic.  The guard clause (`if (!$valid) { return; }`)
+/// strips null from the scope, leaving only the class type.
+///
+/// This test activates the forward-walker scope cache to reproduce a
+/// regression where the scope cache records `$validMandate` as `null`
+/// only (the foreach body assignment is lost or the guard clause
+/// narrowing doesn't strip null).
+#[test]
+fn no_false_positive_null_init_foreach_guard_clause_early_return() {
+    let php = r#"<?php
+class Mandate {
+    public object $details;
+    public function isInvalid(): bool { return false; }
+}
+class Client {
+    /** @return mixed */
+    public function getMandates(): mixed { return []; }
+}
+class Svc {
+    public function check(): ?object {
+        $client = new Client();
+        $mandates = $client->getMandates();
+        $validMandate = null;
+        /** @var Mandate $mandate */
+        foreach ($mandates as $mandate) {
+            if (!$mandate->isInvalid()) {
+                $validMandate = $mandate;
+                break;
+            }
+        }
+
+        if (!$validMandate) {
+            return null;
+        }
+
+        $details = $validMandate->details;
+        return $details;
+    }
+}
+"#;
+    let backend = Backend::new_test();
+    backend.update_ast("file:///test.php", php);
+
+    // Activate the scope cache and build scopes (mirrors the analyse path).
+    let _scope_guard = crate::completion::variable::forward_walk::with_diagnostic_scope_cache();
+    {
+        let file_ctx = backend.file_context("file:///test.php");
+        let class_loader = backend.class_loader(&file_ctx);
+        let function_loader_cl = backend.function_loader(&file_ctx);
+        let constant_loader_cl = backend.constant_loader();
+        let loaders = crate::completion::resolver::Loaders {
+            function_loader: Some(&function_loader_cl),
+            constant_loader: Some(&constant_loader_cl),
+        };
+        let local_classes: Vec<std::sync::Arc<crate::types::ClassInfo>> = backend
+            .ast_map
+            .read()
+            .get("file:///test.php")
+            .cloned()
+            .unwrap_or_default();
+        crate::completion::variable::forward_walk::build_diagnostic_scopes(
+            php,
+            &local_classes,
+            &class_loader,
+            loaders,
+            Some(&backend.resolved_class_cache),
+        );
+    }
+
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics("file:///test.php", php, &mut diags);
+    let scalar_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(NumberOrString::String("scalar_member_access".to_string())))
+        .collect();
+    assert!(
+        scalar_diags.is_empty(),
+        "should not flag scalar_member_access on $validMandate->details after guard clause, got: {scalar_diags:?}"
+    );
+}
+
 /// Direct instantiation inside foreach body (no var-to-var).
 #[test]
 fn no_false_positive_null_init_foreach_direct_reassign() {
@@ -4388,15 +4471,11 @@ public function capture(Order $order, array $payments): void {
 
 #[test]
 fn no_false_positive_when_variable_reassigned_inside_nested_foreach() {
-    // Regression test for depth-limited variable resolution.  When
-    // `$orderCostPrice` is reassigned inside a nested foreach via
-    // `$orderCostPrice = $orderCostPrice->add(…)`, the
-    // self-referential RHS triggers recursive calls to
-    // resolve_variable_types.  With two levels of foreach nesting
-    // the recursion reaches MAX_VAR_RESOLUTION_DEPTH, producing an
-    // empty result.  The outer foreach access must still resolve
-    // correctly (at depth 0) without a false "type could not be
-    // resolved" diagnostic.
+    // Regression test for self-referential variable reassignment.
+    // When `$orderCostPrice` is reassigned inside a nested foreach
+    // via `$orderCostPrice = $orderCostPrice->add(…)`, the forward
+    // walker must resolve the outer foreach access correctly without
+    // a false "type could not be resolved" diagnostic.
     //
     // Real-world pattern from OrderService:618:
     //   $zero = new Decimal('0');
@@ -4945,5 +5024,170 @@ class Svc {
     assert!(
         diags.is_empty(),
         "expected no diagnostics after assert instanceof on property, got: {diags:?}",
+    );
+}
+
+/// When a method has a conditional return type like
+/// `($type is class-string<SomeInterface> ? ThenType : ElseType)`,
+/// and the argument class does NOT implement `SomeInterface`, the
+/// analyzer should use the else-branch return type.
+///
+/// Regression: the conditional resolver always took the then-branch
+/// when the argument was a `::class` literal, without checking the
+/// subtype relationship against the bound.
+#[test]
+fn no_false_positive_conditional_return_class_string_bound() {
+    let php = r#"<?php
+interface FormInterface {
+    public function submit(mixed $data): void;
+    public function getData(): mixed;
+}
+interface FormFlowTypeInterface {}
+interface FormFlowInterface {}
+abstract class AbstractController {
+    /**
+     * @return ($type is class-string<FormFlowTypeInterface> ? FormFlowInterface : FormInterface)
+     */
+    protected function createForm(string $type, mixed $data = null, array $options = []): FormInterface {}
+}
+class ImageUploadFormType {}
+class ImageController extends AbstractController {
+    public function store(): void {
+        $form = $this->createForm(ImageUploadFormType::class);
+        $form->submit([]);
+        $form->getData();
+    }
+}
+"#;
+    let backend = Backend::new_test();
+    let diags = collect(&backend, "file:///test.php", php);
+    let unknown_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| {
+            d.code == Some(NumberOrString::String("unknown_member".to_string()))
+                || d.code == Some(NumberOrString::String("scalar_member_access".to_string()))
+        })
+        .collect();
+    assert!(
+        unknown_diags.is_empty(),
+        "should not flag unknown members on $form when createForm conditional returns FormInterface, got: {unknown_diags:?}"
+    );
+}
+
+/// Cross-file variant: the base class with the conditional return type
+/// is in a separate file (simulating vendor/symfony).  This tests that
+/// `conditional_return` is properly inherited through `resolve_class_fully`
+/// when the method is defined in an ancestor loaded via the class loader.
+#[test]
+fn no_false_positive_conditional_return_class_string_bound_cross_file() {
+    let base_php = r#"<?php
+interface FormInterface {
+    public function submit(mixed $data): void;
+    public function getData(): mixed;
+}
+interface FormFlowTypeInterface {}
+interface FormFlowInterface {}
+abstract class AbstractController {
+    /**
+     * @return ($type is class-string<FormFlowTypeInterface> ? FormFlowInterface : FormInterface)
+     */
+    protected function createForm(string $type, mixed $data = null, array $options = []): FormInterface {}
+}
+"#;
+    let controller_php = r#"<?php
+class ImageUploadFormType {}
+class ImageController extends AbstractController {
+    public function store(): void {
+        $form = $this->createForm(ImageUploadFormType::class);
+        $form->submit([]);
+        $form->getData();
+    }
+}
+"#;
+    let backend = Backend::new_test();
+    // Index the base file first (simulates vendor classes).
+    backend.update_ast("file:///base.php", base_php);
+    // Then index the controller file.
+    backend.update_ast("file:///controller.php", controller_php);
+
+    let mut out = Vec::new();
+    backend.collect_unknown_member_diagnostics("file:///controller.php", controller_php, &mut out);
+    let unknown_diags: Vec<_> = out
+        .iter()
+        .filter(|d| {
+            d.code == Some(NumberOrString::String("unknown_member".to_string()))
+                || d.code == Some(NumberOrString::String("scalar_member_access".to_string()))
+        })
+        .collect();
+    assert!(
+        unknown_diags.is_empty(),
+        "cross-file: should not flag unknown members on $form when createForm conditional returns FormInterface, got: {unknown_diags:?}"
+    );
+}
+
+/// When two `array_map` calls in the same method use different closure
+/// parameter names that happen to collide (e.g. `$row`), the second
+/// closure's parameter type must come from its own type hint, not from
+/// the first closure's `@param` docblock.
+///
+/// Regression: the forward walker recorded a scope snapshot for the
+/// first arrow function's `$row` (typed as `array{activity: int}`),
+/// and when the second arrow function's `$row` (typed as `Activity`)
+/// failed to seed (e.g. because the class wasn't resolved), the
+/// snapshot lookup fell back to the first closure's stale entry.
+#[test]
+fn no_false_positive_closure_param_scope_leak_between_array_maps() {
+    let php = r#"<?php
+class Activity {
+    public int $id = 0;
+    public function toResponseObject(): string { return ''; }
+}
+class Repo {
+    /**
+     * @return list<array{activity: int, distance: int}>
+     */
+    public function getStats(): array { return []; }
+
+    /**
+     * @return list<Activity>
+     */
+    public function getActivities(): array { return []; }
+
+    public function run(): void {
+        $rows = $this->getStats();
+
+        $ids = \array_map(
+            /** @param array{activity: int, distance: int} $row */
+            static fn(array $row): int => $row['activity'],
+            $rows,
+        );
+
+        /** @var list<Activity> */
+        $activities = $this->getActivities();
+
+        $result = \array_map(
+            static fn(Activity $row): string => $row->toResponseObject(),
+            $activities,
+        );
+    }
+}
+"#;
+    let backend = Backend::new_test();
+    let diags = collect(&backend, "file:///test.php", php);
+    let scalar_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(NumberOrString::String("scalar_member_access".to_string())))
+        .collect();
+    assert!(
+        scalar_diags.is_empty(),
+        "should not flag scalar_member_access on $row->toResponseObject() in second closure, got: {scalar_diags:?}"
+    );
+    let unknown_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.message.contains("toResponseObject"))
+        .collect();
+    assert!(
+        unknown_diags.is_empty(),
+        "should not flag unknown member 'toResponseObject' on $row in second closure, got: {unknown_diags:?}"
     );
 }

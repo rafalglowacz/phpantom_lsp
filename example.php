@@ -456,6 +456,24 @@ class ImplementsGenericDemo
 }
 
 
+// ── Built-in Generic Collections (ArrayIterator, SplFixedArray, etc.) ───────
+
+class BuiltinGenericCollectionDemo
+{
+    /** @return \ArrayIterator<int, Pen> */
+    public function getPens(): \ArrayIterator { return new \ArrayIterator([new Pen()]); }
+
+    public function demo(): void
+    {
+        $pen = $this->getPens()->current();
+        $pen->write();                            // ArrayIterator<int, Pen> → current() returns Pen
+
+        // Direct chain also works:
+        $this->getPens()->current()->write();     // same resolution through the chain
+    }
+}
+
+
 // ── Inherited Docblock Types ────────────────────────────────────────────────
 
 class InheritedDocblockDemo
@@ -722,6 +740,33 @@ class ForeachArrayAccessDemo
 
         $inferred = [new Pen(), new Marker()];
         $inferred[0]->write();                    // element type inferred from literal
+    }
+}
+
+// ── Foreach By-Reference ────────────────────────────────────────────────────
+
+class ForeachByReferenceDemo
+{
+    public function demo(): void
+    {
+        /** @var list<Pen> $pens */
+        $pens = getUnknownValue();
+
+        // By-reference foreach: $pen resolves to element type (Pen)
+        // and is not flagged as undefined or unused.
+        foreach ($pens as &$pen) {
+            $pen->write();                        // Pen from list<Pen>
+            $pen = new Pen();                     // reassignment through reference
+        }
+        unset($pen);
+
+        // Key-value with by-reference value
+        /** @var array<string, Pen> $named */
+        $named = getUnknownValue();
+        foreach ($named as $key => &$tool) {
+            $tool->color();                       // Pen from array<string, Pen>
+        }
+        unset($tool);
     }
 }
 
@@ -1458,6 +1503,16 @@ class ArrayFuncDemo
 
         $mapped = array_map(fn($pen) => $pen, $src->members);
         $mapped[0]->write();              // Pen from array_map fallback
+
+        // array_reduce: return type inferred from initial value (3rd arg)
+        $merged = array_reduce($src->members, function(Pen $carry, Pen $item): Pen {
+            return $carry;
+        }, new Pen('merged'));
+        $merged->write();                 // Pen from initial value argument
+
+        // array_sum / array_product: always int|float
+        $total = array_sum([10, 20, 30]);
+        $product = array_product([2, 3, 4]);
     }
 }
 
@@ -3014,10 +3069,12 @@ class CodeLensDemo extends ScaffoldingAbstractShape implements ScaffoldingDrawab
 
 
 // ── Inlay Hints ─────────────────────────────────────────────────────────────
-// Enable inlay hints in your editor to see parameter names and by-reference
-// indicators at call sites. PHPantom shows:
+// Enable inlay hints in your editor to see parameter names, by-reference
+// indicators, and closure type hints. PHPantom shows:
 //   - Parameter name hints: greet(/*name:*/ 'Alice', /*age:*/ 25)
 //   - By-reference indicators: modify(/*&data:*/ $arr)
+//   - Closure param types: $users->map(fn(/*User*/ $u) => $u->name)
+//   - Closure return types: fn($u) /*: string*/ => $u->name
 // Hints are suppressed when the argument already makes the parameter obvious
 // (e.g. $name matches $name, or a property ->name matches $name).
 
@@ -3045,12 +3102,55 @@ class InlayHintsDemo
         // Chained method calls:
         $pen = Pen::make('blue');                  // color:
         $pen->rename('Sky Blue');                  // name:
+
+        // ── Closure / arrow function hints ─────────────────────────
+        // When a closure or arrow function is passed to a callable-typed
+        // parameter, PHPantom infers types from the callable signature.
+        // Untyped params show the inferred type before $var, and the
+        // return type shows after the closing parenthesis.
+
+        // Arrow function: "User " before $u, ": string" after parens.
+        $names = $this->mapUsers(fn($u) => $u->name);
+
+        // Long-form closure gets the same treatment:
+        $upper = $this->mapUsers(function ($u) {
+            return strtoupper($u->name);
+        });
+
+        // Partial typing: only the untyped $b gets a hint.
+        $sum2 = $this->reduce(fn(int $a, $b) => $a + $b);
+
+        // Already-typed parameters and return types get no hint:
+        $emails = $this->mapUsers(fn(User $u): string => $u->email);
+
+        // Standalone functions with callable params work too:
+        $doubled = $this->transformItems([1, 2, 3], fn($x) => $x * 2);
+
+        // Method call context — filter shows "Order " before $o, ": bool" after.
+        $big = $this->filterOrders(fn($o) => $o->isAdmin);
     }
 
     /** @param array<int> &$data */
     public function modify(array &$data, string $direction): void {}
 
     public function search(string $needle, int $limit = 10): mixed { return null; }
+
+    /**
+     * @template T
+     * @param array<T> $items
+     * @param callable(T): T $fn
+     * @return array<T>
+     */
+    public function transformItems(array $items, callable $fn): array { return $fn(); }
+
+    /** @param \Closure(User): string $fn */
+    public function mapUsers(\Closure $fn): array { return []; }
+
+    /** @param callable(int, int): int $fn */
+    public function reduce(callable $fn): int { return 0; }
+
+    /** @param callable(User): bool $fn */
+    public function filterOrders(callable $fn): array { return []; }
 }
 
 
@@ -3367,6 +3467,32 @@ class ConditionalLoopShapeDemo
 }
 
 
+// ── Conditional Shape Key Completion ────────────────────────────────────────
+// When an array shape gains a key inside an if-block, completion resolves
+// through the union of shapes produced by branch merging.
+
+class ConditionalShapeKeyDemo
+{
+    public function demo(?Pen $pen): void
+    {
+        // Base shape with a known key
+        $options = [
+            'name' => 'default',
+        ];
+
+        // Conditionally add a key with an object value
+        if ($pen !== null) {
+            $options['tool'] = $pen;
+        }
+
+        // After the if-block, $options is a union of shapes:
+        //   array{name: string} | array{name: string, tool: Pen}
+        // Completion on the conditionally-added key resolves to Pen.
+        $options['tool']->write();        // Pen method via conditional shape union
+    }
+}
+
+
 // ── Invalid Class-Like Kind Diagnostics ─────────────────────────────────────
 // PHPantom flags class-like names used in positions where their kind is
 // guaranteed to fail at runtime.  Open demo() and look for Error/Warning
@@ -3432,8 +3558,140 @@ class UntypedPropertyInferenceDemo
 }
 
 
+// ── Deep Variable Chain ─────────────────────────────────────────────────────
+// The variable resolver walks function bodies top-to-bottom in a single pass.
+// Assignment chains of any depth resolve without recursion or depth limits.
+// Place the cursor after `->` on any variable below to see completions from
+// the correct class, regardless of how many intermediate assignments there are.
+
+class DeepVariableChainDemo
+{
+    public function demo(): void
+    {
+        // 5-level chain: each variable is assigned from a method/property on the previous.
+        $brush = new Brush();
+        $canvas = $brush->getCanvas();
+        $easel = $canvas->easel;
+        $material = $easel->material;         // string from Easel::$material
+        $back = $canvas->getBrush();
+        $back->stroke();                      // Brush::stroke() — full round-trip
+
+        // Reassignment chains: the resolver picks the most recent assignment.
+        $tool = new Pen();
+        $tool->write();                       // Pen::write()
+        $tool = new Pencil();
+        $tool->sketch();                      // Pencil::sketch() — Pen::write() is gone
+        $tool = new Marker();
+        $tool->highlight();                   // Marker::highlight()
+    }
+}
+
+
+// ── Closure Scope Inference ─────────────────────────────────────────────────
+// Closures capture variables from the enclosing scope via `use()`. Arrow
+// functions inherit the enclosing scope automatically. Untyped closure
+// parameters are inferred from the callable signature of the enclosing call.
+
+class ClosureScopeInferenceDemo
+{
+    /** @param list<Pen> $pens */
+    public function demo(array $pens): void
+    {
+        // Closure captures $pens via use() and iterates over it.
+        $worker = function () use ($pens): void {
+            foreach ($pens as $pen) {
+                $pen->write();                // Pen from captured $pens
+            }
+        };
+
+        // Arrow function inherits enclosing scope automatically.
+        $brush = new Brush();
+        $sized = fn() => $brush->setSize('large');
+
+        // Variables survive past closure arguments in chained calls.
+        $product = new Pen();
+        $items = [1, 2, 3];
+        array_map(function (int $i) { return $i * 2; }, $items);
+        $product->write();                    // Pen — not lost after the closure
+    }
+}
+
+// ── Body Return Type Inference ──────────────────────────────────────────────
+// When a method has no declared return type and no @return docblock,
+// PHPantom infers the type by scanning the method body for return statements.
+
+class BodyReturnTypeDemo
+{
+    public function demo(): void
+    {
+        $factory = new ScaffoldingUntypedFactory();
+
+        // Single return: `return new Pen()` → Pen
+        $pen = $factory->createPen();
+        $pen->write();
+
+        // Multiple returns: union of `new Pen()` and `new Pencil()`
+        $tool = $factory->createTool(true);
+        $tool->write();                           // shared by Pen (also Pencil via sketch)
+
+        // No return statements → void (no completions)
+        $factory->setup();
+
+        $pencils = $factory->getPencils();
+        foreach ($pencils as $pencil) {
+            $pencil->sketch();
+        }
+    }
+}
+
+// ── Global Keyword ─────────────────────────────────────────────────────────
+
+$globalPen = new Pen();
+
+function globalKeywordDemo(): void {
+    global $globalPen;
+    $globalPen->write();                  // Pen — resolved from top-level scope via `global`
+}
+
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 // ┃  SCAFFOLDING — Supporting definitions below this line.              ┃
+
+// ── Template-param @mixin scaffolding ───────────────────────────────────────
+interface ScaffoldingAstNodeInterface {
+    public function getStartColumn(): int;
+    public function getEndColumn(): int;
+}
+
+/**
+ * @template-covariant TNode of ScaffoldingAstNodeInterface
+ * @mixin TNode
+ */
+abstract class ScaffoldingAbstractAstNode {
+    /** @return string */
+    public function getMetric(): string { return ''; }
+    /** @return mixed */
+    public function __call(string $name, array $arguments): mixed {
+        return match ($name) {
+            'getStartColumn', 'getEndColumn' => 0,
+            default => null,
+        };
+    }
+}
+
+/**
+ * @extends ScaffoldingAbstractAstNode<ScaffoldingAstNodeInterface>
+ */
+class ScaffoldingConcreteAstNode extends ScaffoldingAbstractAstNode {}
+
+// ── class-string<T> instantiation scaffolding ───────────────────────────────
+class ScaffoldingClassStringFactory {
+    /**
+     * @template T of object
+     * @param class-string<T> $class
+     * @return T
+     */
+    public static function create(string $class): object { return new $class(); }
+}
 
 // ── Attribute Completion scaffolding ────────────────────────────────────────
 #[\Attribute(\Attribute::TARGET_CLASS)]
@@ -3515,6 +3773,27 @@ class ScaffoldingUntypedLogger
 }
 
 // ── Demo-Specific Scaffolding ───────────────────────────────────────────────
+
+// ── Body Return Type Inference scaffolding ──────────────────────────────────
+class ScaffoldingUntypedFactory
+{
+    public function createPen() { return new Pen(); }
+
+    public function createTool(bool $flag)
+    {
+        if ($flag) {
+            return new Pen();
+        }
+        return new Pencil();
+    }
+
+    public function setup() { echo 'initializing'; }
+
+    public function getPencils()
+    {
+        return [new Pencil()];
+    }
+}
 
 // ── Inherited Docblock Scaffolding ──────────────────────────────────────────
 
@@ -5296,6 +5575,13 @@ enum OrderStatus: string
 
 function runDemoAssertions(): void
 {
+    // ── Body Return Type Inference ──────────────────────────────────────
+    $factory = new ScaffoldingUntypedFactory();
+    $pen = $factory->createPen();
+    assert($pen instanceof Pen, 'createPen() must return Pen (inferred from body)');
+    $tool = $factory->createTool(true);
+    assert($tool instanceof Pen || $tool instanceof Pencil, 'createTool() must return Pen|Pencil');
+
     // ── Return Type: static ─────────────────────────────────────────────
     $pen = Pen::make();
     assert($pen instanceof Pen, 'Pen::make() must return Pen');
@@ -5844,6 +6130,17 @@ function runDemoAssertions(): void
     $last = end($penArray2);
     assert($last instanceof Pen, 'end() must return Pen');
 
+    $reduced = array_reduce($penArray2, function(Pen $carry, Pen $item): Pen {
+        return $carry;
+    }, new Pen('merged'));
+    assert($reduced instanceof Pen, 'array_reduce must return type of initial value');
+
+    $sum = array_sum([10, 20, 30]);
+    assert(is_int($sum) || is_float($sum), 'array_sum must return int or float');
+
+    $product = array_product([2, 3, 4]);
+    assert(is_int($product) || is_float($product), 'array_product must return int or float');
+
     // ── Match expression types ──────────────────────────────────────────
     $matchResult = match (0) {
         0 => new ElasticProductReviewIndexService(),
@@ -6040,6 +6337,15 @@ function runDemoAssertions(): void
     $productRel = $orderLine->product();
     assert($productRel instanceof ScaffoldingMixinBelongsTo, 'OrderLine::product() must return ScaffoldingMixinBelongsTo');
 
+    // ── @mixin with template parameter ──────────────────────────────────
+    $tplMixinNode = new ScaffoldingConcreteAstNode();
+    $col = $tplMixinNode->getStartColumn();
+    assert(is_int($col), 'ConcreteAstNode (via @mixin TNode bound) getStartColumn() must return int');
+
+    // ── new $var() with class-string<T> ─────────────────────────────────
+    $penFromClassString = ScaffoldingClassStringFactory::create(Pen::class);
+    assert($penFromClassString instanceof Pen, 'ClassStringFactory::create(Pen::class) must return Pen');
+
     // ── Inherited docblock type propagation ─────────────────────────────
     $iHolder = new ScaffoldingConcreteHolder();
     $iHolderPens = $iHolder->getPens();
@@ -6150,6 +6456,12 @@ function runDemoAssertions(): void
     $labFound = $labIndexed['blue'] ?? null;
     assert($labFound instanceof Pen, 'Null-coalesce on variable-key array must resolve to Pen');
 
+    // ── Conditional shape key addition ──────────────────────────────────
+    $cskOptions = ['name' => 'default'];
+    $cskPen = new Pen('blue');
+    $cskOptions['tool'] = $cskPen;
+    assert($cskOptions['tool'] instanceof Pen, 'Conditional shape key must resolve to Pen');
+
     // ── Conditional loop shape (keyed assignment in if/else) ────────────
     $shapePens = [new Pen('red'), new Pen('blue'), new Pen('red')];
     $shapeGrouped = [];
@@ -6175,6 +6487,36 @@ function runDemoAssertions(): void
     $repoRef = new ScaffoldingUntypedRepo();
     $found = $repoRef->findById(1);
     assert($found instanceof Pen, 'ScaffoldingUntypedRepo::findById() must return Pen');
+
+    // ── Deep variable chain ────────────────────────────────────────────
+    $chainBrush = new Brush();
+    $chainCanvas = $chainBrush->getCanvas();
+    assert($chainCanvas instanceof Canvas, 'Brush::getCanvas() must return Canvas');
+    $chainEasel = $chainCanvas->easel;
+    assert($chainEasel instanceof Easel, 'Canvas::$easel must be Easel');
+    $chainMaterial = $chainEasel->material;
+    assert(is_string($chainMaterial), 'Easel::$material must be string');
+    $chainBack = $chainCanvas->getBrush();
+    assert($chainBack instanceof Brush, 'Canvas::getBrush() must return Brush');
+
+    // ── Closure scope inference ────────────────────────────────────────
+    $scopePens = [new Pen()];
+    $scopeWorker = function () use ($scopePens): void {
+        foreach ($scopePens as $sp) {
+            assert($sp instanceof Pen, 'Captured $pens element must be Pen');
+        }
+    };
+    $scopeWorker();
+
+    // ── Global keyword ─────────────────────────────────────────────────
+    global $globalPen;
+    assert($globalPen instanceof Pen, '$globalPen must be Pen at top level');
+    globalKeywordDemo();
+
+    // ── Built-in generic collections ────────────────────────────────────
+    $demo = new BuiltinGenericCollectionDemo();
+    $pen = $demo->getPens()->current();
+    assert($pen instanceof Pen, 'ArrayIterator<int, Pen>::current() must return Pen');
 
     echo "All assertions passed.\n";
 }

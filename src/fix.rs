@@ -157,7 +157,7 @@ fn fix_unused_imports(backend: &Backend, uri: &str, content: &str) -> (String, V
 
     // Sort edits in reverse order so byte offsets remain valid as we
     // apply deletions from bottom to top.
-    edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+    edits.sort_by_key(|b| std::cmp::Reverse(b.range.start));
 
     // Record what we fixed before applying edits.
     let fixes: Vec<AppliedFix> = diagnostics
@@ -665,16 +665,8 @@ const BAR_WIDTH: usize = 28;
 
 /// Render a progress bar with a phase label.
 fn progress_bar(done: usize, total: usize, label: &str) -> String {
-    let pct = if total == 0 {
-        100
-    } else {
-        (done * 100) / total
-    };
-    let filled = if total == 0 {
-        BAR_WIDTH
-    } else {
-        (done * BAR_WIDTH) / total
-    };
+    let pct = (done * 100).checked_div(total).unwrap_or(100);
+    let filled = (done * BAR_WIDTH).checked_div(total).unwrap_or(BAR_WIDTH);
     let empty = BAR_WIDTH - filled;
 
     format!(

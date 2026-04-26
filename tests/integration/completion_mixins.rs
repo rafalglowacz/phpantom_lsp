@@ -2491,6 +2491,93 @@ async fn test_completion_mixin_return_static_resolves_to_consumer_class() {
 
 /// Same as above but with native `self` return type and no docblock override.
 #[tokio::test]
+async fn test_completion_mixin_template_param_resolved_to_bound() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///mixin_template_bound.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "interface ASTNodeInterface {\n",
+        "    public function getStartColumn(): int;\n",
+        "    public function getEndColumn(): int;\n",
+        "}\n",
+        "/**\n",
+        " * @template-covariant TNode of ASTNodeInterface\n",
+        " * @mixin TNode\n",
+        " */\n",
+        "abstract class AbstractNode {\n",
+        "    public function getMetric(string $name): int { return 0; }\n",
+        "}\n",
+        "/**\n",
+        " * @template-covariant TNode of ASTNodeInterface\n",
+        " * @extends AbstractNode<TNode>\n",
+        " */\n",
+        "class ConcreteNode extends AbstractNode {\n",
+        "    function test() {\n",
+        "        $this->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 18,
+                    character: 15,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(result.is_some(), "Completion should return results");
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap())
+                .collect();
+
+            // Own method from AbstractNode (inherited)
+            assert!(
+                method_names.contains(&"getMetric"),
+                "Should include inherited method 'getMetric', got: {:?}",
+                method_names
+            );
+            // Mixin methods from ASTNodeInterface (resolved from template bound)
+            assert!(
+                method_names.contains(&"getStartColumn"),
+                "Should include mixin method 'getStartColumn' from template bound, got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getEndColumn"),
+                "Should include mixin method 'getEndColumn' from template bound, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+#[tokio::test]
 async fn test_completion_mixin_return_self_resolves_to_consumer_class() {
     let backend = create_test_backend();
 

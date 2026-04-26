@@ -92,7 +92,16 @@ impl Backend {
             return None;
         }
 
-        // ── Phase 0: Try the class_index (FQN → URI) ──
+        // ── Phase 0: Search all already-parsed files ────────────
+        // O(1) lookup via `fqn_index` (populated by `update_ast` and
+        // `parse_and_cache_content`), with a linear `ast_map` fallback
+        // for edge cases.  This is the fastest path — no disk I/O, no
+        // parsing — so it runs before any file-based resolution.
+        if let Some(cls) = self.find_class_in_ast_map(class_name) {
+            return Some(cls);
+        }
+
+        // ── Phase 1: Try the class_index (FQN → URI) ───────────
         // The class_index is populated by `scan_autoload_files` (Composer
         // `autoload_files.php` entries and their `require_once` chains),
         // by `update_ast` for every opened/changed file, and by the
@@ -108,13 +117,6 @@ impl Backend {
             && let Some(cls) = classes.iter().find(|c| c.name == last_segment)
         {
             return Some(Arc::clone(cls));
-        }
-
-        // ── Phase 1: Search all already-parsed files in the ast_map ──
-        // Checks short name + namespace to avoid false positives (e.g.
-        // "Demo\\PDO" won't match the global "PDO" stub).
-        if let Some(cls) = self.find_class_in_ast_map(class_name) {
-            return Some(cls);
         }
 
         // ── Phase 1.5: Try Composer classmap ──
@@ -375,8 +377,19 @@ impl Backend {
             if cls.file_namespace.is_none() {
                 cls.file_namespace = classes_with_ns[i]
                     .1
-                    .clone()
-                    .or_else(|| file_namespace.clone());
+                    .as_deref()
+                    .or(file_namespace.as_deref())
+                    .map(crate::atom::atom);
+            }
+        }
+
+        // Apply class stub patches for phpstorm-stubs deficiencies
+        // (e.g. ArrayIterator missing @template parameters).
+        // Only patch classes loaded from stub URIs to avoid touching
+        // user code.
+        if uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://") {
+            for class in &mut classes {
+                crate::stub_patches::apply_class_stub_patches(class);
             }
         }
 
@@ -404,10 +417,21 @@ impl Backend {
                 if cls.name.starts_with("__anonymous@") {
                     continue;
                 }
-                let fqn = cls.fqn();
+                let fqn = cls.fqn().to_string();
                 fqn_idx.insert(fqn, Arc::clone(cls));
             }
         }
+
+        // Populate the method store from the freshly parsed classes.
+        {
+            let fqns: Vec<String> = arc_classes
+                .iter()
+                .filter(|c| !c.name.starts_with("__anonymous@"))
+                .map(|c| c.fqn().to_string())
+                .collect();
+            self.evict_methods_for_fqns(&fqns);
+        }
+        self.populate_method_store(&arc_classes);
 
         // Remove newly-discovered FQNs from the negative-result cache.
         {
@@ -419,7 +443,7 @@ impl Backend {
                     if cls.name.starts_with("__anonymous@") {
                         continue;
                     }
-                    let fqn = cls.fqn();
+                    let fqn = cls.fqn().to_string();
                     nf_cache.remove(&fqn);
                 }
             }
@@ -448,7 +472,7 @@ impl Backend {
             let mut cache = self.resolved_class_cache.lock();
             for cls in &arc_classes {
                 let fqn = cls.fqn();
-                crate::virtual_members::evict_fqn(&mut cache, &fqn);
+                let _ = crate::virtual_members::evict_fqn(&mut cache, &fqn);
             }
         }
 
@@ -556,10 +580,17 @@ impl Backend {
         for &name in candidates {
             if let Some(&stub_content) = stub_fn_idx.get(name) {
                 let ver = Some(self.php_version());
-                let functions = self.parse_functions_versioned(stub_content, ver);
+                let mut functions = self.parse_functions_versioned(stub_content, ver);
 
                 if functions.is_empty() {
                     continue;
+                }
+
+                // Apply stub patches for phpstorm-stubs deficiencies
+                // (e.g. array_reduce returning `mixed` instead of a
+                // template-based type).  See stub_patches.rs.
+                for func in &mut functions {
+                    crate::stub_patches::apply_function_stub_patches(func);
                 }
 
                 let stub_uri = format!("phpantom-stub-fn://{}", name);
@@ -571,7 +602,7 @@ impl Backend {
                         let fqn = if let Some(ref ns) = func.namespace {
                             format!("{}\\{}", ns, &func.name)
                         } else {
-                            func.name.clone()
+                            func.name.to_string()
                         };
 
                         // Check if this is the function we're looking for.
@@ -756,7 +787,39 @@ impl Backend {
         use_map: &'a HashMap<String, String>,
         namespace: &'a Option<String>,
     ) -> impl Fn(&str) -> Option<Arc<ClassInfo>> + 'a {
-        move |name: &str| self.resolve_class_name(name, classes, use_map, namespace)
+        move |name: &str| {
+            // For unqualified names (no `\`), check the use-map first.
+            // A `use Illuminate\Support\Facades\Event;` import must
+            // take priority over a global-namespace stub class named
+            // `Event` (e.g. the PECL event extension).  Without this
+            // check, `find_or_load_class("Event")` would find the stub
+            // and short-circuit, never consulting the use-map.
+            let stripped = name.strip_prefix('\\').unwrap_or(name);
+            if !stripped.contains('\\')
+                && let Some(fqn) = use_map.get(stripped)
+                && let Some(cls) = self.find_or_load_class(fqn)
+            {
+                return Some(cls);
+            }
+
+            // Try a direct FQN lookup.  Names that arrive here are
+            // often already-resolved FQNs (e.g. `parent_class`,
+            // `used_traits`, `interfaces` — all canonicalised by
+            // `resolve_parent_class_names`).  Passing a bare global
+            // name like `Exception` through namespace-aware resolution
+            // would incorrectly yield `Test\Exception` when a
+            // same-named class exists in the current namespace.
+            //
+            // The direct lookup is cheap (hash-map hit in fqn_index)
+            // and correct for FQNs.  For user-typed unqualified names
+            // that should resolve via namespace context, the direct
+            // lookup will miss (no global class with that name) and
+            // we fall through to full resolution.
+            if let Some(cls) = self.find_or_load_class(stripped) {
+                return Some(cls);
+            }
+            self.resolve_class_name(name, classes, use_map, namespace)
+        }
     }
 
     /// Return a function-loader closure bound to a [`FileContext`].

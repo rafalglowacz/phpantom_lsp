@@ -167,6 +167,12 @@ pub(crate) enum SymbolKind {
         /// or class constant — constants are always accessed statically).
         is_static: bool,
     },
+    /// A namespace name at its declaration site (`namespace App\Models;`).
+    /// Used by the rename handler to support namespace renaming.
+    NamespaceDeclaration {
+        /// The full namespace name (e.g. `"App\\Models"`).
+        name: String,
+    },
 }
 
 // ─── Template parameter definition site structures ──────────────────────────
@@ -293,6 +299,29 @@ pub(crate) struct VarDefSite {
     pub effective_from: u32,
 }
 
+/// A closure or arrow function passed as an argument to a callable-typed
+/// parameter.  Used by inlay hints to show:
+/// - **Parameter type hints** for untyped closure parameters when the type
+///   can be inferred from the enclosing callable signature.
+/// - **Return type hints** when the closure lacks an explicit return type
+///   and the callable signature specifies one.
+#[derive(Debug, Clone)]
+pub(crate) struct UntypedClosureSite {
+    /// The call expression string of the parent call (same format as
+    /// `CallSite::call_expression`).
+    pub parent_call_expression: String,
+    /// 0-based index of the closure argument within the parent call's
+    /// argument list.
+    pub arg_index_in_parent: usize,
+    /// Byte offset of the closing `)` of the closure's parameter list.
+    /// Used to place the return type hint.  `None` when the closure
+    /// already has an explicit return type declaration.
+    pub close_paren_offset: Option<u32>,
+    /// Untyped parameters: `(param_index, param_variable_offset)`.
+    /// Only parameters that lack a native type hint are included.
+    pub untyped_params: Vec<(usize, u32)>,
+}
+
 /// The kind of variable definition site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VarDefKind {
@@ -386,6 +415,10 @@ pub(crate) struct SymbolMap {
     /// Switch body boundaries `(start_offset, end_offset)` where
     /// `case` / `default` labels are valid.
     pub switch_scopes: Vec<(u32, u32)>,
+    /// Closures and arrow functions passed as arguments to callable-typed
+    /// parameters.  Used by inlay hints to show inferred parameter types
+    /// and return types from the enclosing callable signature.
+    pub untyped_closure_sites: Vec<UntypedClosureSite>,
 }
 
 impl SymbolMap {

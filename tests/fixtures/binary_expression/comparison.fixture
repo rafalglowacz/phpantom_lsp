@@ -1,0 +1,32 @@
+// test: comparison operators resolve to bool
+// feature: hover
+// Adapted from phpactor binary-expression/compare.scalar.test
+// expect_hover: $eq => bool
+// expect_hover: $ident => bool
+// expect_hover: $neq => bool
+// expect_hover: $nident => bool
+// expect_hover: $gt => bool
+// expect_hover: $lt => bool
+// expect_hover: $gte => bool
+// expect_hover: $lte => bool
+---
+<?php
+
+function test(): void {
+    $eq = 1 == 1;
+    $ident = 1 === 1;
+    $neq = 1 != 2;
+    $nident = 1 !== 2;
+    $gt = 2 > 1;
+    $lt = 1 < 2;
+    $gte = 2 >= 1;
+    $lte = 1 <= 2;
+    $<>eq;
+    $ident;
+    $neq;
+    $nident;
+    $gt;
+    $lt;
+    $gte;
+    $lte;
+}

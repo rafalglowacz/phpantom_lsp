@@ -454,27 +454,27 @@ fn find_constructor(content: &str, class_kw_offset: usize) -> Option<Constructor
                     return Some(build_constructor_info(content, construct_abs));
                 }
             }
-            b'/' if depth == 0 => {
+            b'/' if depth == 0
                 // Skip string literals and comments to avoid false matches.
-                if i + 1 < body_bytes.len() {
-                    if body_bytes[i + 1] == b'/' {
-                        // Single-line comment: skip to end of line.
-                        while i < body_bytes.len() && body_bytes[i] != b'\n' {
-                            i += 1;
-                        }
-                        continue;
-                    } else if body_bytes[i + 1] == b'*' {
-                        // Multi-line comment: skip to `*/`.
-                        i += 2;
-                        while i + 1 < body_bytes.len() {
-                            if body_bytes[i] == b'*' && body_bytes[i + 1] == b'/' {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                        continue;
+                && i + 1 < body_bytes.len() =>
+            {
+                if body_bytes[i + 1] == b'/' {
+                    // Single-line comment: skip to end of line.
+                    while i < body_bytes.len() && body_bytes[i] != b'\n' {
+                        i += 1;
                     }
+                    continue;
+                } else if body_bytes[i + 1] == b'*' {
+                    // Multi-line comment: skip to `*/`.
+                    i += 2;
+                    while i + 1 < body_bytes.len() {
+                        if body_bytes[i] == b'*' && body_bytes[i + 1] == b'/' {
+                            i += 2;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    continue;
                 }
             }
             b'\'' | b'"' if depth == 0 => {

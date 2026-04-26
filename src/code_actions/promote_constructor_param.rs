@@ -473,7 +473,7 @@ mod tests {
             edits.push((offset, offset, default_text));
         }
         // Sort by start offset descending so applying them doesn't shift positions.
-        edits.sort_by(|a, b| b.0.cmp(&a.0));
+        edits.sort_by_key(|x| std::cmp::Reverse(x.0));
 
         let mut result = php.to_string();
         for (start, end, text) in edits {

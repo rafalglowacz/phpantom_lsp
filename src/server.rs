@@ -323,6 +323,22 @@ impl LanguageServer for Backend {
             phpcs_backend.phpcs_worker().await;
         });
 
+        // Spawn the Mago lint worker.  Same pattern as PHPCS: dedicated
+        // task, own debounce timer, single pending-URI slot.  Mago lint
+        // is fast (AST-level rules) so it uses the same debounce as PHPCS.
+        let mago_lint_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            mago_lint_backend.mago_lint_worker().await;
+        });
+
+        // Spawn the Mago analyze worker.  Mago analyze is slower
+        // (type-aware) so it follows the PHPStan pattern with a longer
+        // debounce.
+        let mago_analyze_backend = self.clone_for_diagnostic_worker();
+        tokio::spawn(async move {
+            mago_analyze_backend.mago_analyze_worker().await;
+        });
+
         // ── Dynamic capability registration ─────────────────────────
         // lsp-types 0.94 does not expose a `type_hierarchy_provider`
         // field on `ServerCapabilities`, so we register the capability
@@ -349,6 +365,8 @@ impl LanguageServer for Backend {
         self.diag_notify.notify_one();
         self.phpstan_notify.notify_one();
         self.phpcs_notify.notify_one();
+        self.mago_lint_notify.notify_one();
+        self.mago_analyze_notify.notify_one();
         Ok(())
     }
 
@@ -1022,6 +1040,12 @@ impl Backend {
         f: impl FnOnce(&str) -> T,
     ) -> Option<T> {
         let content = self.get_file_content(uri)?;
+        // Activate the chain resolution cache so that shared chain prefixes
+        // (e.g. `$model->where(...)` in `$model->where(...)->orderBy(...)`)
+        // are resolved once and reused across all LSP handlers, not just
+        // diagnostics.  The guard is re-entrant safe: if a diagnostic pass
+        // already activated the cache, this is a no-op.
+        let _chain_guard = crate::completion::resolver::with_chain_resolution_cache();
         crate::util::catch_panic_unwind_safe(handler_name, uri, position, || f(&content))
     }
 
@@ -1344,7 +1368,7 @@ impl Backend {
         // longest-prefix-first matching works.
         {
             let mut psr4 = self.psr4_mappings.write();
-            psr4.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+            psr4.sort_by_key(|b| std::cmp::Reverse(b.prefix.len()));
         }
 
         // ── Full-scan loose files ───────────────────────────────────

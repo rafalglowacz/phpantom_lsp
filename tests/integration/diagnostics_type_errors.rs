@@ -3423,3 +3423,224 @@ function test(): void {
         "Should not flag Fruit passed to Bag<Fruit>::put() via trait method, got: {diags:?}"
     );
 }
+
+#[test]
+fn no_false_positive_for_class_string_variable_passed_as_string() {
+    let php = r#"<?php
+class Pen {}
+class Container {
+    /**
+     * @template T
+     * @param class-string<T>|null $abstract
+     * @return ($abstract is class-string<T> ? T : static)
+     */
+    public function make(?string $abstract = null): mixed {
+        return new static();
+    }
+}
+class Demo {
+    public function run(): void {
+        $container = new Container();
+        $cls = Pen::class;
+        $pen = $container->make($cls);
+    }
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag class-string variable passed to ?string param, got: {diags:?}"
+    );
+}
+
+#[test]
+fn no_false_positive_for_unresolved_class_template_in_constructor() {
+    let php = r#"<?php
+/**
+ * @template T
+ */
+class Box {
+    /** @var T */
+    public $value;
+
+    /** @param T $value */
+    public function __construct(mixed $value = null) { $this->value = $value; }
+}
+
+class Gift {}
+
+class Context {
+    /** @var Box<Gift> */
+    public $chest;
+
+    public function __construct() { $this->chest = new Box(new Gift()); }
+}
+"#;
+    let diags = collect(php);
+    assert!(
+        !has_type_error(&diags),
+        "Should not flag Gift passed to unresolved @template T param in constructor, got: {diags:?}"
+    );
+}
+
+// ─── No false positive: closure passed to nullable callable parameter ────────
+
+#[test]
+fn no_false_positive_array_filter_closure_callback() {
+    let php = r#"<?php
+function array_filter(array $array, ?callable $callback = null, int $mode = 0): array {}
+
+class Pen {
+    public function color(): string { return 'blue'; }
+}
+
+function test(): void {
+    /** @var list<Pen> $pens */
+    $pens = [];
+    $filtered = array_filter($pens, fn(Pen $p) => $p->color() === 'blue');
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Should not flag array_filter callback as wrong type, got: {msgs:?}"
+    );
+}
+
+// ─── No false positive: FQN-resolved Closure vs callable ────────────────────
+
+/// When argument types are FQN-resolved (e.g. `\Closure` instead of
+/// `Closure`), the subtype check `\Closure <: callable` must still hold.
+#[test]
+fn no_false_positive_fqn_closure_subtype_of_callable() {
+    let php = r#"<?php
+function takes_callable(callable $fn): void {}
+
+function test(): void {
+    takes_callable(fn() => 42);
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Should not flag arrow function passed to callable param, got: {msgs:?}"
+    );
+}
+
+/// Closure passed to `callable|null` union (docblock-style nullable).
+#[test]
+fn no_false_positive_closure_to_callable_or_null_union() {
+    let php = r#"<?php
+/**
+ * @param callable|null $callback
+ */
+function maybe_call(callable|null $callback = null): void {}
+
+function test(): void {
+    maybe_call(fn() => true);
+}
+"#;
+    let diags = collect(php);
+    let msgs = type_error_messages(&diags);
+    assert!(
+        msgs.is_empty(),
+        "Should not flag closure passed to callable|null param, got: {msgs:?}"
+    );
+}
+
+/// B28: When the return type of the outermost method call is an unresolvable
+/// class (not in the project), the resolver must not fall through and report
+/// the type of the *argument* passed into that method instead.
+#[test]
+fn no_false_positive_for_nested_call_with_unresolvable_return_type() {
+    use crate::common::create_psr4_workspace;
+
+    let files = vec![
+        (
+            "src/ArtifactList.php",
+            r#"<?php
+namespace App;
+
+/** @implements \Iterator<int, mixed> */
+class ArtifactList implements \Iterator {
+    public function current(): mixed { return null; }
+    public function key(): int { return 0; }
+    public function next(): void {}
+    public function rewind(): void {}
+    public function valid(): bool { return false; }
+}
+"#,
+        ),
+        (
+            "src/Source.php",
+            r#"<?php
+namespace App;
+
+class Source {
+    public function getClasses(): ArtifactList {
+        return new ArtifactList();
+    }
+}
+"#,
+        ),
+        (
+            "src/ClassNode.php",
+            r#"<?php
+namespace App;
+
+class ClassNode {
+    /** @param \PDepend\Source\AST\ASTClass $node */
+    public function __construct(\PDepend\Source\AST\ASTClass $node) {}
+}
+"#,
+        ),
+        (
+            "src/TestCase.php",
+            r#"<?php
+namespace App;
+
+use PDepend\Source\AST\ASTNode;
+
+class TestCase {
+    private function parseTestCaseSource(): Source {
+        return new Source();
+    }
+
+    /** @return \PDepend\Source\AST\ASTNode */
+    private function getNodeForCallingTestCase(\Iterator $nodes): ASTNode {
+        /** @var ASTNode */
+        return $nodes->current();
+    }
+
+    protected function getClass(): ClassNode {
+        return new ClassNode(
+            $this->getNodeForCallingTestCase(
+                $this->parseTestCaseSource()->getClasses()
+            )
+        );
+    }
+}
+"#,
+        ),
+    ];
+
+    let composer = r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#;
+    let (backend, dir) = create_psr4_workspace(composer, &files);
+    let uri = format!("file://{}/src/TestCase.php", dir.path().display());
+    let content = files[3].1;
+    let mut diags = Vec::new();
+    backend.collect_type_error_diagnostics(&uri, content, &mut diags);
+    let msgs = type_error_messages(&diags);
+    // The argument to ClassNode::__construct is the return value of
+    // getNodeForCallingTestCase which returns ASTNode.  The diagnostic
+    // must NOT say "got ArtifactList" (the type of the argument passed
+    // *into* getNodeForCallingTestCase).
+    for msg in &msgs {
+        assert!(
+            !msg.contains("ArtifactList"),
+            "Nested call resolved to inner argument type instead of outermost return type: {msg}"
+        );
+    }
+}

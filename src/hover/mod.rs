@@ -220,7 +220,7 @@ pub(crate) fn find_declaring_class(
     }
 
     // Walk the parent chain.
-    let mut ancestor_name = owner.parent_class.clone();
+    let mut ancestor_name = owner.parent_class;
     let mut depth = 0u32;
     while let Some(ref name) = ancestor_name {
         depth += 1;
@@ -265,7 +265,7 @@ pub(crate) fn find_declaring_class(
             if has {
                 return ancestor;
             }
-            ancestor_name = ancestor.parent_class.clone();
+            ancestor_name = ancestor.parent_class;
         } else {
             break;
         }
@@ -379,9 +379,7 @@ impl Backend {
 
             // Find the member's name_offset.
             let offset = cls
-                .methods
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(member_name))
+                .get_method_ci(member_name)
                 .map(|m| m.name_offset)
                 .or_else(|| {
                     cls.properties
@@ -428,9 +426,7 @@ impl Backend {
     ) -> Option<HoverMemberHit> {
         if is_method_call {
             class
-                .methods
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(member_name))
+                .get_method_ci(member_name)
                 .map(|m| HoverMemberHit::Method(Box::new(m.clone())))
         } else {
             if let Some(prop) = class.properties.iter().find(|p| p.name == member_name) {
@@ -440,9 +436,7 @@ impl Backend {
                 return Some(HoverMemberHit::Constant(constant.clone()));
             }
             class
-                .methods
-                .iter()
-                .find(|m| m.name.eq_ignore_ascii_case(member_name))
+                .get_method_ci(member_name)
                 .map(|m| HoverMemberHit::Method(Box::new(m.clone())))
         }
     }
@@ -453,6 +447,7 @@ impl Backend {
     /// resolved to a meaningful description, or `None` when resolution
     /// fails or the cursor is not on a navigable symbol.
     pub fn handle_hover(&self, uri: &str, content: &str, position: Position) -> Option<Hover> {
+        let _body_infer_guard = self.activate_body_return_inferrer();
         let offset = crate::util::position_to_offset(content, position);
 
         // Try the exact cursor offset first.
@@ -535,6 +530,7 @@ impl Backend {
                     class_loader: &class_loader,
                     resolved_class_cache: Some(&self.resolved_class_cache),
                     function_loader: Some(&function_loader),
+                    scope_var_resolver: None,
                 };
 
                 let access_kind = if *is_static {
@@ -596,10 +592,15 @@ impl Backend {
                     // it with the candidate's substituted return type and
                     // use the candidate as the owner.
                     if !merged.template_params.is_empty() {
+                        let tpl_strings: Vec<String> = merged
+                            .template_params
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect();
                         match &member_result {
                             Some(HoverMemberHit::Method(method)) => {
                                 if let Some(ref ret) = method.return_type
-                                    && ret.references_any_template_param(&merged.template_params)
+                                    && ret.references_any_template_param(&tpl_strings)
                                     && let Some(HoverMemberHit::Method(subst_method)) =
                                         Self::find_member_for_hover(
                                             target_class,
@@ -613,7 +614,7 @@ impl Backend {
                             }
                             Some(HoverMemberHit::Property(prop)) => {
                                 if let Some(ref hint) = prop.type_hint
-                                    && hint.references_any_template_param(&merged.template_params)
+                                    && hint.references_any_template_param(&tpl_strings)
                                     && let Some(HoverMemberHit::Property(subst_prop)) =
                                         Self::find_member_for_hover(
                                             target_class,
@@ -638,7 +639,7 @@ impl Backend {
                                 &class_loader,
                             );
                             Some((
-                                declaring.name.clone(),
+                                declaring.name.to_string(),
                                 self.hover_for_method(
                                     method,
                                     &declaring,
@@ -656,7 +657,7 @@ impl Backend {
                                 &class_loader,
                             );
                             Some((
-                                declaring.name.clone(),
+                                declaring.name.to_string(),
                                 self.hover_for_property(prop, &declaring, &class_loader),
                             ))
                         }
@@ -668,7 +669,7 @@ impl Backend {
                                 &class_loader,
                             );
                             Some((
-                                declaring.name.clone(),
+                                declaring.name.to_string(),
                                 self.hover_for_constant(constant, &declaring, &class_loader),
                             ))
                         }
@@ -715,11 +716,7 @@ impl Backend {
                         &class_loader,
                         &self.resolved_class_cache,
                     );
-                    if let Some(constructor) = merged
-                        .methods
-                        .iter()
-                        .find(|m| m.name.eq_ignore_ascii_case("__construct"))
-                    {
+                    if let Some(constructor) = merged.get_method_ci("__construct") {
                         return Some(self.hover_for_method(
                             constructor,
                             &merged,
@@ -733,7 +730,9 @@ impl Backend {
                 self.hover_class_reference(name, uri, content, &class_loader, cursor_offset)
             }
 
-            SymbolKind::ClassDeclaration { .. } | SymbolKind::MemberDeclaration { .. } => {
+            SymbolKind::ClassDeclaration { .. }
+            | SymbolKind::MemberDeclaration { .. }
+            | SymbolKind::NamespaceDeclaration { .. } => {
                 // The user is already at the definition site — showing
                 // hover here would just repeat what they can already see.
                 None
@@ -768,7 +767,7 @@ impl Backend {
                         lines.push(format_deprecation_line(msg));
                     }
 
-                    let ns_line = namespace_line(&cls.file_namespace);
+                    let ns_line = namespace_line(cls.file_namespace.as_deref());
                     if is_this {
                         lines.push(format!(
                             "```php\n<?php\n{}$this = {}\n```",
@@ -936,7 +935,7 @@ impl Backend {
         // $this resolves to the enclosing class
         if name == "this" {
             if let Some(cc) = current_class {
-                let ns_line = namespace_line(&cc.file_namespace);
+                let ns_line = namespace_line(cc.file_namespace.as_deref());
                 return Some(make_hover(format!(
                     "```php\n<?php\n{}$this = {}\n```",
                     ns_line, cc.name
@@ -1124,6 +1123,25 @@ impl Backend {
         uri: &str,
         content: &str,
     ) -> Hover {
+        // When the method has no declared return type and no @return
+        // docblock, try to infer the return type from the method body.
+        // This mirrors what completion/hover resolution does, so the
+        // hover display matches the resolved type the user sees.
+        let inferred_return_type: Option<crate::php_type::PhpType> =
+            if method.return_type.is_none() && method.name_offset != 0 && !method.is_virtual {
+                crate::completion::call_resolution::try_infer_body_return_type(&owner.fqn(), method)
+                    .filter(|t| !t.is_mixed() && !t.is_void())
+            } else {
+                None
+            };
+
+        // Use the inferred type as the effective return type when
+        // the method has no declared one.
+        let effective_return = method
+            .return_type
+            .as_ref()
+            .or(inferred_return_type.as_ref());
+
         let visibility = format_visibility(method.visibility);
         let static_kw = if method.is_static { "static " } else { "" };
         let native_params = format_native_params(&method.parameters);
@@ -1147,7 +1165,7 @@ impl Backend {
         // variance and bound so the user understands the constraint.
         // Method-level templates take priority over class-level ones.
         let mut seen_templates: Vec<PhpType> = Vec::new();
-        if let Some(ref ret) = method.return_type
+        if let Some(ret) = effective_return
             && let Some(tpl_line) = find_template_info_in_method_or_class(ret, method, owner)
         {
             seen_templates.push(ret.clone());
@@ -1194,7 +1212,7 @@ impl Backend {
         // Build the readable param/return section as markdown.
         if let Some(section) = build_param_return_section(
             &method.parameters,
-            method.return_type.as_ref(),
+            effective_return,
             method.native_return_type.as_ref(),
             method.return_description.as_deref(),
         ) {
@@ -1203,7 +1221,7 @@ impl Backend {
 
         let code = build_class_member_block(
             &owner.name,
-            &owner.file_namespace,
+            owner.file_namespace.as_deref(),
             owner_kind_keyword(owner),
             &owner_name_suffix(owner),
             &member_line,
@@ -1276,7 +1294,7 @@ impl Backend {
 
         let code = build_class_member_block_with_var(
             &owner.name,
-            &owner.file_namespace,
+            owner.file_namespace.as_deref(),
             owner_kind_keyword(owner),
             &owner_name_suffix(owner),
             &var_annotation,
@@ -1343,7 +1361,7 @@ impl Backend {
         // Constants don't have a native vs effective type split, so no doc annotation.
         let code = build_class_member_block(
             &owner.name,
-            &owner.file_namespace,
+            owner.file_namespace.as_deref(),
             owner_kind_keyword(owner),
             &owner_name_suffix(owner),
             &member_line,
@@ -1392,7 +1410,7 @@ impl Backend {
         }
 
         let signature = format!("{} {}{}", kind_str, cls.name, extends_implements);
-        let ns_line = namespace_line(&cls.file_namespace);
+        let ns_line = namespace_line(cls.file_namespace.as_deref());
 
         let mut lines = Vec::new();
 
@@ -1495,7 +1513,7 @@ fn build_variable_hover_body(
     if members.len() <= 1 || class_like_count < 2 {
         let short_type = ty.shorten().to_string();
         let ns = resolve_type_namespace_structured(ty, class_loader);
-        let ns_line = namespace_line(&ns);
+        let ns_line = namespace_line(ns.as_deref());
         let code_block = format!(
             "```php\n<?php\n{}{} = {}\n```",
             ns_line, var_name, short_type
@@ -1513,7 +1531,7 @@ fn build_variable_hover_body(
     for member in &members {
         let short = member.shorten().to_string();
         let ns = resolve_type_namespace_structured(member, class_loader);
-        let ns_line = namespace_line(&ns);
+        let ns_line = namespace_line(ns.as_deref());
         blocks.push(format!(
             "```php\n<?php\n{}{} = {}\n```",
             ns_line, var_name, short
@@ -1542,7 +1560,7 @@ fn resolve_type_namespace_structured(
             .file_namespace
             .as_ref()
             .filter(|ns| !ns.is_empty() && !ns.starts_with("___"))
-            .cloned();
+            .map(|ns| ns.to_string());
     }
 
     // Fallback: parse the namespace from the FQN string itself.
@@ -1593,7 +1611,7 @@ fn find_template_info_in_method(ty: &PhpType, method: &MethodInfo) -> Option<Str
 
     let bound_display = method
         .template_param_bounds
-        .get(name)
+        .get(&crate::atom::atom(name))
         .map(|b| format!(" of `{}`", b.shorten()))
         .unwrap_or_default();
 

@@ -278,7 +278,7 @@ fn psr4_mappings_resolve_across_subprojects() {
     }
 
     // Sort by prefix length descending
-    all_mappings.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+    all_mappings.sort_by_key(|x| std::cmp::Reverse(x.prefix.len()));
 
     // Resolve using a dummy workspace root — since base_paths are absolute,
     // we use an empty path as the root.

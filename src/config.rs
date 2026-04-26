@@ -31,6 +31,8 @@ pub struct Config {
     pub phpstan: PhpStanConfig,
     /// PHPCS (PHP_CodeSniffer) proxy settings.
     pub phpcs: PhpcsConfig,
+    /// Mago proxy settings.
+    pub mago: MagoConfig,
 }
 
 /// `[php]` section — PHP version override.
@@ -171,6 +173,52 @@ impl PhpStanConfig {
     }
 
     /// Whether PHPStan is explicitly disabled (command set to empty
+    /// string).
+    pub fn is_disabled(&self) -> bool {
+        self.command.as_deref() == Some("")
+    }
+}
+
+/// `[mago]` section — Mago proxy settings.
+///
+/// Mago is only activated when `mago.toml` exists at the workspace
+/// root.  When `command` is unset (`None`), PHPantom auto-detects via
+/// `vendor/bin/mago`, then `mago` on `$PATH`.  Set to `""` (empty
+/// string) to explicitly disable Mago integration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct MagoConfig {
+    /// Command (path or name) to run Mago.
+    ///
+    /// - `None` (default) — auto-detect `vendor/bin/mago`,
+    ///   then `mago` on `$PATH`.
+    /// - `""` — disable Mago.
+    /// - Any other value — use as the command.
+    pub command: Option<String>,
+    /// Maximum runtime in milliseconds before `mago lint` is killed.
+    /// Defaults to 30 000 ms (30 seconds).
+    #[serde(rename = "lint-timeout")]
+    pub lint_timeout: Option<u64>,
+    /// Maximum runtime in milliseconds before `mago analyze` is killed.
+    /// Defaults to 60 000 ms (60 seconds).
+    #[serde(rename = "analyze-timeout")]
+    pub analyze_timeout: Option<u64>,
+}
+
+impl MagoConfig {
+    /// Return the configured lint timeout in milliseconds, falling back
+    /// to 30 000 ms when unset.
+    pub fn lint_timeout_ms(&self) -> u64 {
+        self.lint_timeout.unwrap_or(30_000)
+    }
+
+    /// Return the configured analyze timeout in milliseconds, falling
+    /// back to 60 000 ms when unset.
+    pub fn analyze_timeout_ms(&self) -> u64 {
+        self.analyze_timeout.unwrap_or(60_000)
+    }
+
+    /// Whether Mago is explicitly disabled (command set to empty
     /// string).
     pub fn is_disabled(&self) -> bool {
         self.command.as_deref() == Some("")
@@ -482,6 +530,12 @@ mod tests {
         assert!(config.phpcs.standard.is_none());
         assert!(config.phpcs.timeout.is_none());
         assert_eq!(config.phpcs.timeout_ms(), 30_000);
+        assert!(config.mago.command.is_none());
+        assert!(config.mago.lint_timeout.is_none());
+        assert!(config.mago.analyze_timeout.is_none());
+        assert_eq!(config.mago.lint_timeout_ms(), 30_000);
+        assert_eq!(config.mago.analyze_timeout_ms(), 60_000);
+        assert!(!config.mago.is_disabled());
     }
 
     #[test]
@@ -496,6 +550,7 @@ mod tests {
         assert!(config.formatting.phpcbf.is_none());
         assert!(config.phpstan.command.is_none());
         assert!(config.phpcs.command.is_none());
+        assert!(config.mago.command.is_none());
     }
 
     #[test]
@@ -512,6 +567,7 @@ mod tests {
         assert!(config.formatting.phpcbf.is_none());
         assert!(config.phpstan.command.is_none());
         assert!(config.phpcs.command.is_none());
+        assert!(config.mago.command.is_none());
     }
 
     #[test]
@@ -675,6 +731,11 @@ timeout = 30000
 command = "/usr/local/bin/phpcs"
 standard = "PSR12"
 timeout = 15000
+
+[mago]
+command = "/usr/local/bin/mago"
+lint-timeout = 15000
+analyze-timeout = 45000
 "#,
         )
         .unwrap();
@@ -701,6 +762,10 @@ timeout = 15000
         );
         assert_eq!(config.phpcs.standard.as_deref(), Some("PSR12"));
         assert_eq!(config.phpcs.timeout_ms(), 15_000);
+        assert_eq!(config.mago.command.as_deref(), Some("/usr/local/bin/mago"));
+        assert_eq!(config.mago.lint_timeout_ms(), 15_000);
+        assert_eq!(config.mago.analyze_timeout_ms(), 45_000);
+        assert!(!config.mago.is_disabled());
     }
 
     #[test]

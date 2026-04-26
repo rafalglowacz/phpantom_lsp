@@ -19,6 +19,7 @@
 //! published set so the squiggly lines disappear before the text edit
 //! is applied.
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use tower_lsp::lsp_types::*;
@@ -152,7 +153,7 @@ impl Backend {
 
             // Sort edits in reverse order so that byte offsets remain
             // valid as we apply deletions from bottom to top.
-            edits.sort_by(|a, b| b.range.start.cmp(&a.range.start));
+            edits.sort_by_key(|e| Reverse(e.range.start));
 
             let mut changes = HashMap::new();
             changes.insert(doc_uri, edits);

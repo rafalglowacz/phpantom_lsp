@@ -24,6 +24,29 @@ use mago_syntax::ast::*;
 use crate::php_type::PhpType;
 use crate::types::{ClassInfo, ParameterInfo};
 
+/// Groups template-related context for conditional return type resolution.
+///
+/// This bundles the class-level template defaults and the method/function-level
+/// template parameter names into a single value, keeping function signatures
+/// under clippy's 7-argument limit.
+pub struct TemplateContext<'a> {
+    /// Class-level template parameter defaults (e.g. from `@template TAsync = false`).
+    pub defaults: Option<&'a HashMap<String, PhpType>>,
+    /// Method/function-level `@template` parameter names.
+    /// Used to distinguish template parameters (e.g. `T`) from concrete class
+    /// names (e.g. `FormFlowTypeInterface`) in `class-string<Bound>` conditions.
+    pub params: &'a [crate::atom::Atom],
+}
+
+impl<'a> TemplateContext<'a> {
+    pub fn with_params(params: &'a [crate::atom::Atom]) -> Self {
+        Self {
+            defaults: None,
+            params,
+        }
+    }
+}
+
 /// Callback that resolves a variable name (e.g. `"$requestType"`) to the
 /// class names it holds as class-string values (e.g. from match expression
 /// arms like `match (...) { 'a' => A::class, 'b' => B::class }`).
@@ -82,6 +105,7 @@ pub(crate) fn resolve_conditional_with_text_args(
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    tpl: &TemplateContext<'_>,
 ) -> Option<PhpType> {
     resolve_conditional_with_text_args_and_defaults(
         conditional,
@@ -89,8 +113,8 @@ pub(crate) fn resolve_conditional_with_text_args(
         text_args,
         var_resolver,
         calling_class_name,
-        None,
         class_loader,
+        tpl,
     )
 }
 
@@ -106,8 +130,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
     text_args: &str,
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
-    template_defaults: Option<&HashMap<String, PhpType>>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    tpl: &TemplateContext<'_>,
 ) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
@@ -127,7 +151,7 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     condition,
                     then_type,
                     else_type,
-                    template_defaults,
+                    tpl.defaults,
                 )
             {
                 return Some(resolved);
@@ -146,6 +170,100 @@ pub fn resolve_conditional_with_text_args_and_defaults(
             let arg_text = args.get(param_idx).map(|s| s.trim());
 
             if matches!(condition.as_ref(), PhpType::ClassString(_)) {
+                // Extract the bound type from `class-string<Bound>`, if any.
+                // When a bound is present AND resolves to a real class (not
+                // a template parameter like `T`), the conditional checks
+                // whether the argument class is a subtype of the bound
+                // (e.g. `$type is class-string<FormFlowTypeInterface>`).
+                //
+                // When the bound is a template parameter (e.g. `T` from
+                // `@template T of object`), any `::class` literal satisfies
+                // the condition and the template param is substituted with
+                // the concrete class name — this is the existing behavior.
+                //
+                // We distinguish template params from real classes by
+                // attempting to resolve the bound via the class loader.
+                // Template params like `T` won't resolve; real classes
+                // like `FormFlowTypeInterface` will.
+                //
+                // We distinguish template params from concrete class
+                // bounds by comparing the bound name to `then_type`.
+                // When both match (e.g. condition=`class-string<T>`,
+                // then=`T`), the bound is a template parameter and any
+                // `::class` literal satisfies the condition — the
+                // template is substituted with the concrete class name.
+                // When they differ (e.g. condition=`class-string<FormFlowTypeInterface>`,
+                // then=`FormFlowInterface`), the bound is a concrete
+                // class and a subtype check is required.
+                let class_string_bound_name: Option<&str> = match condition.as_ref() {
+                    PhpType::ClassString(Some(inner)) => match inner.as_ref() {
+                        PhpType::Named(name) => Some(name.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                // Check if the bound is a template parameter by comparing
+                // it to then_type.  `class-string<T> ? T : mixed` is a
+                // template pattern; `class-string<X> ? Y : Z` where X≠Y
+                // is a concrete bound check.
+                let bound_is_template = class_string_bound_name
+                    .is_some_and(|name| tpl.params.iter().any(|tp| tp.as_str() == name));
+
+                // For concrete bounds, try to resolve the bound class.
+                // `None` = no bound or template param (permissive)
+                // `Some(resolved)` = concrete class (strict subtype check)
+                // `Some(sentinel)` = unresolvable concrete name (always
+                //   fails the subtype check, forcing the else branch)
+                let concrete_class_string_bound: Option<String> = if bound_is_template {
+                    None
+                } else {
+                    class_string_bound_name.map(|name| {
+                        let resolved = crate::util::resolve_name_via_loader(name, class_loader);
+                        if class_loader(&resolved).is_some() {
+                            resolved
+                        } else {
+                            // Concrete class that can't be resolved
+                            // (cross-file name resolution failure).
+                            // Use a sentinel that will never match,
+                            // forcing the else branch.  This is the
+                            // safe default: we can't verify the
+                            // subtype relationship, so we fall back
+                            // to the broader return type.
+                            "!!unresolvable_bound!!".to_string()
+                        }
+                    })
+                };
+
+                // Helper: check whether a resolved class name satisfies the
+                // concrete class-string bound.  Returns `true` when there is
+                // no concrete bound (bare `class-string` or template param
+                // bound — any class satisfies it) or the class is a subtype
+                // of the bound.
+                let satisfies_bound = |resolved_name: &str| -> bool {
+                    match concrete_class_string_bound {
+                        None => true,
+                        Some(ref bound) => {
+                            crate::util::is_subtype_of_names(resolved_name, bound, class_loader)
+                        }
+                    }
+                };
+
+                // Helper: choose the correct branch based on whether the
+                // bound is satisfied and the `negated` flag.
+                let choose_branch = |bound_satisfied: bool| -> Option<PhpType> {
+                    let take_then = bound_satisfied ^ *negated;
+                    resolve_conditional_with_text_args_and_defaults(
+                        if take_then { then_type } else { else_type },
+                        params,
+                        text_args,
+                        var_resolver,
+                        calling_class_name,
+                        class_loader,
+                        tpl,
+                    )
+                };
+
                 // For variadic class-string parameters, collect class
                 // names from ALL arguments at and after param_idx and
                 // form a union type (e.g. `A|B` from `A::class, B::class`).
@@ -174,6 +292,15 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                             .into_iter()
                             .map(|n| crate::util::resolve_name_via_loader(&n, class_loader))
                             .collect();
+
+                        // When a bound exists, check all collected classes.
+                        // If any fails the bound check, fall through to the
+                        // else branch rather than returning a wrong type.
+                        let all_satisfy = class_names.iter().all(|n| satisfies_bound(n));
+                        if !all_satisfy {
+                            return choose_branch(false);
+                        }
+
                         let ty = if class_names.len() == 1 {
                             PhpType::Named(class_names.into_iter().next().unwrap())
                         } else {
@@ -187,8 +314,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         text_args,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     );
                 }
 
@@ -199,6 +326,17 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     let class_name =
                         resolve_self_keyword(&class_name, calling_class_name).unwrap_or(class_name);
                     let resolved = crate::util::resolve_name_via_loader(&class_name, class_loader);
+
+                    // When a bound exists, verify the class is a subtype
+                    // before taking the then-branch.  E.g. for
+                    // `($type is class-string<FormFlowTypeInterface> ? FormFlowInterface : FormInterface)`
+                    // with `ImageUploadFormType::class`: if `ImageUploadFormType`
+                    // does NOT implement `FormFlowTypeInterface`, return
+                    // `FormInterface` (else branch), not the class name.
+                    if concrete_class_string_bound.is_some() {
+                        return choose_branch(satisfies_bound(&resolved));
+                    }
+
                     return Some(PhpType::Named(resolved));
                 }
                 // Check if the argument is a variable holding class-string
@@ -214,6 +352,13 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                             .into_iter()
                             .map(|n| crate::util::resolve_name_via_loader(&n, class_loader))
                             .collect();
+
+                        // When a bound exists, check all resolved names.
+                        if concrete_class_string_bound.is_some() {
+                            let all_satisfy = names.iter().all(|n| satisfies_bound(n));
+                            return choose_branch(all_satisfy);
+                        }
+
                         let ty = if names.len() == 1 {
                             PhpType::Named(names.into_iter().next().unwrap())
                         } else {
@@ -229,8 +374,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     text_args,
                     var_resolver,
                     calling_class_name,
-                    template_defaults,
                     class_loader,
+                    tpl,
                 )
             } else if condition.as_ref().is_null() {
                 if arg_text.is_none() || arg_text == Some("") || arg_text == Some("null") {
@@ -241,8 +386,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         text_args,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     )
                 } else {
                     // Argument was provided → not null
@@ -252,8 +397,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         text_args,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     )
                 }
             } else if let PhpType::Literal(s) = condition.as_ref() {
@@ -278,8 +423,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                             text_args,
                             var_resolver,
                             calling_class_name,
-                            template_defaults,
                             class_loader,
+                            tpl,
                         );
                     }
                 }
@@ -290,8 +435,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     text_args,
                     var_resolver,
                     calling_class_name,
-                    template_defaults,
                     class_loader,
+                    tpl,
                 )
             } else {
                 // IsType equivalent: can't statically determine most
@@ -308,8 +453,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                         text_args,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     );
                 }
                 // Can't statically determine; fall through to else.
@@ -319,8 +464,8 @@ pub fn resolve_conditional_with_text_args_and_defaults(
                     text_args,
                     var_resolver,
                     calling_class_name,
-                    template_defaults,
                     class_loader,
+                    tpl,
                 )
             }
         }
@@ -365,11 +510,11 @@ pub fn split_text_args(text: &str) -> Vec<&str> {
             continue;
         }
         match ch {
-            '\\' => {
+            '\\'
                 // Only treat as escape if inside a quote
-                if in_single_quote || in_double_quote {
-                    prev_was_backslash = true;
-                }
+                if in_single_quote || in_double_quote =>
+            {
+                prev_was_backslash = true;
             }
             '\'' if !in_double_quote => {
                 in_single_quote = !in_single_quote;
@@ -449,6 +594,7 @@ pub(crate) fn resolve_conditional_with_args<'b>(
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    tpl: &TemplateContext<'_>,
 ) -> Option<PhpType> {
     resolve_conditional_with_args_and_defaults(
         conditional,
@@ -456,8 +602,8 @@ pub(crate) fn resolve_conditional_with_args<'b>(
         argument_list,
         var_resolver,
         calling_class_name,
-        None,
         class_loader,
+        tpl,
     )
 }
 
@@ -469,8 +615,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
     argument_list: &ArgumentList<'b>,
     var_resolver: VarClassStringResolver<'_>,
     calling_class_name: Option<&str>,
-    template_defaults: Option<&HashMap<String, PhpType>>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    tpl: &TemplateContext<'_>,
 ) -> Option<PhpType> {
     match conditional {
         PhpType::Conditional {
@@ -490,7 +636,7 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     condition,
                     then_type,
                     else_type,
-                    template_defaults,
+                    tpl.defaults,
                 )
             {
                 return Some(resolved);
@@ -520,11 +666,65 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                 });
 
             if matches!(condition.as_ref(), PhpType::ClassString(_)) {
+                // Extract the bound from `class-string<Bound>` and determine
+                // whether it is a template parameter or a concrete class.
+                // Mirrors the logic in resolve_conditional_with_text_args_and_defaults.
+                let class_string_bound_name: Option<&str> = match condition.as_ref() {
+                    PhpType::ClassString(Some(inner)) => match inner.as_ref() {
+                        PhpType::Named(name) => Some(name.as_str()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                let bound_is_template = class_string_bound_name
+                    .is_some_and(|name| tpl.params.iter().any(|tp| tp.as_str() == name));
+
+                let concrete_class_string_bound: Option<String> = if bound_is_template {
+                    None
+                } else {
+                    class_string_bound_name.map(|name| {
+                        let resolved = crate::util::resolve_name_via_loader(name, class_loader);
+                        if class_loader(&resolved).is_some() {
+                            resolved
+                        } else {
+                            "!!unresolvable_bound!!".to_string()
+                        }
+                    })
+                };
+
+                let satisfies_bound = |resolved_name: &str| -> bool {
+                    match concrete_class_string_bound {
+                        None => true,
+                        Some(ref bound) => {
+                            crate::util::is_subtype_of_names(resolved_name, bound, class_loader)
+                        }
+                    }
+                };
+
+                let choose_branch = |bound_satisfied: bool| -> Option<PhpType> {
+                    let take_then = bound_satisfied ^ *negated;
+                    resolve_conditional_with_args_and_defaults(
+                        if take_then { then_type } else { else_type },
+                        params,
+                        argument_list,
+                        var_resolver,
+                        calling_class_name,
+                        class_loader,
+                        tpl,
+                    )
+                };
+
                 // Check if the argument is `X::class`
                 if let Some(class_name) = arg_expr.and_then(extract_class_string_from_expr) {
                     let class_name =
                         resolve_self_keyword(&class_name, calling_class_name).unwrap_or(class_name);
                     let resolved = crate::util::resolve_name_via_loader(&class_name, class_loader);
+
+                    if concrete_class_string_bound.is_some() {
+                        return choose_branch(satisfies_bound(&resolved));
+                    }
+
                     return Some(PhpType::Named(resolved));
                 }
                 // Check if the argument is a variable holding class-string
@@ -538,6 +738,12 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                             .into_iter()
                             .map(|n| crate::util::resolve_name_via_loader(&n, class_loader))
                             .collect();
+
+                        if concrete_class_string_bound.is_some() {
+                            let all_satisfy = names.iter().all(|n| satisfies_bound(n));
+                            return choose_branch(all_satisfy);
+                        }
+
                         let ty = if names.len() == 1 {
                             PhpType::Named(names.into_iter().next().unwrap())
                         } else {
@@ -553,8 +759,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     argument_list,
                     var_resolver,
                     calling_class_name,
-                    template_defaults,
                     class_loader,
+                    tpl,
                 )
             } else if condition.as_ref().is_null() {
                 if arg_expr.is_none() {
@@ -565,8 +771,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         argument_list,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     )
                 } else {
                     // Argument was provided → not null
@@ -576,8 +782,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         argument_list,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     )
                 }
             } else if let PhpType::Literal(s) = condition.as_ref() {
@@ -606,8 +812,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         argument_list,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     )
                 } else {
                     resolve_conditional_with_args_and_defaults(
@@ -616,8 +822,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         argument_list,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     )
                 }
             } else {
@@ -633,8 +839,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                         argument_list,
                         var_resolver,
                         calling_class_name,
-                        template_defaults,
                         class_loader,
+                        tpl,
                     );
                 }
                 // We can't statically determine the type of an
@@ -645,8 +851,8 @@ pub fn resolve_conditional_with_args_and_defaults<'b>(
                     argument_list,
                     var_resolver,
                     calling_class_name,
-                    template_defaults,
                     class_loader,
+                    tpl,
                 )
             }
         }

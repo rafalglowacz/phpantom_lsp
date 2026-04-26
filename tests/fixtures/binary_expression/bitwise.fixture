@@ -1,0 +1,23 @@
+// test: bitwise operators resolve to int
+// feature: hover
+// Adapted from phpactor binary-expression/bitwise.test
+// expect_hover: $and => int
+// expect_hover: $or => int
+// expect_hover: $xor => int
+// expect_hover: $shl => int
+// expect_hover: $shr => int
+---
+<?php
+
+function test(): void {
+    $and = 0 & 5;
+    $or = 0 | 5;
+    $xor = 0 ^ 5;
+    $shl = 1 << 2;
+    $shr = 1 >> 2;
+    $<>and;
+    $or;
+    $xor;
+    $shl;
+    $shr;
+}
