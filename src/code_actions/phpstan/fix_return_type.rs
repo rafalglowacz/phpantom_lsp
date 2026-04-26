@@ -405,23 +405,84 @@ pub(crate) fn infer_return_type(
     let mut has_bare_return = false;
     let mut has_return_with_value = false;
 
-    let mut brace_depth: i32 = 1;
+    // Single-line function body: `function foo() { return new Bar(); }`
+    // The normal loop (skip(brace_line+1)..take(body_end)) would iterate
+    // zero times because brace_line == body_end.  Extract the content
+    // between the first `{` and last `}` and scan it directly.
+    if brace_line == body_end
+        && let line = lines[brace_line]
+        && let Some(open) = line.find('{')
+        && let Some(close) = line.rfind('}')
+        && close > open + 1
+    {
+        let inner = line[open + 1..close].trim();
+        if inner == "return;" || inner.is_empty() {
+            has_bare_return = !inner.is_empty();
+        } else if let Some(rest) = inner.strip_prefix("return ") {
+            let expr = rest.strip_suffix(';').unwrap_or(rest).trim();
+            has_return_with_value = true;
+            if let Some(t) = infer_type_from_literal(expr) {
+                let resolved = t.resolve_names(&|name: &str| {
+                    if let Some(cls) = class_loader(name) {
+                        cls.fqn().to_string()
+                    } else {
+                        name.to_string()
+                    }
+                });
+                return_types.push(resolved);
+            } else {
+                return_types.push(PhpType::mixed());
+            }
+        }
+    }
+
+    // Track nested closure/anonymous-function depth so we skip their
+    // return statements (they belong to a different scope) while still
+    // capturing returns inside control structures (if/for/while/switch/
+    // try) which are in the same scope.
+    //
+    // `closure_depth` only increments when a line contains a `function`
+    // or `fn` keyword before an opening `{`.  Plain `{` from control
+    // structures does not change it.
+    let mut closure_depth: i32 = 0;
 
     for (line_idx, line) in lines.iter().enumerate().take(body_end).skip(brace_line + 1) {
         let trimmed = line.trim();
 
-        // Track brace depth to ignore return statements inside
-        // nested closures, anonymous functions, and match blocks.
+        // Detect nested closure / anonymous function openings.
+        // A line like `$f = function () {` or `fn() => {` introduces
+        // a new function scope whose returns we must ignore.
+        let has_fn_keyword = trimmed.contains("function ")
+            || trimmed.contains("function(")
+            || trimmed.starts_with("fn ")
+            || trimmed.starts_with("fn(")
+            || trimmed.contains(" fn(")
+            || trimmed.contains(" fn ");
+
         for ch in line.chars() {
             match ch {
-                '{' => brace_depth += 1,
-                '}' => brace_depth -= 1,
+                '{' => {
+                    if has_fn_keyword && closure_depth == 0 {
+                        // First `{` on a line with a function keyword
+                        // opens a nested scope.
+                        closure_depth += 1;
+                    } else if closure_depth > 0 {
+                        // Already inside a nested closure — track depth
+                        // so we know when we leave it.
+                        closure_depth += 1;
+                    }
+                    // Plain `{` at closure_depth == 0 from control
+                    // structures: do nothing.
+                }
+                '}' if closure_depth > 0 => {
+                    closure_depth -= 1;
+                }
                 _ => {}
             }
         }
 
-        // Only inspect return statements at the outermost function level.
-        if brace_depth != 1 {
+        // Skip return statements inside nested closures / anonymous fns.
+        if closure_depth > 0 {
             continue;
         }
 
@@ -452,7 +513,7 @@ pub(crate) fn infer_return_type(
                 // so that `new Foo(…)` produces a fully-qualified type.
                 let resolved = t.resolve_names(&|name: &str| {
                     if let Some(cls) = class_loader(name) {
-                        cls.fqn()
+                        cls.fqn().to_string()
                     } else {
                         name.to_string()
                     }

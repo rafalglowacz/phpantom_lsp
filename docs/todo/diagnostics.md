@@ -23,83 +23,6 @@ PHPantom assigns diagnostic severity based on runtime consequences:
 
 ---
 
-## D4. Unused variable diagnostic
-
-**Impact: Medium · Effort: Medium**
-
-Flag variables that are assigned but never read. This is one of the
-most common issues in PHP codebases and catches dead code, typos in
-variable names, and forgotten refactoring leftovers.
-
-PHPantom already has an undefined-variable diagnostic
-(`undefined_variable` in `diagnostics/undefined_variables.rs`) that
-tracks variable definitions and reads through scope analysis. The
-unused-variable diagnostic is the dual: a variable that has a
-definition site but zero read sites within the same scope.
-
-**Severity:** Information (rendered as dimmed text). Assigned-but-
-unread variables are not bugs per se (the code still runs), but they
-are strong signals of dead code or typos. Information severity avoids
-alarming users while still making the issue visible.
-
-**Diagnostic code:** `unused_variable` (matches the planned CLI fix
-rule FX2).
-
-### Scope
-
-1. **Local variables in function/method bodies.** A variable assigned
-   inside a function or method body that is never read before the
-   scope ends. Parameters count as assignments; an unused parameter
-   in a non-abstract, non-interface method is flagged.
-2. **Foreach bindings.** `foreach ($items as $key => $value)` where
-   `$key` or `$value` is never read inside the loop body. Convention:
-   variables named `$_` or starting with `$_` are exempt (intentional
-   discard).
-3. **Catch variables.** `catch (Exception $e)` where `$e` is never
-   read. Same `$_` exemption applies.
-
-### Exclusions
-
-- Variables in the global scope (scripts, templates).
-- Variables passed by reference (`&$var`) to functions, since the
-  callee may use them as out-parameters.
-- Variables used inside closures or arrow functions that capture them
-  (explicit `use ($var)` or implicit capture).
-- Compact() calls that reference the variable by string name.
-- Variables used in string interpolation (`"Hello $name"`).
-- Variables whose RHS has side effects (method calls, function calls)
-  should still be flagged, but with a detail note that removing the
-  assignment would also remove the side effect.
-
-### PHPStan parallel
-
-PHPStan does not have a built-in unused-variable rule, but third-party
-rulesets (e.g. `phpstan-strict-rules`, `tomasvotruba/unused-public`)
-report similar issues. When D4 ships, the PHPStan quick-fix
-infrastructure should recognise our native `unused_variable` code so
-that:
-
-- The "Remove unused import" pattern can be extended to offer a
-  "Remove unused variable" quick-fix (same code action kind).
-- FX2 (`unused_variable` CLI fix rule) can consume our diagnostic
-  directly without needing PHPStan.
-
-### Implementation
-
-1. Extend the scope collector (`scope_collector/mod.rs`) to track
-   read sites per variable per frame (it already tracks definition
-   sites for the undefined-variable diagnostic).
-2. After processing a scope, iterate defined variables and flag any
-   that have zero reads and are not in the exclusion list.
-3. Emit diagnostics with `DiagnosticSeverity::HINT` and
-   `DiagnosticTag::UNNECESSARY` so editors render unused variables
-   as dimmed/faded text.
-4. Add a code action (in `code_actions/`) to remove the assignment
-   statement when the RHS is side-effect-free, or to prefix the
-   variable with `$_` to suppress the diagnostic.
-
----
-
 ## D3. Deprecated rendering — chain subject resolution
 
 **Impact: Low-Medium · Effort: Medium**
@@ -230,103 +153,6 @@ with `command`, `timeout`, and tool-specific options mirroring the
 
 ---
 
-## D12. Mago diagnostic proxy
-
-**Impact: Medium · Effort: Medium**
-
-Proxy Mago the same way PHPantom proxies PHPStan and PHPCS:
-auto-detect the binary, spawn it on file changes, parse JSON
-output, and surface diagnostics in the editor.
-
-**Why proxy, not in-process:** PHPantom already vendors several
-mago crates for parsing, but the `mago-linter` crate contains
-~159 lint rules with their own configuration surface. Building it
-in-process would mean PHPantom owns every false positive those
-rules produce, must duplicate or re-expose mago's `mago.toml`
-config format, and must document and support someone else's rule
-options. An opt-in toggle that 99% of users never discover is
-wasted effort. The proxy approach lets users who already use Mago
-get diagnostics automatically: they already have a `mago.toml`
-with rules tuned for their codebase, baselines for known issues,
-and framework integrations configured. PHPantom just shows what
-Mago reports.
-
-### Auto-detection
-
-Enable automatically when the project has `mago.toml` at the
-workspace root and `vendor/bin/mago` (or `mago` on `$PATH`)
-exists. Same resolution chain as PHPStan/PHPCS: explicit
-`.phpantom.toml` command > Composer bin-dir > `$PATH`. Setting
-the command to `""` disables the proxy.
-
-### Execution
-
-Mago has two separate commands, both accepting `--stdin-input`
-and `--reporting-format json`:
-
-- **`mago lint`** — AST-level rules: style, naming, code smells,
-  best practices (e.g. `strict-types`, `file-name`,
-  `prefer-arrow-function`). Comparable to PHPCS. Fast.
-- **`mago analyze`** — Static analysis with type inference: type
-  mismatches, unreachable code, unused definitions. Comparable
-  to PHPStan. Slower.
-
-A project's `mago.toml` can configure either or both via
-`[linter]` and `[analyzer]` sections. PHPantom should run
-whichever the project has configured. When both are present,
-run `mago lint` on the fast path (same debounce as PHPCS) and
-`mago analyze` on the slow path (same debounce/worker pattern
-as PHPStan: single pending URI, configurable timeout,
-cancellation on new edits). Use `source: "mago-lint"` and
-`source: "mago-analyze"` to distinguish the two.
-
-### JSON output mapping
-
-Mago's JSON output provides everything needed:
-
-- `level` (Error, Warning, Note, Help) maps to LSP severity.
-- `code` (rule name, e.g. `strict-types`, `no-empty`) becomes
-  the diagnostic code.
-- `annotations[].span` provides file, offset, and line for the
-  diagnostic range.
-- `edits` provides auto-fix `TextEdit`s with a `safety`
-  classification (safe, potentially-unsafe, unsafe).
-
-Mark diagnostics with `source: "mago-lint"` or
-`source: "mago-analyze"` depending on the originating command.
-
-### Quick-fix code actions from edits
-
-Mago's JSON includes fix edits with safety levels. Convert these
-to LSP `CodeAction`s:
-
-- `safe` fixes: offer as preferred quick-fix.
-- `potentially-unsafe` / `unsafe` fixes: offer as non-preferred
-  quick-fix with the safety level noted in the action title.
-
-### Configuration
-
-Add a `[mago]` section to `.phpantom.toml`:
-
-- `command` — explicit path to the mago binary (default:
-  auto-detect).
-- `timeout` — per-invocation timeout in seconds (default: 30).
-
-No rule-level configuration in `.phpantom.toml`. The user
-configures rules in `mago.toml` where they belong.
-
-### Files
-
-- `src/mago.rs` — `resolve_mago`, `run_mago_lint`,
-  `run_mago_analyze`, `parse_mago_json`, JSON structs.
-  Shared binary resolution (one binary, two commands).
-- `src/server.rs` — two workers: `mago_lint_worker` (fast,
-  PHPCS-like debounce) and `mago_analyze_worker` (slow,
-  PHPStan-like debounce). Both follow the existing
-  single-pending-URI pattern.
-- `src/config.rs` — `MagoConfig` struct.
-- `src/code_actions/mago/` — quick-fix code actions from edits.
-
 ## D13. Unify diagnostic subject resolution with completion/hover
 
 `unknown_members.rs` has two secondary resolvers that run their own
@@ -423,5 +249,35 @@ site. Without CFA, the false positive rate would be high. Consider
 reporting at **Warning** severity with a message like "argument type
 `Animal` is broader than expected `Dog`; verify the value was
 narrowed before this call."
+
+---
+
+## D15. Unused parameter diagnostic
+
+**Impact: Low · Effort: Low**
+
+Flag function and method parameters that are never read inside the
+body. This was intentionally excluded from D4 (unused variable
+diagnostic) because without suppression support (D5), false positives
+are unavoidable: callbacks, interface implementations, and framework
+conventions (e.g. Laravel event listeners) often require specific
+parameter signatures even when not all parameters are used.
+
+**Prerequisite:** D5 (diagnostic suppression intelligence) must ship
+first so users can silence false positives with `// @phpantom-ignore`
+or a configuration-level exclusion.
+
+### Scope
+
+1. Function and method parameters (including closures and arrow
+   functions) that are never read inside their body.
+2. Constructor parameters that are not promoted and never read.
+
+### Exclusions
+
+- Parameters named `$_` or starting with `$_` (intentional discard).
+- Promoted constructor parameters (they are property assignments).
+- Parameters in abstract methods and interface method signatures
+  (no body to check).
 
 

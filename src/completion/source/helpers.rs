@@ -496,7 +496,7 @@ pub(in crate::completion) fn try_chained_array_access_with_candidates<'a>(
     current_class: Option<&ClassInfo>,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<Vec<ClassInfo>> {
+) -> Option<Vec<Arc<ClassInfo>>> {
     let current_class_name = current_class.map(|c| c.name.as_str()).unwrap_or("");
 
     for candidate in candidates {
@@ -526,7 +526,7 @@ fn walk_array_segments_and_resolve(
     current_class_name: &str,
     all_classes: &[Arc<ClassInfo>],
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-) -> Option<Vec<ClassInfo>> {
+) -> Option<Vec<Arc<ClassInfo>>> {
     // Expand type aliases before walking segments.  The raw type may
     // be an alias name like `UserData` that resolves to
     // `array{name: string, pen: Pen}`.  Without expansion the
@@ -572,8 +572,9 @@ fn walk_array_segments_and_resolve(
             )
             .into_iter()
             .find_map(|cls| {
+                let cache = crate::virtual_members::active_resolved_class_cache();
                 let merged =
-                    crate::virtual_members::resolve_class_fully(&cls, class_loader);
+                    crate::virtual_members::resolve_class_fully_maybe_cached(&cls, class_loader, cache);
                 crate::completion::variable::foreach_resolution::extract_iterable_element_type_from_class(
                     &merged,
                     class_loader,

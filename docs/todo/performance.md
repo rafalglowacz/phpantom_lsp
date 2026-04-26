@@ -15,124 +15,6 @@ within the same impact tier.
 
 ---
 
-## P1. Reference-counted `ClassInfo` (`Arc<ClassInfo>`)
-
-**Impact: High · Effort: Medium**
-
-**`type_hint_to_classes` → `Vec<Arc<ClassInfo>>`.**
-`type_hint_to_classes` is the main bridge between the type-string
-world and the class-object world. It is called from both the
-call-resolution pipeline (which already returns `Vec<Arc<ClassInfo>>`
-and currently wraps each result with `Arc::new`) and the variable-
-resolution pipeline (which still operates on `Vec<ClassInfo>`).
-Changing `type_hint_to_classes` (and its recursive helper
-`type_hint_to_classes_depth`) to return `Vec<Arc<ClassInfo>>` would
-eliminate ~15 `Arc::new` wraps at call sites that were added during
-the call-resolution conversion, and would be a natural stepping
-stone if someone later decides to convert the variable-resolution
-pipeline.
-
-The variable-resolution pipeline (`resolve_variable_types`,
-`resolve_rhs_expression`, `check_expression_for_assignment`, and
-~30 helper functions) still operates on `Vec<ClassInfo>` internally.
-Converting it would eliminate ~29 deep clones at bridge sites in
-`rhs_resolution.rs`, `foreach_resolution.rs`, and
-`closure_resolution.rs`, but the cascade touches ~86 sites across
-the subsystem. The effort-to-impact ratio is poor: each eliminated
-clone saves one per-request copy, not a hot-loop copy, and the
-parent-chain walks in `declaring.rs`, `inheritance.rs`, and
-`phpdoc.rs` will always need `Arc::unwrap_or_clone` for mutation
-regardless.
-
----
-
-## P1.5. Layered class resolution (zero-copy inheritance)
-
-**Impact: High · Effort: Very High**
-
-### Problem
-
-`resolve_class_with_inheritance` builds a flat `ClassInfo` by cloning
-the base class and then copying every method, property, and constant
-from traits, parents, and interfaces into the result. For an Eloquent
-model this means deep-copying hundreds of `MethodInfo` structs (each
-containing `String` fields, `Vec<ParameterInfo>`, etc.). Even with
-`SharedVec` making the top-level Vec clone O(1), the individual
-`MethodInfo` clones during the merge are the single largest remaining
-allocation cost (~4 % of CPU in `perf` profiles).
-
-The fundamental issue: the resolved class is a **copy** of all
-inherited members rather than a **view** over immutable originals.
-
-### Ideal architecture
-
-Replace the flat merged `ClassInfo` with a layered view that
-references the originals without copying:
-
-```text
-ResolvedClass {
-    own:     Arc<ClassInfo>,                  // parsed, immutable
-    traits:  Vec<Arc<ClassInfo>>,             // resolved traits
-    parent:  Option<Arc<ResolvedClass>>,      // resolved parent (recursive)
-    virtual: Vec<Arc<MethodInfo>>,            // @method, @mixin, scopes
-    iface_fill: HashMap<String, TypeFillIn>,  // interface type enrichment
-}
-```
-
-Member lookups walk the layers (own → traits → parent → virtual)
-instead of iterating a single flat Vec. Dedup is handled by a
-name-based `HashSet` built lazily or maintained incrementally.
-
-Benefits:
-- **Zero-copy inheritance.** Moving a method from parent to child is
-  an `Arc::clone` (refcount bump), not a `MethodInfo` deep clone.
-- **Shared structure.** Two child classes that extend the same parent
-  share the parent's `Arc<ResolvedClass>` — the parent's methods
-  exist in memory once, not once per child.
-- **Cheaper cache invalidation.** Editing a child class only rebuilds
-  the child's layer; the parent layer stays cached.
-
-### Migration path
-
-1. **`Arc<MethodInfo>` everywhere.** Change `SharedVec<MethodInfo>`
-   to `SharedVec<Arc<MethodInfo>>` (and same for properties/constants).
-   This makes individual method clones O(1) within the existing flat
-   architecture — an incremental win without changing consumers.
-
-2. **Introduce `ResolvedClass` struct.** Start with a thin wrapper
-   that holds the flat `ClassInfo` inside, exposing the same
-   iteration API. Consumers migrate incrementally.
-
-3. **Layered storage.** Replace the flat `ClassInfo` inside
-   `ResolvedClass` with the layered structure. Change iteration to
-   walk layers. This is the big step — every `.methods.iter().find()`
-   call site needs to use the layered iterator.
-
-4. **Lazy dedup index.** Build a `HashMap<&str, (Layer, usize)>`
-   on first access (or maintain it incrementally during layer
-   construction) so that `find_method("foo")` is O(1) without
-   scanning all layers.
-
-### Risks
-
-- Every consumer that does `.methods.iter()` or `.methods.len()`
-  needs to work with the layered iterator. A `Deref`-based shim
-  can ease migration but adds indirection.
-- Mutation sites (`merge_traits_into`, virtual member providers)
-  need to operate on the layer structure rather than pushing into
-  a flat Vec.
-- The `resolved_class_cache` currently stores `Arc<ClassInfo>`;
-  it would store `Arc<ResolvedClass>` instead.
-
-### When to implement
-
-This is the right long-term direction but a major refactor (~1 month).
-Evaluate after the `Arc<MethodInfo>` step (migration path step 1)
-is complete and profiling confirms that the flat-merge copy cost is
-still the dominant bottleneck.
-
----
-
 ## P3. Parallel pre-filter in `find_implementors`
 
 **Impact: Medium · Effort: Medium**
@@ -840,3 +722,65 @@ like:
 ⏱  63.2s  src/core/Purchase/Services/PurchaseFileService.php
   [fast=1ms cls=40ms mem=23696ms fn=12ms unres=16781ms arg=22568ms impl=0ms depr=54ms]
 ```
+
+---
+
+## P19. Arena reuse on the parse hot path
+
+**Impact: Medium · Effort: Low**
+
+`update_ast_inner` creates a fresh `Bump::new()` on every call —
+every keystroke allocates new backing pages from the OS and every drop
+returns them via `mmap`/`munmap` syscalls. There are 12+ additional
+`Bump::new()` sites across code action helpers (`extract_function.rs`,
+`extract_constant.rs`, `change_visibility.rs`, `generate_constructor.rs`,
+`extract_variable.rs`, etc.). No call site reuses an arena.
+
+php-lsp's `ParserContext::reparse()` calls `arena.reset()` — an O(1)
+operation that keeps backing memory allocated and just resets the bump
+pointer. After the arena grows to fit the largest file, subsequent
+re-parses are allocation-free from the system allocator's perspective.
+
+### Fix
+
+Add a `thread_local!` arena that is reset (not dropped) after each
+use:
+
+```rust
+thread_local! {
+    static ARENA: RefCell<Bump> = RefCell::new(Bump::with_capacity(512 * 1024));
+}
+
+fn with_arena<R>(f: impl FnOnce(&Bump) -> R) -> R {
+    ARENA.with(|cell| {
+        let result = f(&cell.borrow());
+        cell.borrow_mut().reset(); // O(1) — keeps pages allocated
+        result
+    })
+}
+```
+
+`update_ast_inner` is the hot path — called on every keystroke. A
+512 KB arena that resets instead of reallocating avoids thousands of
+`mmap`/`munmap` syscalls per minute during active editing.
+
+### Safety
+
+The arena's lifetime must not escape the closure. Currently
+`update_ast_inner` extracts owned `ClassInfo` and `SymbolMap` from
+the AST before the arena is dropped, so this works. The code action
+helpers also extract owned data before returning.
+
+### When to implement
+
+Independent of all other items. Pure performance win with no
+behavioural change. Can land any time.
+
+---
+
+# Remaining anti-pattern fixes
+
+Most remaining depth-cap issues are addressed by ER5 (class
+resolution). The forward walker loop iteration was addressed by the
+assignment-depth-bounded strategy. The items below are independent
+fixes that do not depend on either.

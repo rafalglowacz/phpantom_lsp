@@ -251,6 +251,8 @@ impl Backend {
                     }
                 },
 
+                SymbolKind::NamespaceDeclaration { .. } => (TT_NAMESPACE, TM_DECLARATION),
+
                 SymbolKind::ConstantReference { name: _ } => {
                     // Check if this is a PHP attribute name (starts after `#[`).
                     let is_attr = span.start >= 2
@@ -297,7 +299,7 @@ impl Backend {
         for class in &ctx.classes {
             let class_fqn = match &class.file_namespace {
                 Some(ns) => format!("{}\\{}", ns, class.name),
-                None => class.name.clone(),
+                None => class.name.to_string(),
             };
             if class_fqn == fqn || class.name == fqn {
                 return kind_to_token_type(class.kind);
@@ -331,7 +333,7 @@ impl Backend {
         for class in &ctx.classes {
             let class_fqn = match &class.file_namespace {
                 Some(ns) => format!("{}\\{}", ns, class.name),
-                None => class.name.clone(),
+                None => class.name.to_string(),
             };
             if class_fqn == fqn || class.name == fqn {
                 if class.deprecation_message.is_some() {

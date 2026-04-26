@@ -1003,6 +1003,23 @@ impl PhpType {
         }
     }
 
+    /// Returns `true` when the type is scalar and carries no non-scalar
+    /// generic arguments.  Unlike [`is_scalar`], `list<User>` returns
+    /// `false` here because iterating it yields the non-scalar `User`.
+    /// This is used by [`extract_value_type`] to decide whether to skip
+    /// an element type: `array<int, list<Rule>>` should still yield
+    /// `list<Rule>` even with `skip_scalar=true`.
+    pub fn is_scalar_leaf(&self) -> bool {
+        match self {
+            PhpType::Generic(name, args) => {
+                is_scalar_name(name) && args.iter().all(|a| a.is_scalar_leaf())
+            }
+            PhpType::Array(inner) => inner.is_scalar_leaf(),
+            PhpType::Nullable(inner) => inner.is_scalar_leaf(),
+            _ => self.is_scalar(),
+        }
+    }
+
     /// Extract the base class name from a type, if it refers to a single
     /// named class (possibly with generic parameters).
     ///
@@ -1243,7 +1260,7 @@ impl PhpType {
                     args.last()
                 };
                 match value {
-                    Some(v) if skip_scalar && v.is_scalar() => None,
+                    Some(v) if skip_scalar && v.is_scalar_leaf() => None,
                     Some(v) => Some(v),
                     None => None,
                 }
@@ -1331,6 +1348,7 @@ impl PhpType {
                 None
             }
             PhpType::Nullable(inner) => inner.shape_value_type(key),
+            PhpType::Union(members) => members.iter().find_map(|m| m.shape_value_type(key)),
             _ => None,
         }
     }
@@ -2083,10 +2101,8 @@ impl PhpType {
     /// params/return, shapes, class-string inner types, etc.
     fn collect_top_level_class_names(&self, names: &mut Vec<String>) {
         match self {
-            PhpType::Named(s) => {
-                if !is_keyword_type(s) && !s.is_empty() && !names.contains(s) {
-                    names.push(s.clone());
-                }
+            PhpType::Named(s) if !is_keyword_type(s) && !s.is_empty() && !names.contains(s) => {
+                names.push(s.clone());
             }
 
             PhpType::Nullable(inner) => inner.collect_top_level_class_names(names),
@@ -2099,10 +2115,10 @@ impl PhpType {
 
             // For generics, only the base name is top-level.
             // `Collection<int, User>` → `["Collection"]`.
-            PhpType::Generic(name, _) => {
-                if !is_keyword_type(name) && !name.is_empty() && !names.contains(name) {
-                    names.push(name.clone());
-                }
+            PhpType::Generic(name, _)
+                if !is_keyword_type(name) && !name.is_empty() && !names.contains(name) =>
+            {
+                names.push(name.clone());
             }
 
             // `User[]` — the inner type is the top-level class.
@@ -2868,8 +2884,10 @@ fn is_self_ref_name(name: &str) -> bool {
 /// - `list <: array`, `non-empty-list <: array`, `non-empty-array <: array`
 /// - `callable <: object` is NOT true (callables can be strings/arrays)
 fn is_named_subtype(sub: &str, sup: &str) -> bool {
-    let sub_l = sub.to_ascii_lowercase();
-    let sup_l = sup.to_ascii_lowercase();
+    let sub_raw = sub.strip_prefix('\\').unwrap_or(sub);
+    let sup_raw = sup.strip_prefix('\\').unwrap_or(sup);
+    let sub_l = sub_raw.to_ascii_lowercase();
+    let sup_l = sup_raw.to_ascii_lowercase();
 
     if sub_l == sup_l {
         return true;
@@ -4595,6 +4613,20 @@ mod tests {
     }
 
     #[test]
+    fn shape_value_type_union_of_shapes() {
+        // Union where only one member has the key (conditional shape addition).
+        let ty = PhpType::parse("array{name: string}|array{name: string, config: Config}");
+        assert_eq!(
+            ty.shape_value_type("config"),
+            Some(&PhpType::Named("Config".to_owned()))
+        );
+        // Key present in both members returns the first match.
+        assert_eq!(ty.shape_value_type("name"), Some(&PhpType::string()));
+        // Key absent from all members.
+        assert_eq!(ty.shape_value_type("missing"), None);
+    }
+
+    #[test]
     fn shape_value_type_non_shape_returns_none() {
         assert_eq!(
             PhpType::parse("array<int, User>").shape_value_type("0"),
@@ -6013,6 +6045,17 @@ mod tests {
         #[test]
         fn closure_is_subtype_of_callable() {
             assert!(PhpType::Named("Closure".into()).is_subtype_of(&PhpType::callable()));
+        }
+
+        #[test]
+        fn fqn_closure_is_subtype_of_callable() {
+            assert!(PhpType::Named("\\Closure".into()).is_subtype_of(&PhpType::callable()));
+        }
+
+        #[test]
+        fn fqn_closure_is_subtype_of_callable_union_null() {
+            let callable_or_null = PhpType::Union(vec![PhpType::callable(), PhpType::null()]);
+            assert!(PhpType::Named("\\Closure".into()).is_subtype_of(&callable_or_null));
         }
 
         // ── Scalar / numeric / array-key supertypes ─────────────────────

@@ -832,18 +832,17 @@ fn emit_type_spans_from_ast(
         }
 
         // ── Variable ($this) ────────────────────────────────────────
-        type_ast::Type::Variable(v) => {
-            if v.value == "$this" {
-                let start = base_offset + v.span.start.offset;
-                let end = base_offset + v.span.end.offset;
-                spans.push(SymbolSpan {
-                    start,
-                    end,
-                    kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::This),
-                });
-            }
-            // Other variables (parameter names leaked from @param) are skipped.
+        type_ast::Type::Variable(v) if v.value == "$this" => {
+            let start = base_offset + v.span.start.offset;
+            let end = base_offset + v.span.end.offset;
+            spans.push(SymbolSpan {
+                start,
+                end,
+                kind: SymbolKind::SelfStaticParent(SelfStaticParentKind::This),
+            });
         }
+        // Other variables (parameter names leaked from @param) are skipped.
+        type_ast::Type::Variable(_) => {}
 
         // ── Member / Alias references ───────────────────────────────
         type_ast::Type::MemberReference(_) | type_ast::Type::AliasReference(_) => {

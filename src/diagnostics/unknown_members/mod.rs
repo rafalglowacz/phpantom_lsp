@@ -217,7 +217,7 @@ fn subject_text_is_rooted_in_self(subject_text: &str) -> bool {
 fn scope_key_for(current_class: Option<&ClassInfo>, fn_scope_start: u32) -> ScopeKey {
     match current_class {
         Some(cc) => ScopeKey::Class {
-            name: cc.name.clone(),
+            name: cc.name.to_string(),
             start_offset: cc.start_offset,
             fn_scope_start,
         },
@@ -416,6 +416,7 @@ impl Backend {
                         resolved_class_cache: Some(resolved_cache),
                         function_loader: Some(&function_loader),
                         phpstorm_meta: Some(&meta_guard),
+                        scope_var_resolver: None,
                     };
                     resolve_subject_outcome(subject_text, access_kind, &rctx)
                 })
@@ -549,17 +550,18 @@ impl Backend {
                     // member on the coarse type and never reach here.
                     let (result, diags) =
                         if result != MemberCheckResult::Ok && is_narrowable_variable {
-                    let meta_guard2 = self.phpstorm_meta.read();
-                    let rctx = ResolutionCtx {
-                        current_class,
-                        all_classes: &local_classes,
-                        content,
-                        cursor_offset: span.start,
-                        class_loader: &class_loader,
-                        resolved_class_cache: Some(resolved_cache),
-                        function_loader: Some(&function_loader),
-                        phpstorm_meta: Some(&meta_guard2),
-                    };
+                            let meta_guard2 = self.phpstorm_meta.read();
+                            let rctx = ResolutionCtx {
+                                current_class,
+                                all_classes: &local_classes,
+                                content,
+                                cursor_offset: span.start,
+                                class_loader: &class_loader,
+                                resolved_class_cache: Some(resolved_cache),
+                                function_loader: Some(&function_loader),
+                                phpstorm_meta: Some(&meta_guard2),
+                                scope_var_resolver: None,
+                            };
                             let fresh = resolve_subject_outcome(subject_text, access_kind, &rctx);
                             if let SubjectOutcome::Resolved(ref fresh_classes) = fresh {
                                 // Use the fresh diagnostics instead of the coarse ones.
@@ -932,7 +934,7 @@ fn display_class_name(class: &ClassInfo) -> String {
     }
 
     // Show the FQN when available for clarity.
-    class.fqn()
+    class.fqn().to_string()
 }
 
 #[cfg(test)]

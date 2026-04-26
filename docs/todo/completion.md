@@ -35,10 +35,8 @@ These functions have return type semantics that don't fit into either
 | `array_replace`                      | Merge-like, preserving types from all args                     | `ArrayReplaceFunctionReturnTypeExtension`       |
 | `array_change_key_case`              | Preserves value type, transforms key type                      | `ArrayChangeKeyCaseFunctionReturnTypeExtension` |
 | `array_intersect_key`                | Preserves first array's types (dedicated extension)            | `ArrayIntersectKeyFunctionReturnTypeExtension`  |
-| `array_reduce`                       | Returns the callback's return type (like `array_map`)          | `ArrayReduceFunctionReturnTypeExtension`        |
 | `array_search`                       | Returns key type of the haystack array                         | `ArraySearchFunctionDynamicReturnTypeExtension` |
 | `array_rand`                         | Returns key type of the input array                            | `ArrayRandFunctionReturnTypeExtension`          |
-| `array_sum`                          | Computes numeric return type from value types                  | `ArraySumFunctionDynamicReturnTypeExtension`    |
 | `array_count_values`                 | Returns `array<TValue, int>`                                   | `ArrayCountValuesDynamicReturnTypeExtension`    |
 | `array_key_first` / `array_key_last` | Returns key type (usually scalar, low completion value)        | `ArrayFirstLastDynamicReturnTypeExtension`      |
 | `array_find_key`                     | Returns key type (PHP 8.4)                                     | `ArrayFindKeyFunctionReturnTypeExtension`       |

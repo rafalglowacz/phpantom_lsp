@@ -38,12 +38,47 @@ interface BackedEnum extends UnitEnum
 }
 ";
 
-/// Create a test backend with embedded class stubs pre-loaded.
+// ─── Function stubs ─────────────────────────────────────────────────────────
+// Minimal function stubs so that fixture tests can resolve return types of
+// built-in functions.  These mirror the phpstorm-stubs signatures; the
+// stub patch system (stub_patches.rs) upgrades them at load time (e.g.
+// adding @template annotations to array_reduce).
+
+static ARRAY_FUNC_STUB: &str = "\
+<?php
+/**
+ * @param array $array
+ * @param callable $callback
+ * @param mixed $initial
+ * @return mixed
+ */
+function array_reduce(array $array, callable $callback, mixed $initial = null): mixed {}
+
+/**
+ * @param array $array
+ * @return int|float
+ */
+function array_sum(array $array): int|float {}
+
+/**
+ * @param array $array
+ * @return int|float
+ */
+function array_product(array $array): int|float {}
+";
+
+/// Create a test backend with embedded class and function stubs pre-loaded.
 fn create_fixture_backend() -> Backend {
-    let mut stubs: HashMap<&'static str, &'static str> = HashMap::new();
-    stubs.insert("UnitEnum", UNIT_ENUM_STUB);
-    stubs.insert("BackedEnum", BACKED_ENUM_STUB);
-    Backend::new_test_with_stubs(stubs)
+    let mut class_stubs: HashMap<&'static str, &'static str> = HashMap::new();
+    class_stubs.insert("UnitEnum", UNIT_ENUM_STUB);
+    class_stubs.insert("BackedEnum", BACKED_ENUM_STUB);
+
+    let mut func_stubs: HashMap<&'static str, &'static str> = HashMap::new();
+    func_stubs.insert("array_reduce", ARRAY_FUNC_STUB);
+    func_stubs.insert("array_sum", ARRAY_FUNC_STUB);
+    func_stubs.insert("array_product", ARRAY_FUNC_STUB);
+
+    Backend::new_test_with_all_stubs(class_stubs, func_stubs, HashMap::new())
 }
 
 // ─── Fixture parsing ────────────────────────────────────────────────────────

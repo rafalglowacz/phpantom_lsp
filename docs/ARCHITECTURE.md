@@ -482,6 +482,26 @@ User-defined functions in `global_functions` always take precedence over stubs b
 
 Deduplication uses the map key (FQN), so two functions with the same short name in different namespaces both appear as separate completion items.
 
+### Stub Patches
+
+The embedded phpstorm-stubs sometimes lack `@template` annotations or have overly broad return types (e.g. `mixed`) for functions whose return type actually depends on an argument. PHPStan solves this with dynamic return type extensions written in PHP; PHPantom solves it by patching the parsed `FunctionInfo` or `ClassInfo` at load time.
+
+#### Function patches
+
+`stub_patches.rs` provides `apply_function_stub_patches(func)`, called from `find_or_load_function` in Phase 2 after parsing each function from stub source and before caching it in `global_functions`. The function dispatches to per-function patch functions based on the function name. Only functions with known deficiencies are patched; all others pass through unchanged.
+
+Current patches:
+
+1. **`array_reduce`** — phpstorm-stubs declare `mixed` return type. The actual return type is the type of the initial value (3rd argument). The patch adds `@template TReturn` bound to `$initial` and sets the return type to `TReturn`, matching PHPStan's `stubs/arrayFunctions.stub`.
+
+This is analogous to the [Laravel Class Patches](#laravel-class-patches) system but for built-in PHP functions rather than framework classes. When phpstorm-stubs gains proper annotations for a patched function, the corresponding patch can be deleted.
+
+**When to add a patch here vs. hardcoded logic in `rhs_resolution.rs`:** if the correct behaviour can be expressed with `@template` / `@return` annotations (i.e. PHPStan's own stubs already have the fix), it belongs in `stub_patches.rs`. If the behaviour requires inspecting call-site argument *values* at resolution time (e.g. `array_map`'s callback return type, or `array_filter` preserving the input array's element type), it must stay as hardcoded logic in `rhs_resolution.rs` / `raw_type_inference.rs`. Those functions are tracked in `ARRAY_PRESERVING_FUNCS` and `ARRAY_ELEMENT_FUNCS` in `completion/variable/mod.rs`, with the full inventory in `docs/todo/completion.md` C1.
+
+#### Class patches
+
+Class stub patches work the same way but are applied by `apply_class_stub_patches(class)` in `parse_and_cache_content_versioned` for URIs starting with `phpantom-stub://` or `phpantom-stub-fn://`. Current class patches add `@template` parameters and `@implements` generics to SPL collection classes (`ArrayIterator`, `ArrayObject`, `SplDoublyLinkedList`, `SplQueue`, `SplStack`, `SplPriorityQueue`, `SplFixedArray`, `SplObjectStorage`, `WeakMap`) that are missing them in phpstorm-stubs. These patches enable generic type substitution through the interface chain (e.g. `ArrayIterator<int, Rule>::current()` resolves to `Rule` via `Iterator::current()` returning `TValue`).
+
 ### Runtime Lookup — Constants
 
 The `stub_constant_index` (`HashMap<&'static str, &'static str>`) is built at construction time from `STUB_CONSTANT_MAP`, mapping constant names like `PHP_EOL`, `PHP_INT_MAX`, `SORT_ASC` to their stub file source. It is consulted by the constant-value loader (`Backend::constant_loader`) during variable type resolution: when a variable is assigned from a global constant (e.g. `$eol = PHP_EOL`), the loader extracts the constant's initializer value from the stub source and the type is inferred from the literal (`string`, `int`, `float`, `bool`, `null`, or `array`). The same lookup chain also serves hover, completion of standalone constant names, and go-to-definition.
@@ -1050,6 +1070,13 @@ Diagnostics run in three independent background `tokio::spawn` tasks so they nev
 Each worker is created during `initialized` via `clone_for_diagnostic_worker`, which builds a shallow clone of the `Backend`. All `Arc`-wrapped fields (maps, caches, the notify/pending slots) are shared by `Arc::clone`, so every worker sees all mutations the main `Backend` makes. The PHPStan and PHPCS workers each have their own notify handle, pending-URI slot, and diagnostic cache so they run independently of each other and of the native diagnostic worker.
 
 Non-`Arc` fields are snapshotted at spawn time: `php_version`, `vendor_uri_prefixes`, `vendor_dir_paths`, and `config`. These fields are only written during `initialized` (before the workers are spawned) and never change afterwards. If a future feature adds hot-reloading of `.phpantom.toml` or runtime PHP version changes, the workers would need to be notified or re-cloned. This invariant ("init-time fields are write-once") should be verified before adding any post-init mutation to these fields.
+
+## Forward Walker
+
+The forward walker (`src/completion/variable/forward_walk.rs`) walks
+method bodies top-to-bottom, building a scope of variable types at
+each statement boundary. It is shared by diagnostics, completion,
+hover, go-to-definition, and signature help.
 
 ## Name Resolution
 

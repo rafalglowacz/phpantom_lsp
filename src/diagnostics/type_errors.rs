@@ -117,6 +117,7 @@ fn is_type_compatible(
     if matches!(arg_type, PhpType::Raw(_)) || matches!(param_type, PhpType::Raw(_)) {
         return true;
     }
+
     // Skip anonymous class arguments.  Anonymous classes are stored
     // with synthetic names (`__anonymous@<offset>`) that are not
     // indexed globally, so the class loader cannot resolve their
@@ -268,10 +269,7 @@ fn is_type_compatible(
                 let merged = crate::inheritance::resolve_class_with_inheritance(&cls, class_loader);
                 let implements_stringable =
                     crate::util::is_subtype_of(&cls, "Stringable", class_loader);
-                let has_to_string = merged
-                    .methods
-                    .iter()
-                    .any(|m| m.name.eq_ignore_ascii_case("__toString"));
+                let has_to_string = merged.get_method_ci("__toString").is_some();
                 if implements_stringable || has_to_string {
                     return true;
                 }
@@ -1395,6 +1393,7 @@ impl Backend {
                     let meta_guard = self.phpstorm_meta.read();
                     let var_ctx = VarResolutionCtx {
                         var_name: "",
+                        top_level_scope: None,
                         current_class: current_class_info,
                         all_classes: &file_ctx.classes,
                         content,
@@ -1406,6 +1405,7 @@ impl Backend {
                         branch_aware: true,
                         phpstorm_meta: Some(&meta_guard),
                         match_arm_narrowing: HashMap::new(),
+                        scope_var_resolver: None,
                     };
 
                     let mut resolved_args = Vec::with_capacity(exprs.len());
@@ -1438,7 +1438,7 @@ impl Backend {
                                 return name.to_string();
                             }
                             if let Some(cls) = class_loader(name) {
-                                cls.fqn()
+                                cls.fqn().to_string()
                             } else {
                                 name.to_string()
                             }

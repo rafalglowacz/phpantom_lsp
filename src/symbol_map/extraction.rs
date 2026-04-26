@@ -15,7 +15,7 @@ use super::docblock::{
 };
 use super::{
     CallSite, ClassRefContext, SelfStaticParentKind, SymbolKind, SymbolMap, SymbolSpan,
-    TemplateParamDef, VarDefKind, VarDefSite,
+    TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite,
 };
 use crate::util::strip_fqn_prefix;
 
@@ -63,6 +63,9 @@ struct ExtractionCtx<'a> {
     trivias: &'a [Trivia<'a>],
     /// The full source text of the file being extracted.
     content: &'a str,
+    /// Closures and arrow functions passed as arguments to callable-typed
+    /// parameters, used by inlay hints.
+    untyped_closure_sites: Vec<UntypedClosureSite>,
 }
 
 // ─── AST extraction ─────────────────────────────────────────────────────────
@@ -86,6 +89,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
         switch_scopes: Vec::new(),
         trivias: program.trivia.as_slice(),
         content,
+        untyped_closure_sites: Vec::new(),
     };
 
     for stmt in program.statements.iter() {
@@ -149,6 +153,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
         breakable_scopes: ctx.breakable_scopes,
         loop_scopes: ctx.loop_scopes,
         switch_scopes: ctx.switch_scopes,
+        untyped_closure_sites: ctx.untyped_closure_sites,
     }
 }
 
@@ -161,6 +166,17 @@ fn extract_from_statement<'a>(
 ) {
     match stmt {
         Statement::Namespace(ns) => {
+            // Emit a span for the namespace name itself so rename can target it.
+            if let Some(ref ident) = ns.name {
+                let name = ident.value().to_string();
+                if !name.is_empty() {
+                    ctx.spans.push(SymbolSpan {
+                        start: ident.span().start.offset,
+                        end: ident.span().end.offset,
+                        kind: SymbolKind::NamespaceDeclaration { name },
+                    });
+                }
+            }
             for inner in ns.statements().iter() {
                 extract_from_statement(inner, ctx, scope_start);
             }
@@ -748,7 +764,12 @@ fn extract_from_attribute_lists<'a>(
                 extract_from_arguments(&arg_list.arguments, ctx, scope_start);
                 let class_name = raw.trim_start_matches('\\');
                 if !class_name.is_empty() {
-                    emit_call_site(format!("new {}", class_name), arg_list, &mut ctx.call_sites);
+                    emit_call_site(
+                        format!("new {}", class_name),
+                        arg_list,
+                        &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
+                    );
                 }
             }
         }
@@ -1548,7 +1569,12 @@ fn extract_from_expression<'a>(
                 // Emit call site for constructor: `new ClassName(...)`
                 let class_text = expr_to_subject_text(inst.class);
                 if !class_text.is_empty() {
-                    emit_call_site(format!("new {}", class_text), args, &mut ctx.call_sites);
+                    emit_call_site(
+                        format!("new {}", class_text),
+                        args,
+                        &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
+                    );
                 }
                 extract_from_arguments(&args.arguments, ctx, scope_start);
             }
@@ -1577,7 +1603,12 @@ fn extract_from_expression<'a>(
                 // Emit call site for function call
                 let func_text = expr_to_subject_text(func_call.function);
                 if !func_text.is_empty() {
-                    emit_call_site(func_text, &func_call.argument_list, &mut ctx.call_sites);
+                    emit_call_site(
+                        func_text,
+                        &func_call.argument_list,
+                        &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
+                    );
                 }
                 extract_from_arguments(&func_call.argument_list.arguments, ctx, scope_start);
             }
@@ -1592,6 +1623,7 @@ fn extract_from_expression<'a>(
                         format!("{}->{}", &subject_text, &member_name),
                         &method_call.argument_list,
                         &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
                     );
                     ctx.spans.push(SymbolSpan {
                         start: ident.span.start.offset,
@@ -1620,6 +1652,7 @@ fn extract_from_expression<'a>(
                         format!("{}->{}", &subject_text, &member_name),
                         &method_call.argument_list,
                         &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
                     );
                     ctx.spans.push(SymbolSpan {
                         start: ident.span.start.offset,
@@ -1646,6 +1679,7 @@ fn extract_from_expression<'a>(
                         format!("{}::{}", &subject_text, &member_name),
                         &static_call.argument_list,
                         &mut ctx.call_sites,
+                        &mut ctx.untyped_closure_sites,
                     );
                     ctx.spans.push(SymbolSpan {
                         start: ident.span.start.offset,
@@ -2359,6 +2393,7 @@ fn emit_call_site(
     call_expression: String,
     argument_list: &ArgumentList<'_>,
     call_sites: &mut Vec<CallSite>,
+    untyped_closure_sites: &mut Vec<UntypedClosureSite>,
 ) {
     if call_expression.is_empty() {
         return;
@@ -2412,6 +2447,16 @@ fn emit_call_site(
         .iter()
         .any(|arg| matches!(arg, Argument::Positional(pos) if pos.ellipsis.is_some()));
 
+    // Check arguments for closures/arrows with untyped parameters or
+    // missing return types.
+    for (arg_idx, arg) in argument_list.arguments.iter().enumerate() {
+        let expr = match arg {
+            Argument::Positional(pos) => pos.value,
+            Argument::Named(named) => named.value,
+        };
+        collect_untyped_closure_site(expr, &call_expression, arg_idx, untyped_closure_sites);
+    }
+
     call_sites.push(CallSite {
         args_start,
         args_end,
@@ -2423,6 +2468,54 @@ fn emit_call_site(
         named_arg_indices,
         named_arg_names,
         spread_arg_indices,
+    });
+}
+
+/// If `expr` is a closure or arrow function, collect an [`UntypedClosureSite`]
+/// with its untyped parameters and (optionally) its close-paren offset for a
+/// return type hint.
+fn collect_untyped_closure_site(
+    expr: &Expression<'_>,
+    parent_call_expression: &str,
+    arg_index: usize,
+    out: &mut Vec<UntypedClosureSite>,
+) {
+    let (params, close_paren_offset, has_return_type) = match expr {
+        Expression::Closure(c) => (
+            &c.parameter_list.parameters,
+            c.parameter_list.span().end.offset,
+            c.return_type_hint.is_some(),
+        ),
+        Expression::ArrowFunction(a) => (
+            &a.parameter_list.parameters,
+            a.parameter_list.span().end.offset,
+            a.return_type_hint.is_some(),
+        ),
+        _ => return,
+    };
+
+    let mut untyped_params = Vec::new();
+    for (param_idx, param) in params.iter().enumerate() {
+        if param.hint.is_none() {
+            untyped_params.push((param_idx, param.variable.span.start.offset));
+        }
+    }
+
+    // Only emit a site if there is something for inlay hints to show:
+    // untyped parameters or a missing return type.
+    if untyped_params.is_empty() && has_return_type {
+        return;
+    }
+
+    out.push(UntypedClosureSite {
+        parent_call_expression: parent_call_expression.to_string(),
+        arg_index_in_parent: arg_index,
+        close_paren_offset: if has_return_type {
+            None
+        } else {
+            Some(close_paren_offset)
+        },
+        untyped_params,
     });
 }
 

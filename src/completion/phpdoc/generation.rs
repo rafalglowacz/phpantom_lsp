@@ -1177,7 +1177,7 @@ pub(crate) fn enrichment_plain_typed(
         let args: Vec<PhpType> = cls
             .template_params
             .iter()
-            .map(|s| PhpType::Named(s.clone()))
+            .map(|s| PhpType::Named(s.to_string()))
             .collect();
         return Some(PhpType::Generic(name.to_string(), args));
     }
@@ -1909,6 +1909,7 @@ fn build_throws_import_edits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atom::atom;
 
     /// Dummy class loader that returns `None` for all lookups.
     fn no_classes(_name: &str) -> Option<Arc<ClassInfo>> {
@@ -2359,7 +2360,7 @@ mod tests {
         let loader = |name: &str| -> Option<Arc<ClassInfo>> {
             if name == "User" {
                 Some(Arc::new(ClassInfo {
-                    name: "User".to_string(),
+                    name: crate::atom::atom("User"),
                     ..Default::default()
                 }))
             } else {
@@ -2377,8 +2378,8 @@ mod tests {
         let loader = |name: &str| -> Option<Arc<ClassInfo>> {
             if name == "Collection" {
                 Some(Arc::new(ClassInfo {
-                    name: "Collection".to_string(),
-                    template_params: vec!["TKey".to_string(), "TValue".to_string()],
+                    name: crate::atom::atom("Collection"),
+                    template_params: vec![atom("TKey"), atom("TValue")],
                     ..Default::default()
                 }))
             } else {
@@ -2491,7 +2492,7 @@ mod tests {
         let loader = |name: &str| -> Option<Arc<ClassInfo>> {
             if name == "User" {
                 Some(Arc::new(ClassInfo {
-                    name: "User".to_string(),
+                    name: crate::atom::atom("User"),
                     ..Default::default()
                 }))
             } else {
@@ -2712,8 +2713,8 @@ mod tests {
         let loader = |name: &str| -> Option<Arc<ClassInfo>> {
             if name == "Factory" {
                 Some(Arc::new(ClassInfo {
-                    name: "Factory".to_string(),
-                    template_params: vec!["TModel".to_string()],
+                    name: crate::atom::atom("Factory"),
+                    template_params: vec![atom("TModel")],
                     ..Default::default()
                 }))
             } else {
@@ -2749,8 +2750,8 @@ mod tests {
         let loader = |name: &str| -> Option<Arc<ClassInfo>> {
             if name == "Comparable" {
                 Some(Arc::new(ClassInfo {
-                    name: "Comparable".to_string(),
-                    template_params: vec!["T".to_string()],
+                    name: crate::atom::atom("Comparable"),
+                    template_params: vec![atom("T")],
                     ..Default::default()
                 }))
             } else {
@@ -2855,7 +2856,7 @@ mod tests {
         // still line up even though the raw snippet lengths differ.
         use std::sync::Arc;
         let cls = Arc::new(ClassInfo {
-            template_params: vec!["TKey".to_string(), "TValue".to_string()],
+            template_params: vec![atom("TKey"), atom("TValue")],
             ..Default::default()
         });
         let loader = |name: &str| -> Option<Arc<ClassInfo>> {

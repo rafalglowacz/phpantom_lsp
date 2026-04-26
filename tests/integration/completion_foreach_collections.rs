@@ -683,3 +683,74 @@ async fn test_foreach_collection_from_static_method() {
         labels
     );
 }
+
+/// Simpler case: foreach over `$this->items` where items is `list<Item>`.
+#[tokio::test]
+async fn test_foreach_this_property_generic_list() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///foreach_this_prop.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Item {\n",
+        "    public string $label;\n",
+        "}\n",
+        "class Container {\n",
+        "    /** @var list<Item> */\n",
+        "    private array $items = [];\n",
+        "    public function run(): void {\n",
+        "        foreach ($this->items as $item) {\n",
+        "            $item->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 9, 19).await;
+    let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+
+    assert!(
+        labels.iter().any(|l| l.starts_with("label")),
+        "Should include 'label' from Item when iterating $this->items. Got: {:?}",
+        labels
+    );
+}
+
+// ─── Foreach over nested generic array property accessed by key ─────────────
+
+/// When a property is typed as `array<string, list<Rule>>` and iterated via
+/// `foreach ($this->rules[$key] as $rule)`, `$rule` should resolve to `Rule`.
+#[tokio::test]
+async fn test_foreach_nested_generic_array_property_access() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///foreach_nested_generic.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Rule {\n",
+        "    public string $name;\n",
+        "    public function apply(): void {}\n",
+        "}\n",
+        "class RuleSet {\n",
+        "    /** @var array<string, list<Rule>> */\n",
+        "    private array $rules = [];\n",
+        "    public function applyRules(string $className): void {\n",
+        "        foreach ($this->rules[$className] as $rule) {\n",
+        "            $rule->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 10, 19).await;
+    let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+
+    assert!(
+        labels.iter().any(|l| l.starts_with("name")),
+        "Should include 'name' from Rule when iterating nested generic array access. Got: {:?}",
+        labels
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("apply")),
+        "Should include 'apply' from Rule when iterating nested generic array access. Got: {:?}",
+        labels
+    );
+}
